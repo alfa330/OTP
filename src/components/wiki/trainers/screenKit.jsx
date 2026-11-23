@@ -58,11 +58,17 @@ export const IntroScreen = ({ scenario, tap, target }) => (
         {/* У тренажёра со способами вместо начала урока — выбор способа: та же
             кнопка в статье ведёт к обоим путям, и человек сам решает, какой
             проходить. Без способов — первые шаги и «Начать урок». */}
+        {/* Курс из блоков показывает блоки, а не первые пункты: человек должен
+            видеть, из чего состоит обучение целиком. */}
         {!scenario.variants && (
             <div className="wt-intro__flow">
-                {(scenario.checklist || []).slice(0, 4).map((item, index) => (
-                    <span key={`${index}-${item}`}>{index + 1}. {item}</span>
-                ))}
+                {scenario.blocks
+                    ? scenario.blocks.map((block, index) => (
+                        <span key={block.title}>Блок {index + 1}. {block.title}</span>
+                    ))
+                    : (scenario.checklist || []).slice(0, 4).map((item, index) => (
+                        <span key={`${index}-${item}`}>{index + 1}. {item}</span>
+                    ))}
             </div>
         )}
         {/* Оговорка про учебные данные у сценариев разная: в подписании это ФИО,
@@ -84,12 +90,36 @@ export const IntroScreen = ({ scenario, tap, target }) => (
                 ))}
             </div>
         ) : (
-            <Tap id="begin" target={target} tap={tap} className="wt-primary">Начать урок</Tap>
+            <Tap id="begin" target={target} tap={tap} className="wt-primary">{scenario.beginLabel || 'Начать урок'}</Tap>
         )}
     </div>
 );
 
-export const ResultScreen = ({ scenario, world, onRestart }) => (
+/* Итог аттестации: сколько ситуаций решено и в чём ошибка каждой нерешённой —
+   разбор, ради которого аттестацию и проходят. */
+const ExamResult = ({ scenario, world, onRestart }) => {
+    const summary = scenario.examSummary(world);
+    return (
+        <div className="wt-screen wt-result">
+            <h2>Верно {summary.correct} из {summary.total}</h2>
+            <p>{scenario.resultNote} Разбор по ситуациям:</p>
+            <ol className="wt-result__recap wt-result__exam">
+                {summary.items.map((item) => (
+                    <li key={item.key} className={item.ok ? 'is-ok' : 'is-fail'}>
+                        <b>{item.ok ? '✓' : '✗'} {item.title}</b>
+                        {!item.answered ? <span>Ответа нет.</span> : null}
+                        {item.problems.map((problem) => <span key={problem}>{problem}</span>)}
+                    </li>
+                ))}
+            </ol>
+            <button type="button" className="wt-primary" onClick={onRestart}>Пройти ещё раз</button>
+        </div>
+    );
+};
+
+export const ResultScreen = ({ scenario, world, onRestart }) => (scenario.examSummary
+    ? <ExamResult scenario={scenario} world={world} onRestart={onRestart} />
+    : (
     <div className="wt-screen wt-result">
         <div className="wt-result__check" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor"
@@ -105,12 +135,16 @@ export const ResultScreen = ({ scenario, world, onRestart }) => (
         <p>{scenario.resultNote || 'Задание выполнено.'} Коротко повторим путь:</p>
         <ol className="wt-result__recap">
             {/* Ключ по индексу: в чек-листе есть повторяющиеся пункты —
-                «Нажать „Подписать“» встречается дважды (в приложении и в eGov). */}
-            {checklistFor(scenario, world).map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}
+                «Нажать „Подписать“» встречается дважды (в приложении и в eGov).
+                У курса из блоков — сами блоки: пересказывать два десятка
+                пунктов на финальной карточке незачем. */}
+            {scenario.blocks
+                ? scenario.blocks.map((block) => <li key={block.title}>{block.title}: {block.recap}</li>)
+                : checklistFor(scenario, world).map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}
         </ol>
         <button type="button" className="wt-primary" onClick={onRestart}>Пройти ещё раз</button>
     </div>
-);
+    ));
 
 /** Строка «поле — значение» в карточках кабинета и eGov. */
 export const Row = ({ label, children }) => (

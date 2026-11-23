@@ -57,7 +57,10 @@ const playThrough = (scenario, { random, variant } = {}) => {
    там кадр зависит от того, где стоит человек и что у машины открыто, поэтому
    его проход живёт в wiki_trainer_photocontrol.test.mjs, где есть чем эти
    условия задать. */
-const TAPPABLE = TRAINERS.filter((scenario) => scenario.stage !== 'world');
+/* Курс рабочего места (blocks) и аттестация (exam) — тоже исключения: их шаги
+   проверяют, ЧТО человек ввёл и выбрал в учебной CRM, и одних нажатий там
+   мало. Их целиком проходят действиями страниц CRM в wiki_trainer_crm.test.mjs. */
+const TAPPABLE = TRAINERS.filter((scenario) => scenario.stage !== 'world' && !scenario.blocks && scenario.mode !== 'exam');
 
 test('тренажёры проходятся правильными нажатиями до конца', () => {
     assert.ok(TAPPABLE.length >= 2, 'проходимых нажатиями сценариев стало меньше двух — проверь фильтр');

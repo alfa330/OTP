@@ -9,12 +9,12 @@ import SnowLeopard from './SnowLeopard';
 import useTrainerRun from './useTrainerRun';
 import { StatusIcons, StatusTime } from './PhoneChrome';
 import {
-    browse, checklistFor, currentStep, expectedTap, isFinished, progressPercent, restart, speech,
-    stageCount, stagesOf, startRun, stepGoal, takeHint, tap, toggle,
+    blockOfStage, browse, checklistFor, currentBlock, currentStep, expectedTap, isFinished,
+    progressPercent, restart, restartBlock, speech, stageCount, stagesOf, startRun, stepGoal, takeHint,
+    tap, toggle, uiAction, uiMisses,
 } from './runner';
 import { callNext, emptyCall, syncReady, talkMs } from './callMachine';
 import { EVENT_TITLES, createEventLog } from './trainerEvents';
-import { applyEdit } from './caseData';
 import { SCREENS } from './screenMap';
 import './trainer.css';
 
@@ -264,8 +264,15 @@ export function TrainerPlayer({
     });
 
     const step = currentStep(run);
-    const target = expectedTap(run);
+    /* Практика по ТЗ курса: человек сам ищет, где это делается, поэтому цель
+       не подсвечена, пока он не спросил помощника (step.hideTarget). Движок
+       при этом ждёт то же действие — прячется только подсветка. */
+    const target = step.hideTarget && run.hintedIndex !== run.index ? null : expectedTap(run);
     const finished = isFinished(run);
+    /* Курс из блоков (scenario.blocks): прогресс показываем по блокам, а не
+       общим списком из двух десятков пунктов. */
+    const blocks = scenario.blocks || null;
+    const blockNow = blocks ? currentBlock(run) : -1;
     /* «Шаг N из M» и чек-лист — по способу, которым идёт попытка: у подписи
        «Через ЭЦП» пунктов меньше, чем «Через eGov». В учёт прохождений уходит
        stages — по всему сценарию, оно постоянно (см. runner.stageCount). */
@@ -277,7 +284,14 @@ export function TrainerPlayer({
     const choosing = !!scenario.variants && !run.world.variant;
     const said = speech(run);
     const percent = progressPercent(run);
-    const mood = finished ? 'success' : (MOOD[said.tone] || 'speak');
+    /* Аттестация: итог — вердикт по ситуациям. Радоваться провалу барсу
+       незачем, и список ситуаций показывает «верно / ошибка», а не «пройдено». */
+    const exam = scenario.examSummary && finished ? scenario.examSummary(run.world) : null;
+    const examVerdict = (index) => {
+        const item = exam ? exam.items[index] : null;
+        return item ? (item.ok ? 'is-done' : 'is-fail') : null;
+    };
+    const mood = finished ? (exam && exam.correct < exam.total ? 'speak' : 'success') : (MOOD[said.tone] || 'speak');
     const goal = stepGoal(run);
 
     /* Функциональные обновления, а не tap(run, …): между нажатием и отрисовкой
@@ -286,6 +300,17 @@ export function TrainerPlayer({
     const doTap = useCallback((id, payload) => {
         setRun((prev) => tap(prev, id, payload).run);
     }, []);
+    /* Мягкое нажатие: набор в поле, выбор в списке. Двигает урок, только если
+       это ожидаемое действие и его проверка прошла, — иначе ничего. */
+    const doSoftTap = useCallback((id, payload) => {
+        setRun((prev) => tap(prev, id, payload, { soft: true }).run);
+    }, []);
+
+    /* Действие в учебной CRM: кнопка — ход урока, поле и вкладка — без
+       штрафа, выбор из списка — с объяснением, если выбрали не то (см.
+       runner.uiAction). Функциональное обновление — по той же причине, что
+       у doTap: набор в поле идёт быстрее перерисовки. */
+    const doUi = useCallback((action) => setRun((prev) => uiAction(prev, action)), []);
 
     const doToggle = useCallback((key) => setRun((prev) => toggle(prev, key)), []);
     /* Свободное перемещение по учебной среде: вкладка браузера, раздел соседнего
@@ -306,21 +331,6 @@ export function TrainerPlayer({
         if (added && devMode) setLogTick((n) => n + 1);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [devMode]);
-
-    /* ── Действия, меняющие данные ────────────────────────────────────────
-       Половина ошибок новичка — не «не нашёл», а «полез менять то, что менять
-       нельзя». Поэтому такие кнопки в среде есть, но правят они ТОЛЬКО копию
-       слепка внутри попытки и всегда оставляют след в ленте. Наружу как данные
-       не уходят никогда. */
-    const doAct = useCallback((what, args = {}) => {
-        doEmit('ui.action', { what, args });
-        setRun((prev) => browse(prev, {
-            // Правка ложится на КОПИЮ слепка: экран сразу показывает новый
-            // баланс, а исходное дело остаётся нетронутым.
-            case: applyEdit(prev.world.case, what, args),
-            edits: [...(prev.world.edits || []), { what, args }],
-        }));
-    }, [doEmit]);
 
     /* ── Звонок ───────────────────────────────────────────────────────────
        Автомат живёт в callMachine (чистый и покрыт тестами), здесь только
@@ -356,16 +366,15 @@ export function TrainerPlayer({
         if (onCall) onCall(type, payload);
     }, [applyCall, onCall]);
 
-    /* Линия гаснет и загорается вслед за Okapp: не вошёл в call-центр —
-       звонков нет, поставил перерыв — звонков нет. Надпись об этом на экране
-       клиента была и раньше; теперь это правда. */
+    /* Линия: звонки приходят только тому, кто на линии (world.onLine). В
+       режиме звонка стажёр на линии с начала смены — рабочее место одна CRM. */
     useEffect(() => {
         if (!callMode) return;
         setRun((prev) => {
             const next = syncReady(prev.world.call || emptyCall(), prev.world);
             return next === prev.world.call ? prev : browse(prev, { call: next });
         });
-    }, [callMode, run.world.oktLogged, run.world.oktIn, run.world.oktStatus]);
+    }, [callMode, run.world.onLine]);
 
     /* Входящий приходит сам через 5–20 секунд после того, как стажёр встал на
        линию. Разброс намеренный: с фиксированной паузой человек начинает ждать
@@ -390,6 +399,9 @@ export function TrainerPlayer({
        объекта заставило бы ту сторону переподписываться на каждый рендер. */
     const runRef = useRef(run);
     runRef.current = run;
+    /* «Будет ли нажатие промахом» — по свежей попытке, в момент нажатия: окно
+       подтверждения CRM («Код») не должно открываться перед объяснением. */
+    const doMisses = useCallback((id) => uiMisses(runRef.current, id), []);
 
     const callApiRef = useRef(null);
     if (!callApiRef.current) {
@@ -454,6 +466,11 @@ export function TrainerPlayer({
         // «Заново» — та же попытка с тем же делом, а не с запасным.
         setRun((prev) => restart(prev, { caseData }));
     }, [runLog, caseData]);
+    /* «Повторить блок» — задание блока заново с его начала (ТЗ: «возможность
+       повторного выполнения заданий»). Это та же попытка: учёт не сбрасывается. */
+    const doRestartBlock = useCallback(() => {
+        setRun((prev) => restartBlock(prev, { caseData }));
+    }, [caseData]);
 
     /* Фокус переезжает на кнопку, которую ждут. Это и подсказка для мыши
        (кнопка подсвечена), и единственный способ пройти тренажёр с клавиатуры:
@@ -633,10 +650,11 @@ export function TrainerPlayer({
                 )}
 
                 {/* Подсказка — часть урока. В свободной среде подсказывать
-                    нечего: правильного следующего действия там нет. */}
-                {noLesson ? null : (
+                    нечего: правильного следующего действия там нет; на
+                    аттестации подсказок не бывает (scenario.noHints). */}
+                {noLesson || scenario.noHints ? null : (
                     <button type="button" className="wt-hint-btn" onClick={doHint} disabled={finished}>
-                        <HelpCircle size={15} /> Подсказка
+                        <HelpCircle size={15} /> {scenario.hintLabel || 'Подсказка'}
                     </button>
                 )}
             </motion.aside>
@@ -697,15 +715,22 @@ export function TrainerPlayer({
                         <div className="wt-desk">
                             <div className="wt-desk__window">
                                 {Screen && (
+                                    /* Ключ постоянный: рабочее место — одно окно на весь
+                                       урок. С ключом шага оно пересоздавалось бы на
+                                       каждом шаге — фрейм CRM перезагружался бы, а
+                                       набранное в полях терялось. */
                                     <Screen
-                                        key={step.key}
+                                        key="desk"
                                         scenario={scenario}
                                         world={run.world}
                                         tap={doTap}
                                         toggle={doToggle}
                                         browse={doBrowse}
+                                        softTap={doSoftTap}
+                                        onUi={doUi}
+                                        misses={doMisses}
+                                        free={!!step.free}
                                         emit={doEmit}
-                                        act={doAct}
                                         onSave={doSave}
                                         target={target}
                                         onRestart={doRestart}
@@ -900,13 +925,49 @@ export function TrainerPlayer({
                                 <i style={{ width: `${percent}%` }} />
                             </div>
                             <span>
-                                {finished ? 'Урок пройден'
+                                {exam ? `Верно ${exam.correct} из ${exam.total}`
+                                    : finished ? 'Урок пройден'
                                     : choosing ? 'Выберите способ'
-                                        : `Шаг ${Math.max(1, step.stage)} из ${shownStages}`}
+                                        : blocks ? `Блок ${blockNow + 1} из ${blocks.length}`
+                                            : `Шаг ${Math.max(1, step.stage)} из ${shownStages}`}
                             </span>
                         </div>
 
-                        {choosing ? (
+                        {blocks ? (
+                            /* Курс: три блока подряд. У пройденного — галочка, у
+                               текущего раскрыты его пункты, будущие свёрнуты. */
+                            <ol className="wt-blocks">
+                                {blocks.map((block, index) => {
+                                    const state = finished || index < blockNow ? 'is-done'
+                                        : (index === blockNow ? 'is-current' : '');
+                                    const first = blocks.slice(0, index)
+                                        .reduce((sum, item) => sum + item.checklist.length, 0);
+                                    return (
+                                        <li key={block.title} className={state}>
+                                            <div className="wt-blocks__head">
+                                                <i aria-hidden="true">{state === 'is-done' ? '✓' : index + 1}</i>
+                                                <b>{block.title}</b>
+                                            </div>
+                                            {state === 'is-current' ? (
+                                                <ol className="wt-steps">
+                                                    {block.checklist.map((item, n) => {
+                                                        const number = first + n + 1;
+                                                        const itemState = step.stage > number ? 'is-done'
+                                                            : (step.stage === number ? 'is-current' : '');
+                                                        return (
+                                                            <li key={`${n}-${item}`} className={itemState}>
+                                                                <i aria-hidden="true">{step.stage > number ? '✓' : n + 1}</i>
+                                                                {item}
+                                                            </li>
+                                                        );
+                                                    })}
+                                                </ol>
+                                            ) : null}
+                                        </li>
+                                    );
+                                })}
+                            </ol>
+                        ) : choosing ? (
                             <div className="wt-steps-choice">
                                 {Object.entries(scenario.variants).map(([key, variant]) => (
                                     <div key={key}>
@@ -926,11 +987,14 @@ export function TrainerPlayer({
                         <ol className="wt-steps">
                             {checklist.map((item, index) => {
                                 const number = index + 1;
-                                const state = finished || step.stage > number ? 'is-done'
-                                    : (step.stage === number ? 'is-current' : '');
+                                const verdict = examVerdict(index);
+                                const state = verdict || (finished || step.stage > number ? 'is-done'
+                                    : (step.stage === number ? 'is-current' : ''));
                                 return (
                                     <li key={`${index}-${item}`} className={state}>
-                                        <i aria-hidden="true">{finished || step.stage > number ? '✓' : number}</i>
+                                        <i aria-hidden="true">
+                                            {verdict === 'is-fail' ? '✗' : (finished || step.stage > number ? '✓' : number)}
+                                        </i>
                                         {item}
                                     </li>
                                 );
@@ -969,6 +1033,11 @@ export function TrainerPlayer({
                                 onClick={() => { applyCall('finish'); doTap('finish_attempt'); }}
                             >
                                 Завершить попытку
+                            </button>
+                        ) : null}
+                        {blocks && !finished && blockOfStage(scenario, step.stage) >= 0 ? (
+                            <button type="button" className="wt-side__btn" onClick={doRestartBlock}>
+                                <RotateCcw size={14} /> Повторить блок
                             </button>
                         ) : null}
                         <button type="button" className="wt-side__btn" onClick={doRestart}>

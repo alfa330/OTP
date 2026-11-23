@@ -20,6 +20,7 @@
  * приезжают отдельным чанком вместе с самим проигрывателем.
  */
 
+import attestation from './scenarioAttestation.js';
 import crmTicket from './scenarioCrmTicket.js';
 import operatorCall from './scenarioOperatorCall.js';
 import photoControl from './scenarioPhotoControl.js';
@@ -29,13 +30,13 @@ import yandexPro from './scenarioYandexPro.js';
 import { activeSteps, stageCount } from './runner.js';
 
 /* Порядок фиксирован и читается по адресату.
-   Первыми — рабочее место САМОГО оператора: сначала свободная среда (осмотреться
-   в трёх системах), следом смена со звонком (то же место, но приходит вызов).
+   Первыми — рабочее место САМОГО оператора: сначала курс (CRM по шагам с
+   помощником), следом аттестация по нему, затем смена со звонком.
    Дальше — приложения ВОДИТЕЛЯ в порядке его дел: сначала выбрать провайдера
    ЭДО (без него подписывать нечего), потом основной способ подписания, потом
    запасной, потом фотоконтроль. Тот же порядок в инструкции — тренажёр не
    должен спорить с текстом рядом. */
-export const TRAINERS = [crmTicket, operatorCall, yandexPro, taxiPro, saparSite, photoControl];
+export const TRAINERS = [crmTicket, attestation, operatorCall, yandexPro, taxiPro, saparSite, photoControl];
 
 const BY_KEY = new Map(TRAINERS.map((scenario) => [scenario.key, scenario]));
 

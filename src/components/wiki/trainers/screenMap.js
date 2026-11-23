@@ -34,6 +34,12 @@ export const SCREENS = {
         desk: DeskScreen,
         result: ResultScreen,
     },
+    /* Аттестация — та же CRM, без подсказок. */
+    'crm-attestation': {
+        intro: IntroScreen,
+        desk: DeskScreen,
+        result: ResultScreen,
+    },
     /* Та же среда, но со звонком: экраны общие, разный только режим. */
     'operator-call': {
         intro: IntroScreen,

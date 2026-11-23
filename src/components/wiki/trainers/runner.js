@@ -192,12 +192,20 @@ const commonTrap = (scenario, id, world) => {
  *   ok:false — не туда, барс объясняет; счётчик ошибок +1;
  *   ok:false + finished — попытка уже завершена, нажимать нечего.
  */
-export const tap = (run, id, payload = {}) => {
+export const tap = (run, id, payload = {}, { soft = false } = {}) => {
     const step = currentStep(run);
     const expected = expectedTap(run);
     const accepted = step.choices
         ? Object.prototype.hasOwnProperty.call(step.choices, id)
         : id === expected;
+
+    /* Мягкое нажатие — набор в поле, выбор в списке, раскрытие вкладки. Оно
+       двигает урок, только если это и есть ожидаемое действие и проверка шага
+       прошла; иначе не считается ни ходом, ни промахом. Без этого каждая буква
+       номера телефона засчитывалась бы ошибкой, пока номер не набран целиком. */
+    if (soft && (!accepted || (step.check && step.check(run.world, payload)))) {
+        return { ok: false, run };
+    }
 
     if (!accepted) {
         const message = trapMessage(step, id, run.world)
@@ -218,9 +226,16 @@ export const tap = (run, id, payload = {}) => {
 
     // Проверка ввода (учебный код eGov). Ошибка ввода — не «не туда нажал»:
     // кнопка правильная, поэтому шаг остаётся, а объяснение другое.
+    //
+    // Шаг аттестации (step.exam) — иначе: попытка одна, как на смене. Ответ
+    // записывается (верно или с причиной ошибки), и экзамен идёт дальше;
+    // разбор ошибок человек видит в конце, а не по ходу.
+    let examProblem = null;
     if (step.check) {
         const problem = step.check(run.world, payload);
-        if (problem) {
+        if (problem && step.exam) {
+            examProblem = problem;
+        } else if (problem) {
             return {
                 ok: false,
                 run: {
@@ -233,13 +248,19 @@ export const tap = (run, id, payload = {}) => {
     }
 
     let world = step.apply ? { ...run.world, ...step.apply(run.world, payload) } : run.world;
+    if (step.exam) {
+        world = {
+            ...world,
+            exam: { ...(world.exam || {}), [step.key]: examProblem ? { ok: false, problem: examProblem } : { ok: true } },
+        };
+    }
     // Развилка: нажатая кнопка выбирает способ, и дальше список шагов уже его.
     // Шаги до развилки общие для всех способов, поэтому номер следующего шага
     // в новом списке — тот же index + 1.
     if (step.choices) world = { ...world, variant: step.choices[id] };
     const steps = activeSteps(run.scenario, world);
     const nextIndex = Math.min(run.index + 1, steps.length - 1);
-    const next = { ...run, index: nextIndex, world };
+    const next = { ...run, index: nextIndex, world, errors: run.errors + (examProblem ? 1 : 0) };
     return {
         ok: true,
         run: { ...next, speech: { text: stepAt(steps, nextIndex).msg, tone: 'idle' } },
@@ -261,14 +282,78 @@ export const toggle = (run, key) => ({
  *
  * Отдельно от toggle, потому что там один флаг, а здесь состояние: «какая
  * вкладка открыта» и «какой экран внутри неё». И отдельно от tap, потому что
- * это НЕ ход: в тренажёре «Обращение в CRM» соседняя вкладка — Диспетчерская,
- * куда оператор идёт СМОТРЕТЬ (например, чью комиссию удержали). Считать такой
- * поход ошибкой значило бы учить не открывать справочник.
+ * это НЕ ход: в рабочем месте оператора это вкладки карточки водителя и
+ * разделы CRM, куда оператор идёт СМОТРЕТЬ (например, чью комиссию удержали).
+ * Считать такой поход ошибкой значило бы учить не открывать справочник.
  */
 export const browse = (run, patch) => ({
     ...run,
     world: { ...run.world, ...patch },
 });
+
+/* ── Действия в учебной системе со своим интерфейсом ─────────────────────
+ * Учебная CRM — не набор экранов «одна кнопка на шаг», а живая система: в ней
+ * печатают, листают вкладки, раскрывают меню. Поэтому у каждого её действия
+ * есть ВИД, и он решает, что считать ходом, а что — нет:
+ *
+ *   act   — кнопка или ссылка. Ожидаемая — ход урока (проверка шага, затем
+ *           изменение экрана); чужая — промах с объяснением ловушки, экран не
+ *           меняется. На шаге-практике (step.free) чужая кнопка без ловушки —
+ *           не промах: человек сам ищет дорогу, и это и есть задание.
+ *   touch — набор в поле, вкладка, раскрытие окна. Экран меняется всегда;
+ *           урок двигается, только если это ожидаемое действие и проверка
+ *           прошла. Каждая буква номера телефона — не ошибка.
+ *   pick  — выбор из списка. Как touch, но неверный выбор там, где его ждут,
+ *           объясняется: «это не та категория — вот почему».
+ *
+ * patch — что действие меняет на экране (мир попытки), payload — что видит
+ * проверка шага. Чистая функция: правила урока проверяются тестами. */
+const acceptedBy = (run, id) => {
+    const expected = expectedTap(run);
+    return Array.isArray(expected) ? expected.includes(id) : id === expected;
+};
+
+const hasTrap = (run, id) => Boolean(
+    trapMessage(currentStep(run), id, run.world) || commonTrap(run.scenario, id, run.world),
+);
+
+/** Будет ли нажатие кнопки промахом — чтобы не показывать перед ним окно
+ *  подтверждения («Код»): сначала объяснение, потом уже окна. */
+export const uiMisses = (run, id) => {
+    if (acceptedBy(run, id)) return false;
+    return !currentStep(run).free || hasTrap(run, id);
+};
+
+export const uiAction = (run, { kind = 'act', id, patch = null, payload = {} }) => {
+    const withPatch = (base) => (patch ? browse(base, patch) : base);
+    const step = currentStep(run);
+    const accepted = acceptedBy(run, id);
+
+    if (kind === 'act') {
+        if (!accepted && step.free && !hasTrap(run, id)) return withPatch(run);
+        const result = tap(run, id, payload);
+        return result.ok ? withPatch(result.run) : result.run;
+    }
+
+    // touch и pick: экран меняется всегда, проверка смотрит уже на новый мир.
+    const next = withPatch(run);
+    if (!accepted) {
+        /* Ловушка ШАГА у мягкого действия — «открыл не ту вкладку»: экран
+           показывает, что открыл, а помощник объясняет, почему не то. Общие
+           ловушки сценария сюда не идут: они про кнопки, а не про поля. */
+        const trap = trapMessage(step, id, run.world);
+        return trap ? { ...next, errors: next.errors + 1, speech: { text: trap, tone: 'error' } } : next;
+    }
+    if (step.check) {
+        const problem = step.check(next.world, payload);
+        if (problem) {
+            return kind === 'pick'
+                ? { ...next, errors: next.errors + 1, speech: { text: problem, tone: 'error' } }
+                : next;
+        }
+    }
+    return tap(next, id, payload).run;
+};
 
 /* Подсказка. Считается — счётчик виден человеку, как в исходных тренажёрах.
    Имя НЕ useHint, хотя по смыслу подошло бы: функция с приставкой use в React
@@ -276,8 +361,67 @@ export const browse = (run, patch) => ({
 export const takeHint = (run) => ({
     ...run,
     hints: run.hints + 1,
+    // На практике цель не подсвечена, пока не спросили помощника (hideTarget).
+    hintedIndex: run.index,
     speech: { text: currentStep(run).hint, tone: 'hint' },
 });
+
+/* ── Блоки курса ─────────────────────────────────────────────────────────
+   Курс «Рабочее место оператора» — три последовательных блока (ТЗ SZOV-8).
+   Блок — это отрезок пунктов инструкции: blocks[i].checklist идут подряд, и
+   номер пункта (stage) у шагов сквозной. Блок вычисляется из stage, поэтому
+   отдельной разметки шагов по блокам не нужно и разойтись ей не с чем. */
+
+/** Номер блока (с нуля) для пункта инструкции; вне блоков (вступление) — -1. */
+export const blockOfStage = (scenario, stage) => {
+    if (!scenario.blocks || !stage) return -1;
+    let last = 0;
+    for (let i = 0; i < scenario.blocks.length; i += 1) {
+        last += scenario.blocks[i].checklist.length;
+        if (stage <= last) return i;
+    }
+    return scenario.blocks.length - 1;
+};
+
+/** Первый пункт блока (сквозной номер). */
+export const firstStageOf = (scenario, block) => scenario.blocks
+    .slice(0, block)
+    .reduce((sum, item) => sum + item.checklist.length, 0) + 1;
+
+/** Блок, в котором идёт попытка; до первого блока — 0, после финала — последний. */
+export const currentBlock = (run) => {
+    const { scenario } = run;
+    if (!scenario.blocks) return -1;
+    if (isFinished(run)) return scenario.blocks.length - 1;
+    const block = blockOfStage(scenario, currentStep(run).stage);
+    return block < 0 ? 0 : block;
+};
+
+/**
+ * Пройти блок заново — «возможность повторного выполнения заданий» из ТЗ.
+ * Мир собирается с нуля и приводится к началу блока (scenario.blockStart):
+ * повтор не должен зависеть от того, что человек натворил в прошлый раз.
+ * Промахи и подсказки остаются — это та же попытка.
+ */
+export const restartBlock = (run, options = {}) => {
+    const { scenario } = run;
+    const block = currentBlock(run);
+    if (block < 0) return restart(run, options);
+    const fresh = startRun(scenario, options);
+    const world = scenario.blockStart
+        ? { ...fresh.world, ...scenario.blockStart(block, fresh.world) }
+        : fresh.world;
+    const steps = activeSteps(scenario, world);
+    const first = firstStageOf(scenario, block);
+    const index = Math.max(0, steps.findIndex((step) => Number(step.stage) >= first));
+    return {
+        ...run,
+        index,
+        world,
+        hintedIndex: undefined,
+        speech: { text: steps[index].msg, tone: 'idle' },
+    };
+};
 
 /** Начать заново. Коды и период пересчитываются — попытка честно новая. */
 export const restart = (run, options) => startRun(run.scenario, options);

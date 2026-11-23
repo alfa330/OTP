@@ -277,6 +277,59 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(book['По людям']['A2'].value, 'Иванов Иван')
         self.assertEqual(book['По статьям']['A2'].value, 'Подписание')
 
+    def test_walkthrough_export_has_no_verdict_columns(self):
+        # У прогулки по инструкции итога нет — и пустых колонок под него тоже.
+        book = self._book(totals={}, runs=[{'status': 'finished', 'name': 'Иванов Иван',
+                                            'result': {'title': 'Курс', 'fields': [['А', 'Б']]}}],
+                          people=[], articles=[])
+        heads = [cell.value for cell in book['Прохождения'][1]]
+        self.assertNotIn('Итог', heads)
+        self.assertNotIn('Ошибки аттестации', heads)
+
+    def test_attestation_export_shows_score_and_misses(self):
+        exam = {'total': 5, 'correct': 3, 'items': [
+            {'key': 'withdraw', 'title': 'Вопрос о выводе денег', 'ok': True, 'answered': True, 'problems': []},
+            {'key': 'code', 'title': 'Не приходит SMS-код', 'ok': False, 'answered': True,
+             'problems': ['Код ушёл не тому водителю.']},
+            {'key': 'frozen', 'title': 'Заморожен счёт', 'ok': False, 'answered': True,
+             'problems': ['Второй тикет вместо присоединения.']},
+            {'key': 'orders', 'title': 'Весь день без заказов', 'ok': False, 'answered': False, 'problems': []},
+        ]}
+        book = self._book(totals={}, people=[], articles=[], runs=[
+            {'status': 'finished', 'name': 'Иванов Иван', 'source': 'phone',
+             'result': {'title': 'Аттестация: верно 3 из 5', 'exam': exam}},
+            {'status': 'finished', 'name': 'Петров Пётр', 'source': 'article',
+             'result': {'title': 'Старая запись CRM', 'correct': False}},
+        ])
+        sheet = book['Прохождения']
+        heads = [cell.value for cell in sheet[1]]
+        # «Итог» — следом за «Результатом», разбор — последней колонкой.
+        self.assertEqual(heads[heads.index('Результат') + 1], 'Итог')
+        self.assertEqual(heads[-1], 'Ошибки аттестации')
+        verdict = heads.index('Итог') + 1
+        misses = len(heads)
+        self.assertEqual(sheet.cell(row=2, column=verdict).value, '3 из 5')
+        self.assertEqual(sheet.cell(row=3, column=verdict).value, 'неверно')
+        text = sheet.cell(row=2, column=misses).value
+        self.assertEqual(text, 'Не приходит SMS-код — Код ушёл не тому водителю.\n'
+                               'Заморожен счёт — Второй тикет вместо присоединения.')
+        # Не дошёл до ситуации — не ошибка в ней.
+        self.assertNotIn('Весь день без заказов', text)
+        self.assertTrue(sheet.cell(row=2, column=misses).alignment.wrap_text)
+        # Источник «phone» подписан так же, как на экране статистики.
+        self.assertEqual(sheet.cell(row=2, column=heads.index('Откуда запустил') + 1).value,
+                         'Из iCORE Phone')
+        # На листе «Контекст» — оговорка, что такое «Итог».
+        notes = ' '.join(str(cell.value or '') for row in book['Контекст'].iter_rows() for cell in row)
+        self.assertIn('Ошибки аттестации', notes)
+
+    def test_verdict_ignores_junk(self):
+        for junk in (None, 'строка', {}, {'exam': 'x'}, {'exam': {'total': True, 'correct': True}},
+                     {'exam': {'total': 0}}, {'correct': 1}):
+            self.assertEqual(trainer_report.result_verdict(junk), '', junk)
+        self.assertEqual(trainer_report.result_verdict({'exam': {'total': 5, 'correct': 9}}), '5 из 5')
+        self.assertEqual(trainer_report.result_misses({'exam': {'items': 'x'}}), '')
+
     def test_filename_is_safe(self):
         name = trainer_report.report_filename('sapar-site-avr',
                                               datetime(2026, 8, 22))
@@ -311,6 +364,53 @@ class RunResultTest(unittest.TestCase):
         # Резать JSON посередине нельзя: получилась бы неразбираемая строка,
         # и колонка стала бы мусорной. Лучше не записать ничего.
         self.assertIsNone(wiki_trainers._result_json({'x': 'я' * 5000}))
+
+    EXAM = {'total': 5, 'correct': 2, 'items': [
+        {'key': 'k%d' % i, 'title': 'Ситуация %d' % i, 'ok': i < 2, 'answered': True,
+         'problems': [] if i < 2 else ['Что не так в ситуации %d — подробно, как на экране разбора.' % i]}
+        for i in range(5)]}
+
+    def _fits(self, raw):
+        self.assertIsNotNone(raw)
+        self.assertLessEqual(len(raw), wiki_trainers._RESULT_LIMIT)
+        return json.loads(raw)
+
+    def test_events_go_first_when_result_is_too_big(self):
+        # Лента действий — подсказка разбору: её выбрасываем первой, а балл,
+        # разбор и строки «что завёл» остаются целиком.
+        value = {'title': 'Аттестация: верно 2 из 5', 'exam': self.EXAM,
+                 'fields': [['Обращение №1', 'Whatsapp · +7 708 000 00 44']],
+                 'events_total': 400, 'events': ['crm.driver_search'] * 300}
+        result = self._fits(wiki_trainers._result_json(value))
+        self.assertNotIn('events', result)
+        self.assertEqual(result['events_total'], 400)
+        self.assertEqual(result['exam'], self.EXAM)
+        self.assertEqual(result['fields'], value['fields'])
+
+    def test_fields_are_cut_from_the_tail_with_a_mark(self):
+        fields = [['Обращение №%d' % i, 'я' * 150] for i in range(1, 41)]
+        value = {'title': 'Аттестация: верно 2 из 5', 'exam': self.EXAM, 'fields': fields,
+                 'events': ['ui.tab'] * 60}
+        result = self._fits(wiki_trainers._result_json(value))
+        self.assertEqual(result['exam'], self.EXAM, 'разбор аттестации урезан')
+        kept, mark = result['fields'][:-1], result['fields'][-1]
+        self.assertGreater(len(kept), 0)
+        self.assertEqual(kept, fields[:len(kept)], 'строки взяты не с начала')
+        self.assertEqual(mark, ['…', 'не поместилось строк: %d' % (len(fields) - len(kept))])
+        # Влезло максимум: ещё одна строка уже не помещается.
+        longer = dict(result, fields=fields[:len(kept) + 1] + [mark])
+        self.assertGreater(len(json.dumps(longer, ensure_ascii=False)), wiki_trainers._RESULT_LIMIT)
+
+    def test_result_without_room_for_fields_keeps_the_score(self):
+        value = {'title': 'Аттестация', 'exam': dict(self.EXAM, note='я' * 3300),
+                 'fields': [['Обращение №1', 'я' * 900]]}
+        result = self._fits(wiki_trainers._result_json(value))
+        self.assertNotIn('fields', result)
+        self.assertEqual(result['exam']['correct'], 2)
+
+    def test_absurd_payload_is_dropped_without_work(self):
+        value = {'title': 'x', 'fields': [['a', 'я' * 100]] * 1000}
+        self.assertIsNone(wiki_trainers._result_json(value))
 
     def test_finish_writes_result_and_keeps_it_on_beacon(self):
         cursor = MagicMock()

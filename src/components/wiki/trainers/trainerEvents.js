@@ -15,8 +15,6 @@
  */
 
 export const EVENT_CODES = [
-    // Okapp
-    'okt.login', 'okt.callcenter_in', 'okt.callcenter_out', 'okt.status',
     // звонок
     'call.incoming', 'call.answer', 'call.reject', 'call.hold', 'call.unhold',
     'call.transfer', 'call.end',
@@ -24,7 +22,8 @@ export const EVENT_CODES = [
     'ui.tab', 'ui.search', 'ui.open_contractor', 'ui.open_tab', 'ui.filter',
     'ui.sort', 'ui.columns', 'ui.open_order', 'ui.action',
     // CRM
-    'crm.save',
+    'crm.save', 'crm.section', 'crm.driver_search', 'crm.driver_open', 'crm.driver_tab',
+    'crm.ya_send', 'crm.ya_reply',
 ];
 
 const KNOWN = new Set(EVENT_CODES);
@@ -100,10 +99,6 @@ export const createEventLog = ({ send = null, now = () => Date.now() } = {}) => 
 
 /** Человеческая расшифровка кода — для отладочной панели и отчёта. */
 export const EVENT_TITLES = {
-    'okt.login': 'вошёл в Okapp',
-    'okt.callcenter_in': 'встал на линию',
-    'okt.callcenter_out': 'ушёл с линии',
-    'okt.status': 'поставил статус',
     'call.incoming': 'входящий звонок',
     'call.answer': 'ответил',
     'call.reject': 'отклонил',
@@ -121,4 +116,10 @@ export const EVENT_TITLES = {
     'ui.open_order': 'открыл заказ',
     'ui.action': 'действие с данными',
     'crm.save': 'сохранил обращение',
+    'crm.section': 'раздел CRM',
+    'crm.driver_search': 'искал учётку в CRM',
+    'crm.driver_open': 'открыл учётку в CRM',
+    'crm.driver_tab': 'вкладка учётки CRM',
+    'crm.ya_send': 'написал в поддержку Яндекса',
+    'crm.ya_reply': 'ответил поддержке Яндекса',
 };

@@ -1,325 +1,196 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React from 'react';
 
-import { TrainMark } from './screenKit';
 import BrowserChrome from './BrowserChrome';
-import FleetApp, { fleetUrl } from './screensFleet';
-import OktellApp, { DIRECTORY, oktellUrl } from './screensOktell';
 import CallPanel from './CallPanel';
-import { PARKS, PARK_CITIES, SOURCES, childrenAt } from './crmCatalog.js';
+import { DIRECTORY } from './callDirectory.js';
+import CrmFrame from './crmFrame';
+import CrmShell from './crmShell';
+import { CRM_STUBS, CRM_VIEWS, crmUrl, emptyForm, groupOfItem, menuTitle } from './crmModel.js';
+import { emptyYaForm } from './crmYandex.js';
+import { noNav } from './crmKit';
+import { RequestCreate, RequestList, RequestShow } from './crmRequests';
+import { AccountCard, AccountSearch } from './crmDrivers';
+import { YaCreate, YaList, YaShow } from './crmYandexAppeals';
 
-/* Экран CRM: тот же интерфейс, в котором оператор заводит обращение на смене.
+/* Учебная CRM — та, в которой оператор работает на смене (снята 20.11.2026).
  *
- * Три вещи скопированы с рабочей CRM намеренно, и менять их «чтобы красивее»
- * нельзя — на них держится узнавание:
- *   тёмно-синий сайдбар #485779 и синий акцент #4273fa (сняты пипеткой);
- *   порядок полей сверху вниз, включая «Город» СРАЗУ под таксопарком;
- *   поля, которых до времени нет: «Город» появляется после выбора парка,
- *   «Категория N+1» — после выбора N.
+ * ОДИН В ОДИН. CRM рисуется настоящими стилями рабочей CRM и её разметкой
+ * (crmFrame.jsx — свой документ во фрейме, чтобы стили CRM и портала не
+ * смешивались). Цвета, отступы, шрифты иконок — её собственные, а не
+ * «похожие»: по ним CRM и узнают, выйдя на смену.
  *
- * Форма СВОБОДНАЯ: подсветки правильного варианта нет, ошибиться нельзя, любую
- * ветку из 387 категорий можно пройти до конца. Дерево настоящее (crmCatalog),
- * потому что учить искать в укороченном списке — учить не тому.
+ * Учебных разделов три — ровно по ТЗ обучения: «Обращения» (создать, найти,
+ * открыть), «Учетные записи водителей» (поиск и карточка) и «Обращения в
+ * Яндекс» (список, новое обращение, переписка). Остальные пункты меню и
+ * кнопки, которые меняют данные водителя, открывают честную заглушку.
+ *
+ * Связь с уроком — объект ui (см. makeUi): страницы зовут ui.act / ui.touch /
+ * ui.pick, а что из этого ход урока, а что просто работа в CRM, решает
+ * движок (runner.uiAction). В режиме «Звонок» и на шагах-практике урок
+ * не мешает: чужое нажатие там не промах.
  */
 
-const CRM_URL = 'backend.yataxi.kz/admin/list-requests/create';
-
-/* Вкладки окна. Все три открыты сразу, как стоит браузер у оператора на смене:
-   открывать их по очереди — не задача урока, а лишний шаг. */
-const TABS = [
-    { id: 'crm', title: 'Обращения - iTaxi', icon: 'crm' },
-    { id: 'fleet', title: 'Диспетчерская', icon: 'fleet' },
-    { id: 'oktell', title: 'Okapp — Oktell', icon: 'oktell' },
-];
-
-const NAV = [
-    ['nav_drivers', 'Водители'],
-    ['nav_tickets_group', 'Тикетная система'],
-    ['nav_requests', 'Обращения'],
-    ['nav_tickets', 'Тикеты'],
-    ['nav_notifications', 'Уведомления'],
-    ['nav_edo', 'ЭДО'],
-    ['nav_news', 'Новостная лента'],
-];
-
-const NavIcon = ({ name }) => {
-    const d = {
-        nav_drivers: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM4 20a8 8 0 0 1 16 0',
-        nav_tickets_group: 'M4 6h16M4 12h16M4 18h16',
-        nav_requests: 'M13 3 4 14h7l-1 7 9-11h-7l1-7Z',
-        nav_tickets: 'M12 3c3 4 5 6.5 5 9a5 5 0 0 1-10 0c0-2.5 2-5 5-9Z',
-        nav_notifications: 'M18 8a6 6 0 1 0-12 0c0 6-2 7-2 7h16s-2-1-2-7M10.5 20a2 2 0 0 0 3 0',
-        nav_edo: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z',
-        nav_news: 'M4 5h11v14H4zM15 9h5v10h-5z',
-    }[name];
-    return (
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-            strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d={d} />
-        </svg>
-    );
+/* Заголовок вкладки браузера — как у рабочей CRM: «Страница - ITaxi». */
+const PAGE_TITLES = {
+    request_new: 'Создать обращение',
+    requests: 'Обращения',
+    request_show: 'Обращение',
+    accounts: 'Учетные записи водителей',
+    account: 'Карточка водителя',
+    ya_list: 'Обращения в Яндекс',
+    ya_new: 'Новое обращение в Яндекс',
+    ya_show: 'Обращение в Яндекс',
 };
 
-const Caret = () => (
-    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
-        strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="m6 9 6 6 6-6" />
-    </svg>
-);
+export const crmTitle = (world) => `${world.crmView === 'stub'
+    ? menuTitle(world.crmStub) : PAGE_TITLES[world.crmView] || 'Создать обращение'} - ITaxi`;
 
-/* Зелёная галочка «поле заполнено» — CRM ставит её справа в поле. Мелкая
-   деталь, но именно по ней оператор на смене видит, что поле принято. */
-const Ok = () => (
-    <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" className="wt-crm__ok">
-        <circle cx="12" cy="12" r="10" fill="#16dd6e" />
-        <path d="m7.5 12.3 3 3 6-6.4" fill="none" stroke="#fff" strokeWidth="2.2"
-            strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-);
-
-const Field = ({ label, children }) => (
-    <div className="wt-crm__row">
-        <span className="wt-crm__label">{label}</span>
-        <div className="wt-crm__control">{children}</div>
-    </div>
-);
-
-/* Выпадающий список. Своя реализация, а не <select>: раскрытый список
-   системного селекта рисует ОС, и внутри учебного окна он выглядел бы чужим.
-   В самой CRM «Категория» тоже нарисована скриптом. */
-const Picker = ({ name, options, value, open, setOpen, onPick, placeholder }) => {
-    const isOpen = open === name;
-    const listRef = useRef(null);
-
-    /* Раскрытый список нужно показать целиком: нижние поля формы стоят у края
-       вкладки, и список из тридцати пунктов уходит за него — человек видит пять
-       строк и решает, что остального нет. */
-    useEffect(() => {
-        if (isOpen && listRef.current) listRef.current.scrollIntoView({ block: 'nearest' });
-    }, [isOpen]);
-
+/** Страница, которой нет в учебной среде: пункт меню или кнопка, меняющая данные. */
+const StubPage = ({ ui }) => {
+    const key = ui.world.crmStub;
+    const title = menuTitle(key) || 'Раздел';
+    const own = CRM_STUBS[key];
     return (
-        <div className={`wt-crm__picker${isOpen ? ' is-open' : ''}`}>
-            <button
-                type="button"
-                className={`wt-crm__box${value ? ' has-value' : ''}`}
-                onClick={() => setOpen(isOpen ? null : name)}
-            >
-                <span className={value ? '' : 'is-placeholder'}>{value || placeholder}</span>
-                {value ? <Ok /> : null}
-                <i className="wt-crm__caret" aria-hidden="true"><Caret /></i>
-            </button>
-            {isOpen && (
-                <ul className="wt-crm__list" role="listbox" ref={listRef}>
-                    {options.map((option) => (
-                        <li key={option}>
-                            <button
-                                type="button"
-                                className={`wt-crm__option${option === value ? ' is-picked' : ''}`}
-                                role="option"
-                                aria-selected={option === value}
-                                onClick={() => { onPick(option); setOpen(null); }}
-                            >
-                                {option}
-                            </button>
-                        </li>
-                    ))}
-                </ul>
-            )}
-        </div>
-    );
-};
-
-/* Поле ввода. Значение держится и локально (чтобы буквы появлялись сразу), и в
-   мире (чтобы дожить до «Сохранить»): мир обновляется на каждый ввод, локальный
-   стейт нужен только против дёрганья курсора. */
-const TextField = ({ value, placeholder, onChange, multiline = false }) => {
-    const [draft, setDraft] = useState(value || '');
-    const Tag = multiline ? 'textarea' : 'input';
-    return (
-        <div className="wt-crm__input-wrap">
-            <Tag
-                className={`wt-crm__input${multiline ? ' wt-crm__input--area' : ''}`}
-                value={draft}
-                placeholder={placeholder}
-                rows={multiline ? 3 : undefined}
-                aria-label={placeholder}
-                onChange={(event) => { setDraft(event.target.value); onChange(event.target.value); }}
-            />
-            {draft ? <Ok /> : null}
-        </div>
-    );
-};
-
-/** Страница CRM «Создать обращение». */
-const CrmPage = ({ world, browse, onSave }) => {
-    const form = world.form;
-    const [open, setOpen] = useState(null);
-
-    const set = (patch) => browse({ form: { ...form, ...patch } });
-
-    /* Выбор категории уровня level обрезает всё, что было выбрано глубже:
-       иначе под новой веткой остались бы пункты из старой. */
-    const pickCat = (level, value) => {
-        const cats = form.cats.slice(0, level);
-        cats[level] = value;
-        set({ cats });
-    };
-
-    // Сколько уровней категорий показывать: всегда на один больше выбранного,
-    // пока у выбранного есть дети — ровно так ведёт себя CRM.
-    const levels = [];
-    for (let i = 0; i <= form.cats.length; i += 1) {
-        const options = childrenAt(form.cats.slice(0, i));
-        if (!options.length) break;
-        levels.push(options);
-    }
-
-    return (
-        <div className="wt-crm">
-            <TrainMark>Учебная CRM</TrainMark>
-
-            <aside className="wt-crm__side">
-                <div className="wt-crm__brand">iTaxi</div>
-                <nav>
-                    {NAV.map(([id, label]) => (
-                        <button key={id} type="button"
-                            className={`wt-crm__nav${id === 'nav_requests' ? ' is-current' : ''}`}
-                            aria-current={id === 'nav_requests' ? 'page' : undefined}>
-                            <NavIcon name={id} />
-                            {label}
-                        </button>
-                    ))}
-                </nav>
-            </aside>
-
-            <main className="wt-crm__main">
-                <div className="wt-crm__crumbs">
-                    Главная <i>/</i> Обращения <i>/</i> <b>Создать обращение</b>
-                </div>
-
-                <section className="wt-crm__card">
-                    <header className="wt-crm__card-head">+ Создать обращение</header>
-
-                    <div className="wt-crm__form">
-                        <Field label="Звонок/Чат">
-                            <Picker name="source" options={SOURCES} value={form.source}
-                                open={open} setOpen={setOpen}
-                                onPick={(v) => set({ source: v })}
-                                placeholder="Выберите источник" />
-                        </Field>
-
-                        <Field label="Номер телефона">
-                            <TextField value={form.phone} placeholder="Номер телефона"
-                                onChange={(v) => set({ phone: v })} />
-                        </Field>
-
-                        <Field label="Номер В/У">
-                            <TextField value={form.license} placeholder="Номер В/У"
-                                onChange={(v) => set({ license: v })} />
-                        </Field>
-
-                        <Field label="ID водителя">
-                            <TextField value={form.account} placeholder="ID водителя"
-                                onChange={(v) => set({ account: v })} />
-                        </Field>
-
-                        <Field label="Дата обращения">
-                            <div className="wt-crm__box has-value"><span>{world.now}</span></div>
-                        </Field>
-
-                        <Field label="Таксопарк">
-                            <Picker name="park" options={PARKS} value={form.park}
-                                open={open} setOpen={setOpen}
-                                onPick={(v) => set({ park: v, city: '' })}
-                                placeholder="Выберите таксопарк" />
-                        </Field>
-
-                        {/* Города нет, пока не выбран парк — так устроена CRM. */}
-                        {form.park ? (
-                            <Field label="Город">
-                                <Picker name="city" options={PARK_CITIES[form.park] || []}
-                                    value={form.city} open={open} setOpen={setOpen}
-                                    onPick={(v) => set({ city: v })}
-                                    placeholder="Выберите город" />
-                            </Field>
-                        ) : null}
-
-                        {levels.map((options, level) => (
-                            <Field key={`cat${level}`} label={`Категория ${level + 1}`}>
-                                <Picker name={`cat${level}`} options={options}
-                                    value={form.cats[level] || ''} open={open} setOpen={setOpen}
-                                    onPick={(v) => pickCat(level, v)}
-                                    placeholder="Выберите категорию" />
-                            </Field>
-                        ))}
-
-                        <Field label="Комментарий">
-                            <TextField value={form.comment} placeholder="Комментарий" multiline
-                                onChange={(v) => set({ comment: v })} />
-                        </Field>
-
-                        <div className="wt-crm__dup">
-                            <button type="button" className="wt-crm__check"
-                                onClick={() => set({ duplicate: !form.duplicate })}
-                                aria-pressed={form.duplicate}>
-                                <i className={form.duplicate ? 'is-on' : ''} aria-hidden="true">
-                                    {form.duplicate ? '✓' : ''}
-                                </i>
-                                Дублировать обращение
-                            </button>
-                        </div>
-
-                        {/* Единственное действие движка на всю среду: оно
-                            заканчивает попытку и отдаёт итог в статистику. */}
-                        <div className="wt-crm__actions">
-                            {/* Сохранение — не ход движка: в режиме смены после
-                                него идёт постобработка, и попытку закрывает
-                                стажёр. Подробности в TrainerPlayer.doSave. */}
-                            <button type="button" className="wt-crm__save" onClick={onSave}>
-                                <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
-                                    stroke="currentColor" strokeWidth="2" strokeLinecap="round"
-                                    strokeLinejoin="round" aria-hidden="true">
-                                    <path d="M12 3v12m0 0-4.5-4.5M12 15l4.5-4.5M4 20h16" />
-                                </svg>
-                                Сохранить
-                            </button>
+        <div className="row">
+            <div className="col">
+                <div className="card">
+                    <nav aria-label="breadcrumb">
+                        <ol className="breadcrumb">
+                            <li className="breadcrumb-item"><a href="#" onClick={(e) => { noNav(e); ui.crumb('home'); }}>Главная</a></li>
+                            <li className="breadcrumb-item active" aria-current="page">{title}</li>
+                        </ol>
+                    </nav>
+                    <div className="card-header"><i className="fa fa-align-justify" /> {title} </div>
+                    <div className="card-body">
+                        <div className="alert alert-secondary py-3 mb-0">
+                            {own ? own[2] : `Раздел «${title}» в учебную среду не входит: здесь учатся обращениям, учётным записям водителей и обращениям в Яндекс.`}
                         </div>
                     </div>
-                </section>
-            </main>
+                </div>
+            </div>
         </div>
     );
 };
 
-/** Экран рабочего места: окно браузера с тремя вкладками и плашкой звонка.
+const PAGES = {
+    request_new: RequestCreate,
+    requests: RequestList,
+    request_show: RequestShow,
+    accounts: AccountSearch,
+    account: AccountCard,
+    ya_list: YaList,
+    ya_new: YaCreate,
+    ya_show: YaShow,
+    stub: StubPage,
+};
+
+/**
+ * Переход на страницу CRM — что меняется в мире. Как у настоящей страницы:
+ * «Создать обращение» и «Новое обращение в Яндекс» открываются чистыми,
+ * поиск учёток — без запроса (история поиска остаётся), а группа меню, в
+ * которой лежит раздел, раскрыта.
+ */
+export const viewPatch = (world, view, extra = {}) => {
+    const patch = { crmView: view, crmMenuQuery: '', drvModal: null };
+    if (view === 'request_new') patch.form = emptyForm(world.case?.crm?.prefill);
+    if (view === 'ya_new') patch.yaForm = emptyYaForm();
+    if (view === 'accounts') { patch.drvQuery = ''; patch.drvSearched = null; }
+    if (view === 'account') {
+        patch.drvTab = 'general';
+        patch.drvOpenedAt = world.drvOpenedAt || world.now.slice(0, 16);
+    }
+    const item = view === 'stub' ? extra.crmStub : CRM_VIEWS[view];
+    const group = item ? groupOfItem(item) : null;
+    if (group && !(world.crmGroups || []).includes(group)) patch.crmGroups = [...(world.crmGroups || []), group];
+    return { ...patch, ...extra };
+};
+
+/**
+ * Связь страниц CRM с уроком.
+ *   set    — состояние самой CRM (поиск раздела, гаснущее уведомление): не действие;
+ *   act    — кнопка или ссылка; touch — поле, вкладка, окно; pick — выбор из списка;
+ *   go     — переход на страницу CRM; menu — пункт меню; crumb — «Главная»;
+ *   save   — «Сохранить» обращения (заодно — событие для статистики);
+ *   t      — класс подсветки цели урока; misses — будет ли нажатие промахом.
+ */
+export const makeUi = ({ world, onUi, browse, emit, target, misses }) => {
+    const targets = Array.isArray(target) ? target : (target ? [target] : []);
+    const send = (kind, id, patch = null, payload = {}) => {
+        if (onUi) onUi({ kind, id, patch, payload });
+        else if (patch && browse) browse(patch);
+    };
+    const ui = {
+        world,
+        emit,
+        set: (patch) => (browse ? browse(patch) : send('touch', '_set', patch)),
+        act: (id, patch, payload) => send('act', id, patch, payload),
+        touch: (id, patch, payload) => send('touch', id, patch, payload),
+        pick: (id, patch, payload) => send('pick', id, patch, payload),
+        go: (view, extra = {}, id = `go_${view}`, payload = {}) => {
+            send('act', id, viewPatch(world, view, extra), { view, ...payload });
+            if (emit) {
+                emit('crm.section', { view });
+                if (view === 'account') emit('crm.driver_open', {});
+            }
+        },
+        menu: (key, view) => {
+            send('act', `nav_${key}`, view ? viewPatch(world, view) : viewPatch(world, 'stub', { crmStub: key }), { view: view || key });
+            if (emit) emit('crm.section', { view: view || key });
+        },
+        crumb: (key) => send('act', `crumb_${key}`, viewPatch(world, 'stub', { crmStub: key })),
+        save: (id, patch) => {
+            if (emit) emit('crm.save', { form: world.form });
+            send('act', id, { ...patch, saved: true }, { form: world.form });
+        },
+        t: (...ids) => (ids.some((id) => targets.includes(id)) ? ' is-target' : ''),
+        misses: (id) => (misses ? misses(id) : false),
+    };
+    return ui;
+};
+
+/** Учебная CRM целиком: оболочка и текущая страница. */
+const CrmApp = ({ ui }) => {
+    const Page = PAGES[ui.world.crmView] || RequestCreate;
+    return (
+        <CrmShell ui={ui}>
+            <Page ui={ui} />
+        </CrmShell>
+    );
+};
+
+/** Экран рабочего места: окно браузера с учебной CRM и плашка звонка.
  *
- * Плашка стоит ПОВЕРХ окна, а не внутри вкладки: во время разговора оператор
- * сидит в Диспетчерской, и кнопки «Удержание» и «Перевод» обязаны ехать за ним.
+ * В окне одна вкладка — CRM: на смене оператор почти всё делает в ней
+ * (владелец, 23.11.2026), и всё, что нужно для ответа водителю, есть в
+ * карточке водителя CRM.
+ *
+ * Плашка звонка стоит ПОВЕРХ окна: во время разговора оператор листает CRM,
+ * и кнопки «Удержание» и «Перевод» обязаны оставаться под рукой.
  */
 export const DeskScreen = ({
-    world, tap, target, browse, emit, act, onSave, onCall, voice, aiSpeaking,
+    world, tap, target, browse, emit, onUi, misses, onCall, voice, aiSpeaking,
     micLevel, micError, onRing, devMode,
 }) => {
-    const tab = world.tab || 'crm';
-    const url = tab === 'fleet' ? fleetUrl(world)
-        : tab === 'oktell' ? oktellUrl(world)
-            : CRM_URL;
+    const tabs = [{ id: 'crm', title: crmTitle(world), icon: 'crm' }];
+    const ui = makeUi({ world, onUi, browse, emit, target, misses });
+    /* Кнопки самого браузера («Назад», «Закрыть вкладку») — тем же путём, что
+       кнопки CRM: на практике и в смене чужое нажатие не промах, а ловушка
+       сценария объясняется везде. */
+    const chromeTap = onUi ? (id) => onUi({ kind: 'act', id }) : tap;
     return (
         <div className="wt-desk__inner">
             <BrowserChrome
-                tap={tap}
+                tap={chromeTap}
                 target={target}
-                tabs={TABS}
-                active={tab}
-                onSwitch={(id) => { emit('ui.tab', { tab: id }); browse({ tab: id }); }}
-                url={url}
+                tabs={tabs}
+                active="crm"
+                onSwitch={() => {}}
+                url={crmUrl(world)}
             >
-                {tab === 'fleet'
-                    ? <FleetApp world={world} go={browse} emit={emit} act={act} /> : null}
-                {tab === 'oktell'
-                    ? <OktellApp world={world} go={browse} emit={emit} /> : null}
-                {tab === 'crm'
-                    ? <CrmPage world={world} browse={browse} onSave={onSave} /> : null}
+                <CrmFrame title="Учебная CRM"
+                    focusKey={target ? `${world.crmView}:${[].concat(target).join(',')}` : ''}>
+                    <CrmApp ui={ui} />
+                </CrmFrame>
             </BrowserChrome>
 
             {onCall ? (

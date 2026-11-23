@@ -47,6 +47,36 @@ STATUSES = ('started', 'finished', 'abandoned')
 # заметно больше, прислано не тренажёром.
 _RESULT_LIMIT = 4000
 
+# Больше этого — точно не тренажёр, и ужимать такое незачем: сразу мимо.
+# Заодно потолок работы на разбор того, что прислал браузер.
+_RESULT_HARD_LIMIT = 64000
+
+
+def _dump(value):
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _fit_fields(result, fields):
+    """Итог с первыми строками «что завёл», сколько влезет, и пометкой,
+    сколько не влезло. None — не влезает и без единой строки."""
+    def build(kept):
+        rest = len(fields) - kept
+        tail = [['…', 'не поместилось строк: %d' % rest]] if rest else []
+        return _dump(dict(result, fields=fields[:kept] + tail))
+
+    # Длина растёт с числом строк, поэтому — двоичный поиск, а не перебор с
+    # хвоста: строк бывает сотня, и сто сериализаций на запрос ни к чему.
+    low, high = 0, len(fields)
+    best = None
+    while low <= high:
+        middle = (low + high) // 2
+        text = build(middle)
+        if len(text) <= _RESULT_LIMIT:
+            best, low = text, middle + 1
+        else:
+            high = middle - 1
+    return best
+
 
 def _result_json(value):
     """Итог попытки в JSON или None.
@@ -54,15 +84,38 @@ def _result_json(value):
     Приходит из браузера, поэтому не доверяем: берём только непустой словарь и
     режем по объёму. Колонка не место для мегабайта — там карточка обращения на
     десяток коротких строк.
+
+    Не влезло — УЖИМАЕМ по ценности, а не выбрасываем целиком: потерять балл
+    аттестации («верно 3 из 5») из-за того, что человек завёл пару лишних
+    обращений, хуже, чем не записать ленту его действий. Порядок:
+      1. лента действий (events) — подсказка разбору, её не жалко первой;
+      2. строки «что завёл» (fields) — с хвоста, с пометкой «не поместилось»;
+      3. без строк вовсе.
+    Заголовок, вердикт (correct) и разбор аттестации (exam) не трогаются: не
+    влезло и без строк — итога нет, как раньше. Резать сам JSON посередине
+    нельзя: вышла бы неразбираемая строка.
     """
     if not isinstance(value, dict) or not value:
         return None
-    text = json.dumps(value, ensure_ascii=False)
-    if len(text) > _RESULT_LIMIT:
-        # Резать JSON посередине нельзя — получится не разбираемая строка.
-        # Лучше не записать итог, чем записать сломанный.
+    text = _dump(value)
+    if len(text) <= _RESULT_LIMIT:
+        return text
+    if len(text) > _RESULT_HARD_LIMIT:
         return None
-    return text
+    result = {key: item for key, item in value.items() if key != 'events'}
+    text = _dump(result)
+    if len(text) <= _RESULT_LIMIT:
+        return text
+    fields = result.get('fields')
+    if isinstance(fields, list) and fields:
+        fitted = _fit_fields(result, fields)
+        if fitted is not None:
+            return fitted
+        result = {key: item for key, item in result.items() if key != 'fields'}
+        text = _dump(result)
+        if len(text) <= _RESULT_LIMIT:
+            return text
+    return None
 
 
 def _clamp(value, low, high, default=0):

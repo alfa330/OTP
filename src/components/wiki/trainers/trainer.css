@@ -621,6 +621,14 @@
     list-style: decimal;
 }
 
+/* Разбор аттестации: верная ситуация — зелёная галочка, ошибка — красным, с
+   причиной ниже. */
+.wt-result__exam li { display: flex; flex-direction: column; gap: 2px; }
+.wt-result__exam li b { font-weight: 600; color: var(--wt-ink); }
+.wt-result__exam li.is-ok b { color: #15803d; }
+.wt-result__exam li.is-fail b { color: #b91c1c; }
+.wt-result__exam li span { line-height: 1.4; }
+
 /* ── Такси.Про ────────────────────────────────────────────────────────────
    По кадрам водителей за 17.10–17.11.2026 (iOS, светлая тема). Палитра снята
    пипеткой: фон #f2f1f6, белые карточки, ЯРКО-жёлтая кнопка #fbdf00 с чёрной
@@ -2864,7 +2872,6 @@
     text-align: center;
 }
 
-
 /* ── Слева: помощник ──────────────────────────────────────────────────────
    Колонка целиком, а не подпись сбоку от телефона. Текст крупнее, чем в
    остальном портале (15.5px против 13): реплика барса — то, ради чего экран
@@ -3090,6 +3097,46 @@
 .wt-steps li.is-current i { color: #fff; background: var(--wt-accent); }
 .wt-steps li.is-done { color: var(--wt-ink-soft); }
 .wt-steps li.is-done i { color: #fff; background: var(--wt-green); }
+/* Ошибка в ситуации аттестации — красный крестик вместо галочки. */
+.wt-steps li.is-fail { color: var(--wt-ink-soft); }
+.wt-steps li.is-fail i { color: #fff; background: #dc2626; }
+
+/* Курс из блоков: блок — строка с номером; у текущего под ней его пункты.
+   Цвета те же, что у шагов: пройденное — зелёный кружок, текущее — акцент. */
+.wt-blocks {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+}
+
+.wt-blocks > li { display: flex; flex-direction: column; gap: 8px; }
+.wt-blocks__head { display: flex; align-items: center; gap: 9px; font-size: 13.5px; color: var(--wt-mute); }
+.wt-blocks__head b { font-weight: 650; }
+
+.wt-blocks__head i {
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    font-size: 11.5px;
+    font-style: normal;
+    font-weight: 700;
+    color: var(--wt-mute);
+    background: var(--wt-line-soft);
+    border-radius: 7px;
+}
+
+.wt-blocks > li.is-current .wt-blocks__head { color: var(--wt-ink); }
+.wt-blocks > li.is-current .wt-blocks__head i { color: #fff; background: var(--wt-accent); }
+.wt-blocks > li.is-done .wt-blocks__head { color: var(--wt-ink-soft); }
+.wt-blocks > li.is-done .wt-blocks__head i { color: #fff; background: var(--wt-green); }
+.wt-blocks .wt-steps { padding-left: 31px; overflow: visible; }
 
 /* До выбора способа — шаги обоих, каждый под своим названием. */
 .wt-steps-choice { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
@@ -3107,11 +3154,14 @@
 
 .wt-counters { font-size: 12.5px; color: var(--wt-mute); font-variant-numeric: tabular-nums; }
 
-.wt-side__buttons { display: flex; gap: 8px; }
+/* Кнопок бывает три («Повторить блок», «Заново», «Закрыть») — в узкой
+   колонке они переносятся на вторую строку, а не уезжают за край. */
+.wt-side__buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .wt-side__btn {
     display: inline-flex;
     flex: 1 1 auto;
+    white-space: nowrap;
     align-items: center;
     justify-content: center;
     gap: 7px;
@@ -3934,7 +3984,7 @@
 .wt-root--desk {
     /* Центру нужна ширина: форма CRM — это подпись слева и поле справа, и в
        колонке под телефон подписи ломались бы на три строки каждая. */
-    grid-template-columns: minmax(0, 0.72fr) minmax(0, 2.7fr) minmax(0, 0.8fr);
+    grid-template-columns: minmax(200px, 0.6fr) minmax(0, 3fr) minmax(210px, 0.68fr);
 }
 
 .wt-stage--desk {
@@ -4185,1209 +4235,47 @@
     overscroll-behavior: contain;
 }
 
-/* ── Страница CRM ────────────────────────────────────────────────────────── */
+/* ── Учебная CRM ─────────────────────────────────────────────────────────────
+   Сама CRM рисуется НЕ здесь: она живёт в своём документе во фрейме со
+   стилями рабочей CRM (public/trainers/crm/admin.css, см. crmFrame.jsx).
+   Здесь только место под фрейм — вся вкладка окна, без полей: прокручивается
+   страница CRM внутри фрейма, как в настоящем браузере. */
+.wt-win__page { position: relative; }
 
-.wt-crm {
-    position: relative;
-    display: flex;
-    align-items: stretch;
-    min-height: 100%;
-    font-size: 13px;
-    color: #1e2a44;
-}
-
-.wt-crm .wt-mark { position: absolute; top: 8px; right: 10px; z-index: 4; }
-
-.wt-crm__side {
-    display: flex;
-    flex: 0 0 176px;
-    flex-direction: column;
-    background: #485779;
-    color: #fff;
-}
-
-.wt-crm__brand {
-    padding: 12px 16px;
-    font-size: 14px;
-    font-weight: 700;
-    color: #9dc0ff;
-}
-
-.wt-crm__side nav { display: flex; flex-direction: column; }
-
-.wt-crm__nav {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 9px 16px;
-    font-size: 12.5px;
-    color: rgba(255, 255, 255, .84);
-    text-align: left;
-}
-
-.wt-crm__nav:hover { background: rgba(255, 255, 255, .08); }
-.wt-crm__nav.is-current { background: #4273fa; color: #fff; font-weight: 600; }
-
-.wt-crm__main { flex: 1 1 auto; min-width: 0; padding: 12px 18px 20px; }
-
-.wt-crm__crumbs { margin-bottom: 10px; font-size: 12px; color: #8794ad; }
-.wt-crm__crumbs i { margin: 0 6px; font-style: normal; color: #c3cbdb; }
-.wt-crm__crumbs b { font-weight: 600; color: #4a5568; }
-
-.wt-crm__card {
-    border: 1px solid #e6ecf7;
-    border-radius: 10px;
-    background: #fff;
-    box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
-}
-
-.wt-crm__card-head {
-    padding: 11px 16px;
-    border-bottom: 1px solid #eef2f9;
-    font-size: 13.5px;
-    font-weight: 700;
-    color: #4273fa;
-}
-
-.wt-crm__form { padding: 14px 16px 16px; }
-
-/* Подпись слева, поле справа — раскладка CRM. Ширина подписи фиксированная:
-   поля обязаны начинаться на одной вертикали, иначе форма «шатается». */
-.wt-crm__row {
-    display: grid;
-    grid-template-columns: 132px minmax(0, 1fr);
-    align-items: start;
-    gap: 12px;
-    margin-bottom: 9px;
-}
-
-.wt-crm__label {
-    padding-top: 8px;
-    font-size: 12.5px;
-    color: #9aa6bd;
-    text-align: right;
-}
-
-.wt-crm__control { min-width: 0; }
-
-.wt-crm__box {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    min-height: 34px;
-    padding: 0 10px;
-    border: 1px solid #dfe6f2;
-    border-radius: 6px;
-    background: #fff;
-    font-size: 13px;
-    color: #1e2a44;
-    text-align: left;
-}
-
-.wt-crm__box span { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wt-crm__box .is-placeholder { color: #b9c3d6; }
-.wt-crm__box:hover { border-color: #c3d2ea; }
-.wt-crm__ok { flex: 0 0 auto; }
-.wt-crm__caret { display: flex; flex: 0 0 auto; color: #97a3b8; }
-
-.wt-crm__picker { position: relative; }
-
-/* Раскрытый список. max-height НЕ ограничивает до трёх строк: у «Категории 4»
-   тридцать один пункт, и урок ровно в том, чтобы найти нужный среди них —
-   но и на весь экран список пускать нельзя, он перекрыл бы форму целиком. */
-.wt-crm__list {
+/* overflow: clip, а не только hidden: hidden-блок браузер всё равно
+   прокручивает — прокруткой к элементу внутри фрейма и фокусом поля, — и
+   CRM уезжала вверх, а снизу открывалась серая полоса. clip не
+   прокручивается ничем; hidden — запас для браузеров без clip. */
+.wt-crmframe {
     position: absolute;
-    z-index: 6;
-    top: calc(100% + 3px);
-    right: 0;
-    left: 0;
-    max-height: 268px;
-    margin: 0;
-    padding: 4px;
-    overflow: auto;
-    list-style: none;
-    border: 1px solid #dfe6f2;
-    border-radius: 8px;
-    background: #fff;
-    box-shadow: 0 14px 34px rgba(15, 23, 42, .16);
-    overscroll-behavior: contain;
+    inset: 0;
+    overflow: hidden;
+    overflow: clip;
+    background: #e4e5e6;
 }
 
-.wt-crm__option {
+.wt-crmframe > iframe {
     display: block;
-    width: 100%;
-    padding: 7px 10px;
-    border-radius: 5px;
-    font-size: 12.5px;
-    color: #1e2a44;
-    text-align: left;
+    border: 0;
+    transform-origin: 0 0;
+    background: #e4e5e6;
 }
 
-.wt-crm__option:hover { background: #eef4ff; }
+/* Без DOM (тесты разметки) фрейма нет — CRM рисуется прямо во вкладку. */
+.wt-crmframe--inline { position: static; overflow: visible; }
 
-/* Правильный пункт подсвечен зелёным, как строка под курсором в самой CRM:
-   красная обводка на пункте внутри списка сливалась бы с рамкой списка. */
-.wt-crm__option.is-target {
-    background: #16dd6e;
-    color: #fff;
-    font-weight: 600;
-    outline: none;
-    animation: none;
-}
-
-.wt-crm__input-wrap { position: relative; display: flex; align-items: flex-start; gap: 8px; }
-
-.wt-crm__input {
-    flex: 1 1 auto;
-    min-width: 0;
-    min-height: 34px;
-    padding: 7px 10px;
-    border: 1px solid #4273fa;
-    border-radius: 6px;
-    background: #fff;
-    font: inherit;
-    font-size: 13px;
-    color: #1e2a44;
-}
-
-.wt-crm__input--area { min-height: 66px; resize: none; line-height: 1.45; }
-.wt-crm__input:focus { outline: none; box-shadow: 0 0 0 3px rgba(66, 115, 250, .18); }
-
-.wt-crm__enter {
-    flex: 0 0 auto;
-    height: 34px;
-    padding: 0 12px;
-    border-radius: 6px;
-    background: #4273fa;
-    font-size: 12px;
-    font-weight: 600;
-    color: #fff;
-}
-
-.wt-crm__hint {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    padding-top: 3px;
-    font-size: 11px;
-    color: #9aa6bd;
-}
-
-.wt-crm__dup { margin: 16px 0 0 144px; }
-
-.wt-crm__check {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    font-size: 13px;
-    color: #1e2a44;
-}
-
-.wt-crm__check i {
-    width: 18px;
-    height: 18px;
-    border: 1px solid #dfe6f2;
-    border-radius: 4px;
-    background: #fff;
-}
-
-.wt-crm__actions { margin-top: 16px; padding-top: 14px; border-top: 1px solid #eef2f9; }
-
-.wt-crm__save {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 16px;
-    border-radius: 6px;
-    background: #4273fa;
-    font-size: 13px;
-    font-weight: 600;
-    color: #fff;
-}
-
-.wt-crm__save:hover { background: #3667f0; }
-
-/* Узкое окно: софтфон и сайдбар CRM съедают ширину, которой и так нет. */
+/* Узкое окно: софтфон съедает ширину, которой и так нет. CRM во фрейме
+   не перестраивается — она уменьшается масштабом (crmFrame.jsx). */
 @media (max-width: 1023px) {
     .wt-root--desk { grid-template-columns: minmax(0, 1fr); }
     .wt-desk { min-height: 460px; }
-    .wt-crm__side { flex-basis: 54px; }
-    .wt-crm__brand { padding: 12px 0; text-align: center; font-size: 11px; }
-    .wt-crm__nav { justify-content: center; padding: 10px 0; }
-    .wt-crm__nav span,
-    .wt-crm__nav { font-size: 0; gap: 0; }
-    .wt-crm__nav svg { width: 17px; height: 17px; }
-    .wt-crm__row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
-    .wt-crm__label { padding-top: 0; text-align: left; }
-    .wt-crm__dup { margin-left: 0; }
     .wt-call__facts { gap: 4px 14px; }
 }
-
-/* ═════════════════════════════════════════════════════════════════════════
-   ВТОРАЯ ВКЛАДКА ОКНА: учебная Диспетчерская
-   ─────────────────────────────────────────────────────────────────────────
-   Цвета сняты пипеткой со скриншотов кабинета (23.08.2026): тёплый серый фон
-   #f5f4f2 (именно тёплый — холодный сразу читается чужим), зелёный #029154,
-   красный акцент #fc5230, суммы #cc2d32, синие ссылки #4060e3.
-
-   Логотип и фирменный знак НЕ повторяются: клон не должен выдавать себя за
-   чужой кабинет. Вместо них нейтральный знак и плашка «Учебная среда».
-   ═════════════════════════════════════════════════════════════════════════ */
-
-.wt-fl {
-    position: relative;
-    display: flex;
-    align-items: stretch;
-    min-height: 100%;
-    background: #f5f4f2;
-    font-size: 13px;
-    color: #21201f;
-}
-
-.wt-fl .wt-mark { position: absolute; top: 8px; right: 132px; z-index: 6; }
-
-/* ── Узкий сайдбар со значками ───────────────────────────────────────────── */
-
-.wt-fl__side {
-    display: flex;
-    flex: 0 0 56px;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-    padding: 10px 0;
-    background: #f5f4f2;
-}
-
-.wt-fl__logo {
-    display: grid;
-    place-items: center;
-    width: 34px;
-    height: 34px;
-    margin-bottom: 8px;
-    border-radius: 9px;
-    background: #21201f;
-    color: #fff;
-}
-
-.wt-fl__nav {
-    display: grid;
-    place-items: center;
-    width: 34px;
-    height: 34px;
-    border-radius: 9px;
-    color: #6d6b68;
-}
-
-.wt-fl__nav:hover { background: rgba(0, 0, 0, .06); color: #21201f; }
-.wt-fl__nav.is-on { background: #e8e6e2; color: #21201f; }
-.wt-fl__side-foot { margin-top: auto; color: #a9a6a1; }
-
-/* ── Шапка и содержимое ──────────────────────────────────────────────────── */
-
-.wt-fl__body { display: flex; flex: 1 1 auto; min-width: 0; flex-direction: column; }
-
-.wt-fl__head {
-    display: flex;
-    align-items: center;
-    flex: 0 0 auto;
-    gap: 12px;
-    padding: 12px 16px 10px 4px;
-}
-
-.wt-fl__head h1 {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    margin: 0;
-    font-size: 20px;
-    font-weight: 600;
-    letter-spacing: -.01em;
-}
-
-.wt-fl__head h1 b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wt-fl__arrow { color: #a9a6a1; }
-
-.wt-fl__head-right { display: flex; align-items: center; gap: 10px; margin-left: auto; color: #6d6b68; }
-
-.wt-fl__park {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 10px 4px 4px;
-    border-radius: 9px;
-    background: #eceae6;
-}
-
-.wt-fl__park b {
-    display: grid;
-    place-items: center;
-    width: 26px;
-    height: 26px;
-    border-radius: 7px;
-    background: #dcd9d3;
-    font-size: 10.5px;
-    color: #4b4945;
-}
-
-.wt-fl__park span { display: flex; flex-direction: column; font-size: 11.5px; line-height: 1.25; color: #21201f; }
-.wt-fl__park small { font-size: 10.5px; color: #8f8c87; }
-
-/* Содержимое — белая карточка на тёплом фоне, как в кабинете. */
-.wt-fl__content {
-    flex: 1 1 auto;
-    min-height: 0;
-    margin: 0 12px 12px;
-    padding: 14px 16px 18px;
-    border-radius: 14px;
-    background: #fff;
-}
-
-.wt-fl__fabs { position: absolute; right: 16px; bottom: 14px; display: flex; gap: 8px; }
-
-.wt-fl__fab {
-    position: relative;
-    display: grid;
-    place-items: center;
-    width: 34px;
-    height: 34px;
-    border-radius: 50%;
-    background: #21201f;
-    color: #fff;
-}
-
-.wt-fl__fab--bell { background: #fc5230; }
-.wt-fl__fab i {
-    position: absolute;
-    top: -4px;
-    right: -4px;
-    padding: 0 4px;
-    border-radius: 7px;
-    background: #fc5230;
-    font-size: 9.5px;
-    font-style: normal;
-    font-weight: 700;
-    color: #fff;
-}
-
-/* ── Главная: плитки ─────────────────────────────────────────────────────── */
-
-.wt-fl__chip--period {
-    padding: 5px 11px;
-    border-radius: 8px;
-    background: #f0eeea;
-    font-size: 12px;
-    color: #4b4945;
-}
-
-/* Колонки неравные: в плитке лояльности две карточки уровней рядом, и при
-   равных долях её текст рвался посреди слова, а у соседей место пустовало. */
-.wt-fl__tiles {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 0.95fr) minmax(0, 1.5fr) minmax(0, 1.15fr);
-    gap: 12px;
-    margin-top: 12px;
-}
-
-/* min-width: 0 обязателен: без него длинные строки внутри плитки распирают
-   колонку грида, и соседняя плитка обрезает свой текст на полуслове. */
-.wt-fl__tile {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px 14px;
-    border-radius: 14px;
-    background: #f7f6f4;
-}
-
-.wt-fl__tile-head {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    min-width: 0;
-    font-size: 13px;
-    font-weight: 600;
-    color: #21201f;
-    text-align: left;
-}
-
-.wt-fl__tile-head svg { flex: 0 0 auto; }
-
-.wt-fl__tile-head.is-plain { cursor: default; }
-.wt-fl__tile-head svg:last-child { margin-left: -2px; color: #a9a6a1; }
-
-.wt-fl__big { display: flex; align-items: baseline; gap: 8px; font-size: 30px; font-weight: 600; }
-.wt-fl__big span { font-size: 12.5px; font-weight: 400; color: #6d6b68; }
-
-.wt-fl__legend { display: flex; flex-wrap: wrap; gap: 3px 10px; margin: 0; padding: 0; list-style: none; }
-.wt-fl__legend li { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: #6d6b68; }
-.wt-fl__legend i { width: 7px; height: 7px; border-radius: 2px; }
-
-.wt-fl__bars { display: flex; align-items: flex-end; gap: 5px; height: 54px; }
-.wt-fl__bars i { flex: 1 1 auto; border-radius: 3px 3px 0 0; }
-
-.wt-fl__mini { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.wt-fl__mini div { padding: 7px 9px; border-radius: 9px; background: #fff; }
-.wt-fl__mini span { display: block; font-size: 10.5px; color: #8f8c87; }
-.wt-fl__mini b { font-size: 15px; font-weight: 600; }
-.wt-fl__mini em { font-size: 11px; font-style: normal; color: #fc5230; }
-
-.wt-fl__loyalty { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
-.wt-fl__grade { min-width: 0; padding: 9px 10px; border-radius: 11px; background: #fff; }
-.wt-fl__grade.is-bronze { background: linear-gradient(160deg, #d9b6ad, #c39a90); color: #40241e; }
-.wt-fl__grade b { font-size: 12.5px; }
-.wt-fl__grade small { display: block; margin-bottom: 5px; font-size: 10px; opacity: .8; }
-.wt-fl__grade ul {
-    margin: 0;
-    padding-left: 13px;
-    list-style: disc;
-    font-size: 9.6px;
-    line-height: 1.5;
-}
-/* Именно break-word, а не anywhere: anywhere режет посреди слова
-   («подтвержд|ают»), и это читается как сломанная вёрстка. */
-.wt-fl__grade li { overflow-wrap: break-word; }
-.wt-fl__grade small { overflow-wrap: break-word; }
-.wt-fl__grade b { overflow-wrap: break-word; }
-
-.wt-fl__tile--narrow { gap: 6px; }
-.wt-fl__dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
-.wt-fl__dot.is-red { background: #fc5230; }
-.wt-fl__dot.is-blue { background: #4060e3; }
-
-.wt-fl__row-link {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 6px 8px;
-    border-radius: 8px;
-    background: #fff;
-    font-size: 11.5px;
-    color: #21201f;
-    text-align: left;
-}
-
-.wt-fl__row-link em {
-    flex: 0 0 auto;
-    padding: 1px 5px;
-    border-radius: 6px;
-    background: #fc5230;
-    font-size: 9.5px;
-    font-style: normal;
-    font-weight: 700;
-    color: #fff;
-}
-
-.wt-fl__row-link.is-off { color: #6d6b68; }
-.wt-fl__row-link.is-off em { background: #4060e3; }
-
-/* ── Список исполнителей ─────────────────────────────────────────────────── */
-
-.wt-fl__banner {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 14px;
-    border-radius: 11px;
-    background: #029154;
-    font-size: 12px;
-    color: #fff;
-}
-
-.wt-fl__banner-btn {
-    margin-left: auto;
-    flex: 0 0 auto;
-    padding: 5px 12px;
-    border-radius: 8px;
-    background: #fff;
-    font-weight: 600;
-    color: #21201f;
-}
-
-.wt-fl__chips { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
-
-.wt-fl__pill {
-    padding: 4px 11px;
-    border-radius: 20px;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: #fff;
-}
-
-.wt-fl__pill.is-red { background: #fc5230; }
-.wt-fl__pill.is-orange { background: #fc9000; }
-.wt-fl__pill.is-blue { background: #4060e3; }
-.wt-fl__chips-sep { width: 4px; height: 4px; border-radius: 50%; background: #d3d0cb; }
-
-.wt-fl__seg {
-    padding: 4px 11px;
-    border-radius: 20px;
-    background: #fff;
-    border: 1px solid #eae7e2;
-    font-size: 11.5px;
-}
-
-.wt-fl__seg em { font-style: normal; color: #8f8c87; }
-
-.wt-fl__toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
-
-.wt-fl__search {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 5px 12px 5px 5px;
-    border-radius: 9px;
-    background: #f0eeea;
-    font-size: 11.5px;
-    color: #8f8c87;
-}
-
-.wt-fl__search b {
-    padding: 3px 8px;
-    border-radius: 7px;
-    background: #dcd9d3;
-    font-size: 11px;
-    color: #4b4945;
-}
-
-.wt-fl__filter-add,
-.wt-fl__filter-chip {
-    padding: 6px 11px;
-    border-radius: 9px;
-    background: #f0eeea;
-    font-size: 11.5px;
-    color: #4b4945;
-}
-
-.wt-fl__filter-chip { background: #e5e2dc; font-weight: 600; }
-.wt-fl__tools { display: flex; gap: 12px; margin-left: auto; font-size: 11.5px; color: #6d6b68; }
-
-.wt-fl__table { width: 100%; margin-top: 12px; border-collapse: collapse; font-size: 12px; }
-.wt-fl__table th {
-    padding: 8px 10px;
-    border-bottom: 1px solid #eeece8;
-    font-size: 11px;
-    font-weight: 400;
-    color: #8f8c87;
-    text-align: left;
-}
-.wt-fl__table td { padding: 9px 10px; border-bottom: 1px solid #f4f2ef; vertical-align: middle; }
-.wt-fl__table .is-right { text-align: right; }
-.wt-fl__table .is-bad { color: #cc2d32; }
-.wt-fl__table .is-good { color: #029154; }
-.wt-fl__table tr.is-open { cursor: pointer; }
-.wt-fl__table tr.is-open:hover { background: #faf9f7; }
-
-/* Полоса слева у строк, где удержал ПАРК: в сценарии всё держится на том,
-   чтобы отличить их от комиссий сервиса, а колонка «Категория» длинная. */
-.wt-fl__table tr.is-park td:first-child { box-shadow: inset 3px 0 0 #fc9000; }
-
-.wt-fl__who { display: flex; align-items: center; gap: 9px; }
-.wt-fl__who span { display: flex; flex-direction: column; line-height: 1.3; }
-.wt-fl__who small { font-size: 10.5px; color: #8f8c87; }
-
-.wt-fl__ava { flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%; background: #e5e2dc; }
-.wt-fl__ava.is-big { width: 44px; height: 44px; border-radius: 10px; }
-
-.wt-fl__limit { margin-left: 6px; color: #8f8c87; }
-.wt-fl__note { margin: 12px 0 0; font-size: 11px; color: #8f8c87; }
-
-/* ── Карточка исполнителя ────────────────────────────────────────────────── */
-
-.wt-fl__sub { margin-bottom: 8px; font-size: 11.5px; color: #8f8c87; }
-
-.wt-fl__badge {
-    display: flex;
-    align-items: center;
-    gap: 0;
-    padding: 8px 12px;
-    overflow-x: auto;
-    border-radius: 12px;
-    background: #f7f6f4;
-}
-
-.wt-fl__badge > span { flex: 0 0 auto; }
-
-.wt-fl__badge > b { margin: 0 16px 0 12px; font-size: 14px; font-weight: 600; }
-.wt-fl__badge > span {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 0 16px;
-    border-left: 1px solid #e6e3de;
-    font-size: 13px;
-}
-.wt-fl__badge small { font-size: 10.5px; color: #8f8c87; }
-.wt-fl__acct {
-    flex-direction: row !important;
-    align-items: baseline;
-    gap: 6px !important;
-    /* Сумма и знаки «−/+» — одной строкой: с переносом «₸» уезжал под число
-       и выглядел как отдельное поле. */
-    white-space: nowrap;
-}
-.wt-fl__acct small { flex-basis: 100%; }
-.wt-fl__acct u { color: #fc5230; text-decoration: none; }
-.wt-fl__acct em { font-style: normal; color: #fc5230; }
-.wt-fl__acct em.is-plus { color: #029154; }
-
-.wt-fl__warn { margin: 7px 0 0; font-size: 11.5px; color: #fc5230; }
-
-/* Вкладки карточки — В ОДНУ строку с прокруткой, как в кабинете.
-   С переносом последняя вкладка («Документы») падала на вторую строку и
-   читалась не как вкладка, а как заголовок раздела под ними. */
-.wt-fl__tabs {
-    display: flex;
-    flex-wrap: nowrap;
-    gap: 16px;
-    margin-top: 10px;
-    overflow-x: auto;
-    border-bottom: 1px solid #eeece8;
-    scrollbar-width: thin;
-}
-
-.wt-fl__tabs button { flex: 0 0 auto; white-space: nowrap; }
-
-.wt-fl__tabs button {
-    padding: 6px 0 9px;
-    border-bottom: 2px solid transparent;
-    font-size: 12.5px;
-    color: #6d6b68;
-}
-
-.wt-fl__tabs button:hover { color: #21201f; }
-.wt-fl__tabs button.is-on { border-bottom-color: #21201f; color: #21201f; font-weight: 500; }
-
-.wt-fl__tab-body { padding-top: 14px; }
-
-.wt-fl__h3 {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    margin: 0 0 8px;
-    font-size: 15px;
-    font-weight: 600;
-}
-.wt-fl__h3.is-caps { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: #6d6b68; }
-.wt-fl__hint { margin: 0 0 12px; font-size: 11.5px; color: #8f8c87; }
-.wt-fl__hint u { color: #4060e3; text-decoration: none; }
-
-.wt-fl__cols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 40px; }
-
-.wt-fl__field { display: grid; grid-template-columns: 150px minmax(0, 1fr); align-items: center; gap: 10px; padding: 5px 0; }
-.wt-fl__field span { font-size: 11.5px; color: #6d6b68; }
-.wt-fl__field b {
-    padding: 7px 10px;
-    border-radius: 8px;
-    background: #f4f2ef;
-    font-size: 12.5px;
-    font-weight: 400;
-    color: #21201f;
-}
-
-.wt-fl__seg-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 12px; }
-.wt-fl__seg-row span { padding: 5px 12px; border-radius: 8px; background: #f0eeea; color: #6d6b68; }
-.wt-fl__seg-row span.is-on { background: #e5e2dc; color: #21201f; }
-.wt-fl__seg-row u { color: #4060e3; text-decoration: none; }
-
-.wt-fl__filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-.wt-fl__filters span { padding: 5px 11px; border-radius: 8px; background: #f0eeea; font-size: 11.5px; color: #4b4945; }
-
-.wt-fl__check { display: flex; align-items: center; gap: 9px; font-size: 12px; }
-.wt-fl__check i {
-    display: grid;
-    place-items: center;
-    width: 19px;
-    height: 19px;
-    border-radius: 5px;
-    background: #fce000;
-    font-size: 11px;
-    font-style: normal;
-    color: #21201f;
-}
-
-.wt-fl__table--tx td:nth-child(6) { max-width: 210px; color: #6d6b68; }
-
-/* Заработок */
-.wt-fl__income { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 16px; }
-.wt-fl__report { padding: 12px 14px; border-radius: 12px; background: #f7f6f4; }
-.wt-fl__report-row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 12px; }
-.wt-fl__report-row span { color: #4b4945; text-decoration: underline dotted #d3d0cb; }
-.wt-fl__report-row .is-good { color: #029154; }
-.wt-fl__report-row .is-bad { color: #cc2d32; }
-.wt-fl__report-row .is-zero { color: #8f8c87; }
-.wt-fl__charts { padding: 12px 14px; border-radius: 12px; background: #f7f6f4; }
-.wt-fl__chart { display: flex; align-items: flex-end; gap: 10px; height: 110px; padding: 0 6px; }
-.wt-fl__chart i { flex: 0 0 46px; border-radius: 4px 4px 0 0; }
-.wt-fl__chart-foot { margin: 6px 0 14px; font-size: 11px; color: #8f8c87; }
-
-/* GPS */
-.wt-fl__gps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-.wt-fl__gps-tile { padding: 12px 14px; border: 1px solid #eeece8; border-radius: 12px; }
-.wt-fl__gps-tile span { font-size: 11.5px; color: #6d6b68; }
-.wt-fl__gps-tile b { display: block; margin-top: 10px; font-size: 22px; font-weight: 500; }
-
-/* Фотоконтроль */
-.wt-fl__photo section { margin-bottom: 16px; }
-.wt-fl__shots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-.wt-fl__shots figure { margin: 0; border: 1px solid #eeece8; border-radius: 11px; overflow: hidden; }
-.wt-fl__shots figcaption { padding: 7px 10px; font-size: 11.5px; }
-.wt-fl__shot {
-    height: 96px;
-    background: repeating-linear-gradient(135deg, #ecebe8 0 10px, #e3e1dd 10px 20px);
-}
-
-/* Пустые состояния */
-.wt-fl__empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 54px 20px;
-    text-align: center;
-}
-.wt-fl__empty b { font-size: 16px; font-weight: 600; }
-.wt-fl__empty span { max-width: 420px; font-size: 12px; color: #8f8c87; }
-
-.wt-fl__yellow {
-    margin-top: 10px;
-    padding: 8px 18px;
-    border-radius: 9px;
-    background: #fce000;
-    font-size: 12.5px;
-    font-weight: 500;
-    color: #21201f;
-}
-
-.wt-fl__wa {
-    display: inline-block;
-    margin-top: 16px;
-    padding: 8px 14px;
-    border-radius: 9px;
-    background: #029154;
-    font-size: 12px;
-    color: #fff;
-}
-
-/* Выбор парка */
-.wt-fl--picker { align-items: center; justify-content: center; }
-.wt-fl__picker { display: flex; align-items: center; gap: 60px; }
-.wt-fl__picker h2 { margin: 0; font-size: 22px; font-weight: 600; }
-.wt-fl__picker-list { display: flex; flex-direction: column; gap: 4px; width: 260px; }
-.wt-fl__picker-search {
-    padding: 7px 12px;
-    margin-bottom: 6px;
-    border-radius: 9px;
-    background: #eceae6;
-    font-size: 12px;
-    color: #8f8c87;
-}
-.wt-fl__picker-list button {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 7px 9px;
-    border-radius: 10px;
-    text-align: left;
-}
-.wt-fl__picker-list button:hover { background: #f0eeea; }
-.wt-fl__picker-list button.is-on { background: #e8e6e2; }
-.wt-fl__picker-list b {
-    display: grid;
-    place-items: center;
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
-    background: #dcd9d3;
-    font-size: 11px;
-    color: #4b4945;
-}
-.wt-fl__picker-list span { display: flex; flex-direction: column; font-size: 12.5px; line-height: 1.3; }
-.wt-fl__picker-list small { font-size: 10.5px; color: #8f8c87; }
 
 /* Неактивная вкладка окна — приглушена, крестика у неё нет. */
 .wt-win__tab:not(.is-active) { background: #cdd1d8; color: #4b5563; }
 .wt-win__tab:not(.is-active):hover { background: #d8dce2; }
 .wt-win__tab-x.is-ghost { width: 20px; }
-
-@media (max-width: 1023px) {
-    .wt-fl__tiles { grid-template-columns: 1fr 1fr; }
-    .wt-fl__cols,
-    .wt-fl__income { grid-template-columns: minmax(0, 1fr); }
-    .wt-fl__gps,
-    .wt-fl__shots { grid-template-columns: 1fr 1fr; }
-    .wt-fl__field { grid-template-columns: minmax(0, 1fr); gap: 3px; }
-    .wt-fl .wt-mark { right: 10px; }
-}
-
-/* ═════════════════════════════════════════════════════════════════════════
-   ТРЕТЬЯ ВКЛАДКА: учебный Oktell (клиент Okapp)
-   ─────────────────────────────────────────────────────────────────────────
-   Палитра снята пипеткой с кадров 23.08.2026: тёмная панель #272d32, фон
-   #ebedf0, блоки показателей #dddfe0, заголовки #666b70, тост #fef1ba.
-   Зелёная кнопка «Войти в call-центр» на кадре замазана вместе с подписью,
-   её оттенок подобран по эпохе интерфейса — см. шапку screensOktell.jsx.
-   ═════════════════════════════════════════════════════════════════════════ */
-
-.wt-ok {
-    position: relative;
-    display: flex;
-    align-items: stretch;
-    min-height: 100%;
-    background: #ebedf0;
-    font-size: 13px;
-    color: #33383d;
-}
-
-.wt-ok .wt-mark { position: absolute; top: 8px; right: 10px; z-index: 6; }
-
-.wt-ok__side {
-    position: relative;
-    display: flex;
-    flex: 0 0 140px;
-    flex-direction: column;
-    padding-bottom: 46px;
-    background: #272d32;
-    color: #9ea4a7;
-}
-
-.wt-ok__logo {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 13px 14px;
-    font-size: 14px;
-    color: #cfd3d6;
-}
-
-.wt-ok__nav {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    font-size: 12.5px;
-    color: #9ea4a7;
-    text-align: left;
-}
-
-.wt-ok__nav:hover { background: #2f3439; color: #e6e9eb; }
-.wt-ok__nav.is-on { background: #3a4046; color: #fff; }
-
-/* Виджет телефона внизу слева — как в клиенте. */
-.wt-ok__phonebar {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    display: flex;
-    align-items: center;
-    height: 46px;
-    background: #1f2429;
-}
-
-.wt-ok__ava { width: 46px; height: 46px; background: #333a40; }
-
-.wt-ok__phonebtn {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 100%;
-    padding: 0 12px;
-    background: #2f3439;
-    color: #cfd3d6;
-}
-
-.wt-ok__phonebtn b { font-size: 11px; opacity: .7; }
-
-.wt-ok__phonemenu {
-    position: absolute;
-    bottom: 46px;
-    left: 8px;
-    z-index: 5;
-    display: flex;
-    width: 250px;
-    flex-direction: column;
-    padding: 6px;
-    border-radius: 4px;
-    background: #fff;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, .3);
-    color: #33383d;
-}
-
-.wt-ok__phonemenu-head { padding: 6px 8px; font-size: 10.5px; color: #8b9095; }
-.wt-ok__phonemenu button {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 8px;
-    border-radius: 3px;
-    font-size: 12.5px;
-    text-align: left;
-}
-.wt-ok__phonemenu button:hover { background: #eef1f4; }
-.wt-ok__phonemenu button.is-on { color: #2b6cb0; }
-.wt-ok__phonemenu label {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 6px 8px;
-    font-size: 11px;
-    color: #666b70;
-}
-.wt-ok__phonemenu label i {
-    flex: 0 0 auto;
-    width: 14px;
-    height: 14px;
-    border: 1px solid #c3c8cc;
-    border-radius: 2px;
-}
-.wt-ok__phonemenu label i.is-checked {
-    display: grid;
-    place-items: center;
-    border-color: #5cb85c;
-    background: #5cb85c;
-    font-size: 9px;
-    font-style: normal;
-    color: #fff;
-}
-
-.wt-ok__body { flex: 1 1 auto; min-width: 0; }
-
-.wt-ok__cols { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
-.wt-ok__main { min-width: 0; padding: 14px 18px 20px; }
-
-.wt-ok__head {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding-bottom: 10px;
-    border-bottom: 1px solid #d9dcdf;
-}
-
-.wt-ok__head h2 { margin: 0; font-size: 21px; font-weight: 400; color: #666b70; }
-
-.wt-ok__refresh {
-    margin-left: auto;
-    padding: 5px 11px;
-    border: 1px solid #c9ced2;
-    border-radius: 3px;
-    background: #fff;
-    font-size: 11.5px;
-    color: #4a4f54;
-}
-
-.wt-ok__block {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    align-items: center;
-    gap: 2px 12px;
-    margin-top: 10px;
-    padding: 12px 16px;
-    background: #dddfe0;
-}
-
-.wt-ok__block span { font-size: 11px; color: #8b9095; text-align: center; }
-.wt-ok__block b { font-size: 22px; font-weight: 400; text-align: center; }
-.wt-ok__block .is-right { text-align: center; }
-.wt-ok__block.is-first { grid-template-columns: 1fr auto; }
-.wt-ok__block.is-first span { grid-column: 1; }
-.wt-ok__block.is-first b { grid-column: 1; }
-
-.wt-ok__enter,
-.wt-ok__leave {
-    grid-row: span 2;
-    padding: 8px 16px;
-    border-radius: 3px;
-    font-size: 12.5px;
-    color: #fff;
-}
-
-.wt-ok__enter { background: #5cb85c; }
-.wt-ok__enter:hover { background: #4ca64c; }
-.wt-ok__leave { border: 1px solid #c9ced2; background: #fff; color: #4a4f54; }
-
-/* Блок статусов. В снятом кадре он скрыт (у той учётки нет телефона), но у
-   живого стажёра он есть — поэтому в клоне рисуется. */
-.wt-ok__statuses {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    margin-top: 14px;
-    padding: 12px 14px;
-    border: 1px dashed #c9ced2;
-    border-radius: 4px;
-    background: #f5f6f8;
-}
-
-.wt-ok__statuses > span { font-size: 11.5px; color: #8b9095; }
-.wt-ok__statuses button {
-    padding: 5px 12px;
-    border: 1px solid #c9ced2;
-    border-radius: 3px;
-    background: #fff;
-    font-size: 12px;
-}
-.wt-ok__statuses button.is-on { border-color: #d9a441; background: #fdf0d4; font-weight: 600; }
-.wt-ok__statuses em { flex-basis: 100%; font-size: 11px; font-style: normal; color: #8b9095; }
-
-.wt-ok__tasks { min-width: 0; padding: 14px 18px; background: #fff; }
-.wt-ok__tasks h2 {
-    margin: 0 0 10px;
-    padding-bottom: 10px;
-    border-bottom: 1px solid #d9dcdf;
-    font-size: 21px;
-    font-weight: 400;
-    color: #666b70;
-}
-.wt-ok__tasks a { display: block; padding: 5px 0; font-size: 12.5px; color: #2b6cb0; text-decoration: none; }
-
-/* Справочник коллег */
-.wt-ok__dir { min-width: 0; padding: 14px 18px; background: #fff; }
-.wt-ok__search {
-    padding: 7px 10px;
-    border: 1px solid #c9ced2;
-    border-radius: 3px;
-    font-size: 12px;
-    color: #a2a7ab;
-}
-.wt-ok__dept { margin-top: 12px; }
-.wt-ok__dept-name {
-    padding: 4px 0;
-    border-bottom: 1px solid #eceef0;
-    font-size: 10.5px;
-    letter-spacing: .04em;
-    text-transform: uppercase;
-    color: #8b9095;
-}
-.wt-ok__person { display: flex; align-items: center; gap: 9px; padding: 7px 0; font-size: 12.5px; }
-.wt-ok__person span { flex: 1 1 auto; min-width: 0; }
-.wt-ok__person b { font-weight: 500; color: #666b70; }
-
-.wt-ok__dot { width: 8px; height: 8px; border-radius: 50%; background: #c9ced2; }
-.wt-ok__dot.is-online { background: #5cb85c; }
-.wt-ok__dot.is-busy { background: #d9a441; }
-.wt-ok__dot.is-offline { background: #c9ced2; }
-.wt-ok__dot.is-ok { background: #5cb85c; }
-.wt-ok__dot.is-warn { background: #d9a441; }
-.wt-ok__dot.is-miss { background: #d9534f; }
-
-.wt-ok__note { margin: 14px 0 0; font-size: 11px; color: #8b9095; }
-.wt-ok__empty { padding: 60px 20px; text-align: center; color: #8b9095; }
-
-/* Журнал */
-.wt-ok__journal { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: 100%; }
-.wt-ok__jside { padding: 14px; background: #fff; border-right: 1px solid #e3e6e8; }
-.wt-ok__jside h2 { margin: 0 0 10px; font-size: 21px; font-weight: 400; color: #666b70; }
-.wt-ok__jside button {
-    display: block;
-    width: 100%;
-    padding: 7px 9px;
-    border-radius: 3px;
-    font-size: 12.5px;
-    color: #4a4f54;
-    text-align: left;
-}
-.wt-ok__jside button.is-on { background: #eef1f4; font-weight: 500; }
-
-.wt-ok__cal { margin-top: 14px; font-size: 11px; }
-.wt-ok__cal-head { padding: 6px 0; color: #666b70; text-align: center; }
-.wt-ok__cal-week { display: grid; grid-template-columns: repeat(7, 1fr); }
-.wt-ok__cal-week span { padding: 4px 0; color: #2b6cb0; text-align: center; }
-.wt-ok__cal-week span.is-dim { color: #c3c8cc; }
-.wt-ok__cal-week span.is-on { border-radius: 3px; background: #2b6cb0; color: #fff; }
-
-.wt-ok__jmain { min-width: 0; padding: 14px 18px; }
-.wt-ok__jmain h2 { margin: 0 0 10px; font-size: 21px; font-weight: 400; color: #666b70; }
-.wt-ok__jfilters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
-.wt-ok__jfilters span {
-    padding: 6px 10px;
-    border: 1px solid #c9ced2;
-    border-radius: 3px;
-    background: #fff;
-    font-size: 11.5px;
-    color: #a2a7ab;
-}
-.wt-ok__jday { padding: 6px 8px; background: #fdf6dd; font-size: 11.5px; color: #7a6a3a; }
-.wt-ok__jrow {
-    display: grid;
-    grid-template-columns: 46px 18px minmax(0, 1fr) 12px 62px;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 8px;
-    border-bottom: 1px solid #eceef0;
-    font-size: 12px;
-}
-.wt-ok__jrow span.is-miss { color: #d9534f; }
-.wt-ok__arrow { font-style: normal; color: #8b9095; }
-.wt-ok__jrow b { font-weight: 400; }
-.wt-ok__jrow u { color: #8b9095; text-align: right; text-decoration: none; }
-
-/* Тост «Веб-телефон отключен» — висит на всех экранах клиента. */
-.wt-ok__toast {
-    position: absolute;
-    right: 14px;
-    bottom: 14px;
-    padding: 8px 12px;
-    border: 1px solid #e8d9a0;
-    background: #fef1ba;
-    font-size: 11.5px;
-    color: #6b5c2a;
-}
-.wt-ok__toast b { display: block; font-size: 12px; }
-
-/* Экран входа */
-.wt-ok--login { align-items: center; justify-content: center; background: #ebedf0; }
-.wt-ok__login {
-    display: flex;
-    width: 280px;
-    flex-direction: column;
-    gap: 10px;
-    padding: 22px;
-    border-radius: 4px;
-    background: #fff;
-    box-shadow: 0 12px 34px rgba(0, 0, 0, .12);
-}
-.wt-ok__login-logo {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    margin-bottom: 6px;
-    font-size: 18px;
-    color: #666b70;
-}
-.wt-ok__login label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8b9095; }
-.wt-ok__login input {
-    padding: 7px 10px;
-    border: 1px solid #c9ced2;
-    border-radius: 3px;
-    font: inherit;
-    font-size: 12.5px;
-    color: #33383d;
-}
-.wt-ok__login-save { flex-direction: row !important; align-items: center; gap: 7px !important; }
-.wt-ok__login-save i {
-    display: grid;
-    place-items: center;
-    width: 14px;
-    height: 14px;
-    border-radius: 2px;
-    background: #5cb85c;
-    font-size: 9px;
-    font-style: normal;
-    color: #fff;
-}
-.wt-ok__login-btn {
-    margin-top: 4px;
-    padding: 8px;
-    border-radius: 3px;
-    background: #5cb85c;
-    font-size: 13px;
-    color: #fff;
-}
 
 /* Карта систем на месте прогресса — только в свободной среде. */
 .wt-side__map { display: flex; flex-direction: column; gap: 9px; margin: 0; padding: 0; list-style: none; }
@@ -5398,166 +4286,6 @@
 }
 .wt-side__map b { display: block; font-size: 12.5px; color: var(--wt-ink); }
 .wt-side__map span { display: block; margin-top: 2px; font-size: 11.5px; line-height: 1.4; color: var(--wt-ink-soft); }
-
-@media (max-width: 1023px) {
-    .wt-ok__cols { grid-template-columns: minmax(0, 1fr); }
-    .wt-ok__journal { grid-template-columns: minmax(0, 1fr); }
-    .wt-ok__side { flex-basis: 54px; }
-    .wt-ok__nav { justify-content: center; padding: 10px 0; font-size: 0; gap: 0; }
-    .wt-ok__logo { justify-content: center; padding: 12px 0; font-size: 0; gap: 0; }
-}
-
-/* ── Диспетчерская: панели, подменю, справочные списки ───────────────────── */
-
-.wt-fl__icon-btn {
-    display: grid;
-    place-items: center;
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
-    color: #6d6b68;
-}
-.wt-fl__icon-btn:hover { background: #eceae6; color: #21201f; }
-
-/* Подменю кабинета выезжает поверх страницы; адрес при этом не меняется —
-   в кабинете это кнопки, а не ссылки. */
-.wt-fl__submenu {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 56px;
-    z-index: 7;
-    display: flex;
-    width: 210px;
-    flex-direction: column;
-    padding: 12px 8px;
-    background: #fff;
-    box-shadow: 6px 0 24px rgba(15, 23, 42, .12);
-}
-.wt-fl__submenu-head {
-    padding: 6px 10px 10px;
-    font-size: 11px;
-    letter-spacing: .05em;
-    text-transform: uppercase;
-    color: #8f8c87;
-}
-.wt-fl__submenu button {
-    padding: 8px 10px;
-    border-radius: 8px;
-    font-size: 12.5px;
-    text-align: left;
-}
-.wt-fl__submenu button:hover { background: #f4f2ef; }
-
-/* Панель поверх кабинета: фильтры, колонки, сортировка, поиск, лента. */
-.wt-fl__overlay {
-    position: absolute;
-    top: 50px;
-    right: 16px;
-    z-index: 8;
-    display: flex;
-    width: 340px;
-    max-height: calc(100% - 80px);
-    flex-direction: column;
-    border-radius: 12px;
-    background: #fff;
-    box-shadow: 0 18px 44px rgba(15, 23, 42, .2);
-}
-.wt-fl__overlay.is-wide { width: 560px; }
-.wt-fl__overlay header {
-    display: flex;
-    align-items: center;
-    padding: 11px 14px;
-    border-bottom: 1px solid #eeece8;
-    font-size: 13.5px;
-    font-weight: 600;
-}
-.wt-fl__overlay header button { margin-left: auto; color: #8f8c87; }
-.wt-fl__overlay-body { min-height: 0; overflow: auto; padding: 12px 14px 14px; }
-.wt-fl__overlay-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
-
-.wt-fl__filters-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
-.wt-fl__filters-grid b { display: block; margin-bottom: 4px; font-size: 12px; }
-.wt-fl__filters-grid ul { margin: 0; padding-left: 14px; font-size: 11px; line-height: 1.55; color: #6d6b68; }
-
-.wt-fl__checklist { margin: 0; padding: 0; list-style: none; }
-.wt-fl__checklist li { display: flex; align-items: center; gap: 9px; padding: 6px 0; font-size: 12.5px; }
-.wt-fl__checklist i {
-    flex: 0 0 auto;
-    width: 16px;
-    height: 16px;
-    border: 1px solid #dfdcd6;
-    border-radius: 4px;
-}
-.wt-fl__checklist i.is-on { border-color: #fce000; background: #fce000; }
-
-.wt-fl__search-big {
-    padding: 9px 12px;
-    border: 1px solid #dfdcd6;
-    border-radius: 8px;
-    font-size: 12.5px;
-    color: #a9a6a1;
-}
-.wt-fl__found {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-    margin-top: 10px;
-    padding: 8px;
-    border-radius: 10px;
-    text-align: left;
-}
-.wt-fl__found:hover { background: #f4f2ef; }
-.wt-fl__found span { display: flex; flex-direction: column; font-size: 12.5px; line-height: 1.3; }
-.wt-fl__found small { font-size: 11px; color: #8f8c87; }
-
-.wt-fl__notice { padding: 9px 0; border-bottom: 1px solid #f4f2ef; }
-.wt-fl__notice b { display: block; font-size: 12.5px; font-weight: 500; }
-.wt-fl__notice small { font-size: 11px; color: #8f8c87; }
-
-/* Блоки карточки «Детали»: в кабинете они свёрнуты, здесь раскрыты. */
-.wt-fl__block { margin-bottom: 16px; }
-.wt-fl__block .wt-fl__cols { gap: 2px 40px; }
-
-.wt-fl__totals {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 10px;
-    margin-top: 14px;
-    padding: 12px 14px;
-    border-radius: 12px;
-    background: #f7f6f4;
-}
-.wt-fl__totals span { display: block; font-size: 11px; color: #8f8c87; }
-.wt-fl__totals b { font-size: 15px; font-weight: 600; }
-
-.wt-fl__changes { max-width: 520px; }
-.wt-fl__change { padding: 9px 0; border-bottom: 1px solid #f4f2ef; }
-.wt-fl__change b { display: block; font-size: 12.5px; font-weight: 500; }
-.wt-fl__change span { font-size: 11px; color: #8f8c87; }
-
-.wt-fl__status { padding: 3px 9px; border-radius: 20px; font-size: 11px; }
-.wt-fl__status.is-ok { background: #e3fff0; color: #1d7a4f; }
-.wt-fl__status.is-off { background: #f0eeea; color: #6d6b68; }
-.wt-fl__status.is-wait { background: #fff3df; color: #8a5d16; }
-
-.wt-fl__grades { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.wt-fl__grades .wt-fl__grade { padding: 14px 16px; }
-.wt-fl__grades .wt-fl__grade ul { font-size: 11.5px; }
-
-.wt-fl__form { max-width: 520px; }
-.wt-fl__tools button { font-size: 11.5px; color: #6d6b68; }
-.wt-fl__tools button:hover { color: #21201f; }
-
-@media (max-width: 1023px) {
-    .wt-fl__overlay { right: 8px; left: 8px; width: auto; }
-    .wt-fl__overlay.is-wide { width: auto; }
-    .wt-fl__filters-grid { grid-template-columns: minmax(0, 1fr); }
-    .wt-fl__totals { grid-template-columns: 1fr 1fr; }
-    .wt-fl__grades { grid-template-columns: minmax(0, 1fr); }
-    .wt-fl__submenu { left: 54px; width: 180px; }
-}
 
 /* В свободной среде «правильной кнопки» нет: пульсирующая обводка цели — это
    подсказка, а подсказок здесь не должно быть вовсе. */
@@ -5570,8 +4298,9 @@
 /* ═════════════════════════════════════════════════════════════════════════
    ПАНЕЛЬ ЗВОНКА
    ─────────────────────────────────────────────────────────────────────────
-   Стоит ПОВЕРХ окна браузера, а не внутри вкладки: во время разговора оператор
-   сидит в Диспетчерской, и кнопки «Удержание» и «Перевод» обязаны ехать за ним.
+   Стоит ПОВЕРХ окна браузера, а не внутри CRM: во время разговора оператор
+   листает карточку водителя и окна CRM, и кнопки «Удержание» и «Перевод»
+   обязаны ехать за ним.
    Цитаты водителя здесь нет — стажёр слушает, а не читает.
    ═════════════════════════════════════════════════════════════════════════ */
 
@@ -5709,50 +4438,6 @@
 .wt-side__btn--finish { background: var(--wt-accent); color: #fff; }
 .wt-side__btn--finish:disabled { opacity: .45; cursor: not-allowed; }
 
-/* Поиск в кабинете — настоящее поле ввода. */
-.wt-fl__search input,
-.wt-fl__search-big input {
-    min-width: 0;
-    flex: 1 1 auto;
-    border: 0;
-    background: none;
-    font: inherit;
-    font-size: 11.5px;
-    color: #21201f;
-    outline: none;
-}
-.wt-fl__search-big {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 9px 12px;
-    border: 1px solid #dfdcd6;
-    border-radius: 8px;
-}
-.wt-fl__search-big b {
-    padding: 2px 8px;
-    border-radius: 6px;
-    background: #f0eeea;
-    font-size: 11px;
-    color: #4b4945;
-}
-.wt-fl__search-big input { font-size: 12.5px; }
-.wt-fl__hits { margin-top: 8px; }
-
-.wt-fl__filters-grid li button { font: inherit; color: #4060e3; text-align: left; }
-.wt-fl__checklist li button { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; }
-
-.wt-fl__card-foot { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
-.wt-fl__act {
-    padding: 8px 14px;
-    border: 1px solid #dfdcd6;
-    border-radius: 9px;
-    background: #fff;
-    font-size: 12px;
-    color: #4b4945;
-}
-.wt-fl__act:hover { border-color: #c3c0b9; }
-
 /* Отладочная лента событий — только в dev-сборке. */
 .wt-devlog {
     position: fixed;
@@ -5788,126 +4473,8 @@
     .wt-devlog { display: none; }
 }
 
-/* ── Карточка заказа и панели шапки ─────────────────────────────────────────
-   Кадры s12–s16: карточка заказа — отдельная страница, «Диагностика» и
-   «Приоритет» — панели из шапки, «История изменений» — модалка без адреса. */
-
-.wt-fl__hdr-btn {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 0 16px;
-    border-left: 1px solid #e6e3de;
-    font-size: 13px;
-    color: #21201f;
-    text-align: left;
-}
-.wt-fl__hdr-btn small { font-size: 10.5px; color: #8f8c87; }
-.wt-fl__hdr-btn:hover { color: #4060e3; }
-
-.wt-fl__diag { margin: 0 0 10px; font-size: 14px; }
-
-/* Таблица заказов широкая — 22 колонки прокручиваются по горизонтали. */
-.wt-fl__scroll-x { overflow-x: auto; overscroll-behavior-x: contain; }
-.wt-fl__table--wide { min-width: 1700px; }
-.wt-fl__table--wide th,
-.wt-fl__table--wide td { white-space: nowrap; }
-
-.wt-fl__link { font: inherit; color: #4060e3; text-decoration: underline; }
-.wt-fl__link:hover { color: #2f4fc0; }
-
 /* Пустая вкладка «Документы»: только плитка загрузки. */
-.wt-fl__docs { display: flex; flex-wrap: wrap; gap: 12px; padding-top: 4px; }
-.wt-fl__doc-add {
-    display: grid;
-    place-items: center;
-    width: 96px;
-    height: 96px;
-    border-radius: 12px;
-    background: #f0eeea;
-    font-size: 26px;
-    color: #8f8c87;
-}
-.wt-fl__doc-add:hover { background: #e8e6e2; }
-
-/* Страница заказа: слева шапка, в центре блоки, справа поддержка. */
-.wt-fl__order {
-    display: grid;
-    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) auto;
-    gap: 16px;
-    align-items: start;
-}
-
-.wt-fl__ord-head { padding: 14px 16px; border-radius: 14px; }
-.wt-fl__ord-head.is-done { background: #e6f6ec; }
-.wt-fl__ord-head.is-cancelled { background: #fdeceb; }
-.wt-fl__ord-head > b { display: block; margin-bottom: 10px; font-size: 14px; }
-.wt-fl__ord-who { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; font-size: 13px; }
-.wt-fl__ord-map {
-    height: 120px;
-    margin: 12px 0;
-    border-radius: 10px;
-    background: repeating-linear-gradient(135deg, #eceae6 0 12px, #e3e1dd 12px 24px);
-}
-
-.wt-fl__ord-row {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 7px 0;
-    border-bottom: 1px solid #f0eeea;
-    font-size: 12.5px;
-}
-.wt-fl__ord-row span { color: #6d6b68; }
-.wt-fl__ord-row b { font-weight: 500; text-align: right; overflow-wrap: anywhere; }
-.wt-fl__ord-row.is-open b { color: #21201f; }
-
-.wt-fl__ord-main { min-width: 0; }
-.wt-fl__ord-block-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin: 18px 0 4px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid #eeece8;
-    font-size: 15px;
-    font-weight: 600;
-}
-.wt-fl__ord-block-head:first-child { margin-top: 0; }
-.wt-fl__chip { padding: 4px 11px; border-radius: 8px; background: #f0eeea; font-size: 11.5px; font-weight: 400; }
 
 /* Этапы: подпись, дельта под ней и время справа. Секунды здесь важны —
    ожидание клиента считается как «В пути» минус «На месте». */
-.wt-fl__stages { margin: 2px 0 6px; border-radius: 10px; background: #f7f6f4; }
-.wt-fl__stages.is-inline { margin-bottom: 10px; }
-.wt-fl__stage {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 8px 12px;
-    border-bottom: 1px solid #efedea;
-    font-size: 12.5px;
-}
-.wt-fl__stage:last-child { border-bottom: 0; }
-.wt-fl__stage span { display: flex; flex-direction: column; }
-.wt-fl__stage i { font-size: 10.5px; font-style: normal; color: #8f8c87; }
-.wt-fl__stage b { font-weight: 400; }
 
-.wt-fl__ord-comment {
-    min-height: 76px;
-    margin-top: 8px;
-    padding: 10px 12px;
-    border-radius: 10px;
-    background: #f4f2ef;
-    font-size: 12.5px;
-    color: #a9a6a1;
-}
-.wt-fl__ord-foot { display: flex; gap: 8px; margin-top: 10px; }
-.wt-fl__ord-side { display: flex; }
-
-@media (max-width: 1023px) {
-    .wt-fl__order { grid-template-columns: minmax(0, 1fr); }
-    .wt-fl__hdr-btn { padding: 0 10px; }
-}

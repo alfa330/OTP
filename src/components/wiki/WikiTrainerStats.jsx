@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    ArrowLeft, Download, FileText, Loader2, Users,
+    ArrowLeft, Check, Download, FileText, Loader2, Minus, Users, X,
 } from 'lucide-react';
 
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
@@ -10,6 +10,7 @@ import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
    разошлась бы с оригиналом на первой же правке. */
 import { Metric, Table, Td, Th } from './reportKit';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
+import { resultExamItems, resultVerdict } from './trainerResult';
 
 /* Статистика одного тренажёра.
  *
@@ -270,6 +271,8 @@ export default function WikiTrainerStats({
                 {runs.map((row) => {
                     const status = STATUS[row.status] || { label: row.status, tone: 'slate' };
                     const open = shown.has(row.id);
+                    const verdict = resultVerdict(row.result);
+                    const examItems = resultExamItems(row.result);
                     return (
                         <React.Fragment key={row.id}>
                             <tr>
@@ -278,14 +281,12 @@ export default function WikiTrainerStats({
                                 <Td>
                                     <span className="flex flex-wrap items-center gap-1.5">
                                         <IosBadge tone={status.tone}>{status.label}</IosBadge>
-                                        {/* Итог работы, а не пути: у тренажёра CRM видно,
-                                            верную ли ветку категорий выбрал человек.
-                                            Промахов может быть ноль и при неверной ветке —
-                                            если он дошёл до неё по подсказке. */}
-                                        {row.result ? (
-                                            <IosBadge tone={row.result.correct ? 'green' : 'red'}>
-                                                {row.result.correct ? 'верно' : 'неверно'}
-                                            </IosBadge>
+                                        {/* Итог работы, а не пути: у аттестации — балл,
+                                            у старых записей тренажёра CRM — верна ли ветка
+                                            категорий. Вердикта нет (курс, свободная среда —
+                                            судит наставник) — нет и метки (trainerResult.js). */}
+                                        {verdict ? (
+                                            <IosBadge tone={verdict.tone}>{verdict.label}</IosBadge>
                                         ) : null}
                                     </span>
                                 </Td>
@@ -307,7 +308,7 @@ export default function WikiTrainerStats({
                                                            text-indigo-600 hover:bg-indigo-50"
                                                 onClick={() => toggleRow(row.id)}
                                             >
-                                                {open ? 'скрыть' : 'что завёл'}
+                                                {open ? 'скрыть' : examItems.length ? 'разбор' : 'что завёл'}
                                             </button>
                                         ) : null}
                                     </span>
@@ -321,9 +322,37 @@ export default function WikiTrainerStats({
                                                             tracking-wide text-slate-400">
                                                 {row.result.title || 'Итог попытки'}
                                             </div>
+                                            {/* Разбор аттестации — первым: ради него строку
+                                                и открывают. Ниже — что человек завёл. */}
+                                            {examItems.length ? (
+                                                <ul className="mb-2 grid gap-1.5">
+                                                    {examItems.map((item, index) => {
+                                                        const Mark = item.ok ? Check : item.answered ? X : Minus;
+                                                        return (
+                                                            <li key={index} className="flex gap-2 text-[12.5px]">
+                                                                <Mark size={14} strokeWidth={2.5} aria-hidden="true"
+                                                                    className={`mt-0.5 shrink-0 ${item.ok
+                                                                        ? 'text-emerald-600'
+                                                                        : item.answered ? 'text-rose-600' : 'text-slate-400'}`} />
+                                                                <span className="min-w-0">
+                                                                    <span className="text-slate-700">{item.title}</span>
+                                                                    {!item.answered ? (
+                                                                        <span className="text-slate-400"> — не дошёл</span>
+                                                                    ) : null}
+                                                                    {item.problems.length ? (
+                                                                        <span className="block text-slate-500">
+                                                                            {item.problems.join(' ')}
+                                                                        </span>
+                                                                    ) : null}
+                                                                </span>
+                                                            </li>
+                                                        );
+                                                    })}
+                                                </ul>
+                                            ) : null}
                                             <dl className="grid gap-1">
-                                                {(row.result.fields || []).map(([label, value]) => (
-                                                    <div key={label} className="flex gap-2 text-[12.5px]">
+                                                {(row.result.fields || []).map(([label, value], index) => (
+                                                    <div key={index} className="flex gap-2 text-[12.5px]">
                                                         <dt className="w-40 shrink-0 text-slate-400">{label}</dt>
                                                         <dd className="m-0 min-w-0 text-slate-700">{value}</dd>
                                                     </div>

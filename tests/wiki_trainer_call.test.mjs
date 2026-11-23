@@ -9,20 +9,20 @@ import {
     callNext, canRing, emptyCall, isLive, syncReady, talkClock, talkMs,
 } from '../src/components/wiki/trainers/callMachine.js';
 import { EVENT_CODES, createEventLog } from '../src/components/wiki/trainers/trainerEvents.js';
-import {
-    applyEdit, findContractors, formatMoney, parseMoney, prepareCase, shiftDays,
-} from '../src/components/wiki/trainers/caseData.js';
-import { DEFAULT_CASE } from '../src/components/wiki/trainers/fleetData.js';
+import { parseMoney, prepareCase, shiftDays } from '../src/components/wiki/trainers/caseData.js';
+import { DEFAULT_CASE } from '../src/components/wiki/trainers/crmPeople.js';
 import { createDeskWorld } from '../src/components/wiki/trainers/deskWorld.js';
+import { findCrmAccounts } from '../src/components/wiki/trainers/crmModel.js';
+import { orderCard } from '../src/components/wiki/trainers/crmCard.js';
 
-/* Режим смены: стажёр встаёт на линию и принимает звонок.
+/* Режим смены: стажёр на линии и принимает звонок; рабочее место — одна CRM.
  *
  * Всё, что здесь проверяется, — правила, каждое из которых учебное. Автомат
  * звонка чистый и без таймеров, поэтому его можно прогнать целиком, не открывая
  * браузер: браузер потом проверит, что это ещё и нарисовано.
  */
 
-const ONLINE = { oktLogged: true, oktIn: true, oktStatus: null };
+const ONLINE = { onLine: true };
 
 test('режим смены — отдельный сценарий и отдельный ключ', () => {
     assert.equal(shift.key, 'operator-call');
@@ -44,10 +44,9 @@ test('вступление не рассказывает про водителя
 
 /* ── Автомат звонка ──────────────────────────────────────────────────────── */
 
-test('без входа в call-центр звонков не бывает', () => {
-    assert.equal(canRing({ oktLogged: false, oktIn: false }), false);
-    assert.equal(canRing({ oktLogged: true, oktIn: false }), false, 'вход в клиент ≠ линия');
-    assert.equal(canRing({ ...ONLINE, oktStatus: 'Перерыв' }), false, 'на перерыве звонков нет');
+test('звонки приходят только тому, кто на линии', () => {
+    assert.equal(canRing({ onLine: false }), false);
+    assert.equal(canRing({}), false, 'без линии звонков нет — в курсе и аттестации их и не бывает');
     assert.equal(canRing(ONLINE), true);
 
     // Пока не на линии — «позвонить» не срабатывает вовсе.
@@ -56,13 +55,23 @@ test('без входа в call-центр звонков не бывает', ()
     assert.deepEqual(idle.events, []);
 });
 
-test('перерыв во время вызова гасит линию, а разговор — не обрывает', () => {
+test('уход с линии во время вызова гасит звонок, а разговор — не обрывает', () => {
     const ringing = { ...emptyCall(), state: 'ringing' };
-    assert.equal(syncReady(ringing, { ...ONLINE, oktStatus: 'Перерыв' }).state, 'ended');
+    assert.equal(syncReady(ringing, { onLine: false }).state, 'ended');
 
     const talking = { ...emptyCall(), state: 'talking', answeredAt: 1000 };
-    assert.equal(syncReady(talking, { ...ONLINE, oktStatus: 'Перерыв' }).state, 'talking',
-        'перерыв не должен обрывать идущий разговор');
+    assert.equal(syncReady(talking, { onLine: false }).state, 'talking',
+        'уход с линии не должен обрывать идущий разговор');
+});
+
+test('смена начинается на линии: клиента телефонии в рабочем месте нет', () => {
+    const run = startRun(shift, { now: new Date(Date.UTC(2026, 7, 23, 6)) });
+    assert.equal(run.world.onLine, true);
+    assert.equal(run.world.tab, 'crm');
+    assert.equal(syncReady(emptyCall(), run.world).state, 'ready', 'звонок не придёт');
+    for (const gone of ['fleetView', 'oktLogged', 'oktIn']) {
+        assert.equal(run.world[gone], undefined, `в мире осталось поле ${gone}`);
+    }
 });
 
 test('полный путь звонка проходится и даёт события', () => {
@@ -157,7 +166,7 @@ test('итог смены содержит и карточку, и звонок'
 test('лента пишет только известные коды и схлопывает повторы', () => {
     let clock = 0;
     const log = createEventLog({ now: () => clock });
-    log.emit('okt.login');
+    log.emit('call.incoming');
     clock = 100;
     log.emit('ui.open_tab', { tab: 'transactions' });
     clock = 300;
@@ -169,7 +178,7 @@ test('лента пишет только известные коды и схло
     assert.equal(log.count(), 3);
     assert.equal(log.droppedCount(), 1);
     assert.deepEqual(log.all().map((i) => i.code),
-        ['okt.login', 'ui.open_tab', 'ui.open_tab']);
+        ['call.incoming', 'ui.open_tab', 'ui.open_tab']);
 });
 
 test('лента работает без сервера и отдаёт пачку, когда он есть', async () => {
@@ -186,9 +195,9 @@ test('лента работает без сервера и отдаёт пачк
 });
 
 test('коды событий — общий словарь с разбором', () => {
-    for (const code of ['okt.login', 'okt.callcenter_in', 'okt.status', 'call.incoming',
-        'call.answer', 'call.transfer', 'call.end', 'ui.tab', 'ui.search',
-        'ui.open_contractor', 'ui.open_tab', 'ui.action', 'crm.save']) {
+    for (const code of ['call.incoming', 'call.answer', 'call.transfer', 'call.end', 'ui.tab',
+        'crm.save', 'crm.section', 'crm.driver_search', 'crm.driver_open', 'crm.driver_tab',
+        'crm.ya_send', 'crm.ya_reply']) {
         assert.ok(EVENT_CODES.includes(code), `код «${code}» пропал из словаря`);
     }
     assert.equal(new Set(EVENT_CODES).size, EVENT_CODES.length, 'в словаре есть дубли');
@@ -201,67 +210,33 @@ test('даты слепка едут за сегодняшним днём', () =
     assert.equal(shiftDays('2026-08-23', { year: 2026, month: 8, day: 30 }), 7);
 
     const same = prepareCase(DEFAULT_CASE, { year: 2026, month: 8, day: 23 });
-    assert.equal(same.transactions[0].when, '18 авг., 06:17');
+    assert.equal(same.transactions[0].when, '22.08.2026 06:17', 'подпись не как в CRM');
+    assert.equal(same.transactions[0].day, '2026-08-22');
 
     // Через сто дней та же запись обязана сдвинуться, а не остаться в августе.
     const later = prepareCase(DEFAULT_CASE, { year: 2026, month: 12, day: 1 });
-    assert.notEqual(later.transactions[0].when, same.transactions[0].when);
+    assert.equal(later.transactions[0].when, '30.11.2026 06:17');
     assert.equal(later.shiftedBy, 100);
-
-    // Порядок событий при сдвиге сохраняется.
-    const gap = (c) => c.transactions.length;
-    assert.equal(gap(later), gap(same));
+    assert.equal(later.orders[0].stages[2].when, '30.11.2026 06:08:52', 'этапы заказа — с секундами');
 });
 
 test('пустой слепок не роняет подготовку', () => {
     const empty = prepareCase(null, { year: 2026, month: 8, day: 23 });
     assert.deepEqual(empty.transactions, []);
-    assert.deepEqual(empty.contractors, []);
+    assert.deepEqual(empty.orders, []);
     assert.ok(empty.crm);
 });
 
-test('поиск срабатывает с трёх знаков', () => {
-    const people = DEFAULT_CASE.contractors;
-    assert.equal(findContractors(people, 'ну').ready, false, 'два знака — ещё не поиск');
-    assert.equal(findContractors(people, 'ну').items.length, people.length,
-        'до порога список показывается целиком');
-    assert.equal(findContractors(people, 'AN000000').items.length, 1, 'поиск по номеру ВУ');
-    assert.equal(findContractors(people, 'Асхат').items.length >= 1, true, 'поиск по позывному');
-    assert.equal(findContractors(people, 'ЖЖЖ').items.length, 0);
-});
-
-/* ── Правки над копией слепка ────────────────────────────────────────────── */
-
-test('деньги разбираются и печатаются как в кабинете', () => {
+test('деньги кабинета читаются числом', () => {
     assert.equal(parseMoney('−618,95 ₸'), -618.95);
     assert.equal(parseMoney('17 524 ₸'), 17524);
     assert.equal(parseMoney('ерунда'), 0);
-    assert.equal(formatMoney(-618.95), '−618,95 ₸');
-    assert.equal(formatMoney(18524), '18 524 ₸');
-});
-
-test('начисление правит копию слепка и не трогает исходник', () => {
-    const id = DEFAULT_CASE.contractor.id;
-    const before = DEFAULT_CASE.contractor.balance;
-
-    const after = applyEdit(DEFAULT_CASE, 'balance_add', { id });
-    assert.equal(after.contractor.balance, '381,05 ₸');
-    assert.equal(after.contractors[0].balance, '381,05 ₸', 'в списке баланс не обновился');
-    assert.equal(DEFAULT_CASE.contractor.balance, before, 'исходный слепок мутировали');
-
-    const back = applyEdit(after, 'balance_sub', { id });
-    assert.equal(back.contractor.balance, before);
-});
-
-test('смена парка и неизвестное действие', () => {
-    assert.equal(applyEdit(DEFAULT_CASE, 'switch_park', { to: 'iTaxi' }).park.name, 'iTaxi');
-    // «Открыть в WhatsApp» данные не меняет, но падать не должно.
-    assert.equal(applyEdit(DEFAULT_CASE, 'whatsapp', {}), DEFAULT_CASE);
+    assert.equal(parseMoney(-50), -50);
 });
 
 /* «Заново» обязано начинать ТО ЖЕ дело. Пока слепок терялся, перезапуск молча
-   подменял водителя запасным — в браузере это выглядело как «panel_only не
-   работает», и тесты этого не видели, потому что зовут startRun напрямую. */
+   подменял водителя запасным — тесты этого не видели, потому что зовут
+   startRun напрямую. */
 test('перезапуск сохраняет слепок дела', () => {
     const caseData = {
         ...DEFAULT_CASE,
@@ -274,44 +249,39 @@ test('перезапуск сохраняет слепок дела', () => {
     assert.equal(again.world.case.contractor.panel_only, true, 'после «Заново» дело подменилось');
     assert.equal(again.world.case.contractor.last, 'Иванов');
 
-    // Без слепка перезапуск честно берёт запасной — это тоже рабочий случай.
-    assert.equal(restart(run).world.case.contractor.panel_only, false);
+    // Без слепка перезапуск честно берёт учебное дело — это тоже рабочий случай.
+    assert.ok(!restart(run).world.case.contractor.panel_only);
 });
 
 /* ── Стык двух дорожек ───────────────────────────────────────────────────────
  *
- * Слепки пишет другая машина (voice_trainer/cases), экраны читает эта. Пока
- * контракт соблюдается, дорожки не мешают друг другу — но проверять это надо
- * на НАСТОЯЩИХ файлах, а не на своём же DEFAULT_CASE: своя копия всегда
- * подходит сама себе.
- *
- * На этом стыке уже поймали дефект: строка списка по контракту несёт только
- * phone_pretty, а поиск смотрел в phone — звонящего не находило ни в одном
- * чужом деле.
+ * Слепки голосового тренажёра пишет другая дорожка (voice_trainer/cases) — по
+ * контракту в форме кабинета Диспетчерской. Рабочее место теперь одна CRM, и
+ * эти дела обязаны открываться в ней: звонящий находится по номеру из звонка,
+ * а у заказа с этапами есть карточка. Проверяем на НАСТОЯЩИХ файлах, а не на
+ * своём DEFAULT_CASE: своя копия всегда подходит сама себе.
  */
-test('слепки соседней дорожки читаются и в них находится звонящий', () => {
+const voiceCases = () => {
     const dir = new URL('../voice_trainer/cases/', import.meta.url);
-    let files;
     try {
-        files = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
+        return fs.readdirSync(dir).filter((name) => name.endsWith('.json'))
+            .map((name) => [name, JSON.parse(fs.readFileSync(new URL(name, dir), 'utf8'))]);
     } catch {
-        return; // Дел ещё нет — это не повод краснеть.
+        return []; // Дел ещё нет — это не повод краснеть.
     }
-    assert.ok(files.length, 'папка дел пуста');
+};
 
-    for (const name of files) {
-        const raw = JSON.parse(fs.readFileSync(new URL(name, dir), 'utf8'));
+test('слепки соседней дорожки читаются в CRM, и в них находится звонящий', () => {
+    for (const [name, raw] of voiceCases()) {
         const pub = raw.public || raw;
         const world = createDeskWorld({ today: { year: 2026, month: 8, day: 23 }, caseData: pub });
         const c = world.case;
-
-        assert.ok(c.contractors.length, `${name}: пустой список исполнителей`);
-        assert.ok(c.transactions.every((t) => t.when), `${name}: даты ведомости не подготовлены`);
+        assert.ok(c.transactions.every((t) => t.when && Number.isFinite(t.amount)), `${name}: ведомость не подготовлена`);
 
         // Первое настоящее действие смены — найти звонящего по номеру.
-        const found = findContractors(c.contractors, c.call.phone);
-        assert.equal(found.items.length, 1, `${name}: номер из звонка не даёт одну строку`);
-        assert.equal(found.items[0].id, c.contractor.id, `${name}: нашли не того человека`);
+        const found = findCrmAccounts(world, c.call.phone);
+        assert.equal(found.length, 1, `${name}: номер из звонка не даёт одну учётку`);
+        assert.equal(found[0].accountId, c.contractor.id, `${name}: нашли не того человека`);
 
         // Ответ остаётся на сервере: в public его быть не должно.
         const text = JSON.stringify(pub);
@@ -321,71 +291,34 @@ test('слепки соседней дорожки читаются и в них
     }
 });
 
-/* ── Карточка заказа и правда кабинета ───────────────────────────────────────
- *
- * Кадры s08–s16 опровергли три предположения, на которых стояли сценарии.
- * Тесты ниже стерегут именно их: экран не должен показывать НИ БОЛЬШЕ, ни
- * меньше настоящего кабинета — соврать в обе стороны одинаково вредно.
- */
-
-test('вкладка «Документы» пуста — это правда кабинета, а не недоделка', () => {
-    assert.deepEqual(DEFAULT_CASE.documents, [],
-        'в кабинете вкладка «Документы» пустая: ни видов, ни сроков, ни статусов');
-    // Срок действия ВУ живёт в «Деталях», а не в документах.
-    assert.ok(DEFAULT_CASE.contractor.license_to, 'срок ВУ пропал из карточки');
+test('готовые дела соседней дорожки дают карточку заказа с этапами', () => {
+    let withStages = 0;
+    for (const [name, raw] of voiceCases()) {
+        const world = createDeskWorld({ today: { year: 2026, month: 8, day: 23 }, caseData: raw.public });
+        for (const order of world.case.orders.filter((o) => o.stages.length)) {
+            withStages += 1;
+            const card = orderCard(world.case, order.number);
+            assert.ok(card, `${name}: у заказа ${order.number} нет карточки`);
+            assert.ok(card.order.stages.every((stage) => stage.at), `${name}: этапы заказа без времени`);
+        }
+    }
+    if (voiceCases().length) assert.ok(withStages > 0, 'ни в одном деле нет заказа с этапами');
 });
 
-test('допуск к линии объясняет «Диагностика», а не документы', () => {
+/* ── Карточка заказа ─────────────────────────────────────────────────────── */
+
+test('допуск к линии объясняет «Диагностика»', () => {
     assert.ok(DEFAULT_CASE.contractor.diagnostics, 'нет поля diagnostics');
-    assert.ok(Array.isArray(DEFAULT_CASE.contractor.diagnostics_details));
     assert.ok(DEFAULT_CASE.contractor.priority, 'нет поля priority');
 });
 
-test('у заказа есть страница с посекундной хронологией', () => {
-    const order = DEFAULT_CASE.orders[0];
-    assert.match(order.order_uuid, /^[0-9a-f]{32}$/, 'номер заказа не 32 hex');
-    assert.ok(order.card, 'у заказа нет карточки');
-    assert.ok(order.card.totals.some(([label]) => label === 'Итого'), 'нет строки «Итого»');
-
-    const names = order.card.stages.map((s) => s.name);
-    for (const stage of ['Создан', 'На месте', 'В пути', 'Выполнено']) {
-        assert.ok(names.includes(stage), `нет этапа «${stage}»`);
-    }
-    assert.ok(names.includes('Ожидаемое время подачи'),
-        'без ожидаемого времени подачи не видно, опоздал ли водитель');
-});
-
-/* Ожидание клиента = «В пути» − «На месте». В кабинете такого поля НЕТ — оно
-   выводится из этапов, и стажёр обязан это уметь. Проверяем, что данных для
-   вывода достаточно, а НЕ то, что мы его показали. */
-test('по этапам считается ожидание клиента', () => {
-    const stages = DEFAULT_CASE.orders[0].card.stages;
-    const at = (name) => new Date(`${stages.find((s) => s.name === name).at}Z`).getTime();
-    const waiting = at('В пути') - at('На месте');
-    assert.ok(waiting > 0, 'ожидание получилось отрицательным');
-    assert.equal(waiting, 11000, 'ожидание клиента должно считаться посекундно');
-});
-
-test('готовые дела соседней дорожки тоже дают карточку заказа', () => {
-    const dir = new URL('../voice_trainer/cases/', import.meta.url);
-    let files;
-    try {
-        files = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
-    } catch {
-        return;
-    }
-    let withCard = 0;
-    for (const name of files) {
-        const pub = JSON.parse(fs.readFileSync(new URL(name, dir), 'utf8')).public;
-        const world = createDeskWorld({ today: { year: 2026, month: 8, day: 23 }, caseData: pub });
-        for (const order of world.case.orders) {
-            if (!order.card) continue;
-            withCard += 1;
-            assert.ok(order.card.stages.every((s) => s.when),
-                `${name}: этапы заказа не подготовлены к показу`);
-        }
-        // Пустые «Документы» — норма и здесь.
-        assert.ok(Array.isArray(world.case.documents), `${name}: документы не массив`);
-    }
-    assert.ok(withCard > 0, 'ни в одном деле нет карточки заказа');
+/* Ожидание клиента = «В пути» − «На месте». Отдельного поля нет — оно
+   выводится из этапов карточки заказа, и стажёр обязан это уметь. */
+test('по этапам карточки заказа считается ожидание клиента', () => {
+    const world = createDeskWorld({ today: { year: 2026, month: 8, day: 23 } });
+    const card = orderCard(world.case, '11837902');
+    const stage = (name) => card.order.stages.find((item) => item.label === name);
+    assert.equal(stage('В пути').after, '00:11', 'ожидание клиента должно считаться посекундно');
+    assert.equal(stage('На месте').after, '06:12');
+    assert.match(card.order.id, /^[0-9a-f]{32}$/, 'ID заказа не 32 hex');
 });
