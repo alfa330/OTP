@@ -38,8 +38,11 @@ def _constant(name):
     raise AssertionError(f'{name} не найден в bot_schedule2.py')
 
 
-GRANTS = _constant('WORK_SCHEDULE_SHIFT_EDITOR_GRANTS')
-EDITOR, OTHER_EDITOR = sorted(GRANTS)
+# Настоящий список сейчас пуст (допуск снят 23.11.2026): правило проверяем на выдуманных id,
+# которые подставляются в пространство имён функций; зеркало сайта сверяется с настоящим.
+REAL_GRANTS = _constant('WORK_SCHEDULE_SHIFT_EDITOR_GRANTS')
+EDITOR, OTHER_EDITOR = 9170, 9225
+GRANTS = {EDITOR: ('szov',), OTHER_EDITOR: ('szov',)}
 
 # id → (роль, отдел)
 PEOPLE = {
@@ -246,7 +249,7 @@ class SiteMirrorTests(unittest.TestCase):
         self.assertIsNotNone(match, 'зеркало списка в App.jsx не найдено')
         site = {int(uid): tuple(re.findall(r"'(\w+)'", codes))
                 for uid, codes in re.findall(r"(\d+): Object\.freeze\(\[([^\]]*)\]\)", match.group(1))}
-        self.assertEqual(site, {uid: tuple(codes) for uid, codes in GRANTS.items()})
+        self.assertEqual(site, {uid: tuple(codes) for uid, codes in REAL_GRANTS.items()})
 
 
 if __name__ == '__main__':

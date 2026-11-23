@@ -40,8 +40,11 @@ def _constant(name):
     raise AssertionError(f'{name} не найден в bot_schedule2.py')
 
 
-VIEW_ONLY = _constant('WORK_SCHEDULE_VIEW_ONLY_USER_IDS')
-VIEWER, OTHER_VIEWER = sorted(VIEW_ONLY)
+# Настоящий список сейчас пуст (допуск снят 23.11.2026): правило проверяем на выдуманных id,
+# которые подставляются в пространство имён функций; зеркало сайта сверяется с настоящим.
+REAL_VIEW_ONLY = _constant('WORK_SCHEDULE_VIEW_ONLY_USER_IDS')
+VIEWER, OTHER_VIEWER = 9170, 9225
+VIEW_ONLY = frozenset({VIEWER, OTHER_VIEWER})
 OPERATOR = 700       # оператор СЗоВ не из списка
 SUPERVISOR = 701     # СВ отдела продаж
 
@@ -208,7 +211,7 @@ class SiteMirrorTests(unittest.TestCase):
         match = re.search(r'^const WORK_SCHEDULE_VIEW_ONLY_USER_IDS = new Set\(\[([\d,\s]*)\]\);', app, re.M)
         self.assertIsNotNone(match, 'зеркало списка в App.jsx не найдено')
         site = {int(x) for x in match.group(1).replace(' ', '').split(',') if x}
-        self.assertEqual(site, set(VIEW_ONLY))
+        self.assertEqual(site, set(REAL_VIEW_ONLY))
 
 
 if __name__ == '__main__':

@@ -60,6 +60,18 @@ const evaluateFlags = new Function(
 );
 const flags = (user) => evaluateFlags(user, normalizeRole, isDepartmentHead, headedDepartmentId, isAdminLikeRole, isSupervisorRole);
 const canOpen = (user) => flags(user).canAccessDialListSection;
+// Список временного просмотра сейчас пуст (допуск снят 23.11.2026): правило проверяем на
+// выдуманных id — объявление списка подменяется только в этом вычислителе.
+const TEST_VIEWERS = [9170, 9225];
+const evaluateWithViewers = new Function(
+    'user', 'normalizeRole', 'isDepartmentHead', 'headedDepartmentId', 'isAdminLikeRoleFn', 'isSupervisorRole',
+    `${[...MODULE_NAMES, ...FLAG_NAMES, ...SECTION_FLAGS].map((name) => (name === 'DIAL_LIST_VIEW_ONLY_USER_IDS'
+        ? `const DIAL_LIST_VIEW_ONLY_USER_IDS = new Set(${JSON.stringify(TEST_VIEWERS)});`
+        : declarationOf(name))).join('\n')}
+     return { canAccessDialListSection, dialListViewOnly, isAdminLikeRole, isDepartmentManager };`,
+);
+const flagsWithViewers = (user) => evaluateWithViewers(user, normalizeRole, isDepartmentHead, headedDepartmentId,
+    isAdminLikeRole, isSupervisorRole);
 
 /* Профили в том виде, в каком их отдаёт /api/auth/me (id отделов — как на проде). */
 const SZOV = 1;
@@ -127,22 +139,28 @@ test('временный просмотр (владелец, 21.11.2026): дво
     // «Сотрудникам … в сзов надо открыть админский доступ временный к разделам Удаленный КЦ
     // и Графики работы чисто на просмотр». Что внутри открыто и что запись закрыта, решает
     // сервер (tests/test_dial_list_view_only.py); портал — пункт меню и экран без кнопок правки.
+    // Список на сайте — тот же, что на сервере (23.11.2026 оба пусты: допуск снят).
     const viewers = [...appSource.match(/^const DIAL_LIST_VIEW_ONLY_USER_IDS = new Set\(\[([\d,\s]*)\]\);$/m)[1]
         .matchAll(/\d+/g)].map((m) => Number(m[0]));
-    assert.ok(viewers.length > 0);
-    const server = readLf('dial_list/service.py').match(/^DIAL_LIST_VIEW_ONLY_USER_IDS = frozenset\(\{([\d,\s]*)\}\)$/m);
+    const server = readLf('dial_list/service.py').match(/^DIAL_LIST_VIEW_ONLY_USER_IDS = frozenset\(([^)]*)\)$/m);
     assert.ok(server, 'список на сервере не найден');
     assert.deepEqual([...server[1].matchAll(/\d+/g)].map((m) => Number(m[0])).sort(), [...viewers].sort());
-    for (const id of viewers) {
-        const f = flags(profile({ id, role: 'operator' }));
+    // По настоящему списку: у кого в нём нет — раздела нет.
+    for (const id of [170, 225, 99999]) {
+        if (viewers.includes(id)) continue;
+        assert.equal(canOpen(profile({ id, role: 'operator' })), false, id);
+    }
+    // Само правило — на выдуманных id.
+    for (const id of TEST_VIEWERS) {
+        const f = flagsWithViewers(profile({ id, role: 'operator' }));
         assert.equal(f.canAccessDialListSection, true, id);
         assert.equal(f.dialListViewOnly, true, id);
         assert.equal(f.isDepartmentManager, false, 'пункт — в ветке рядового');
     }
     // Остальные операторы — как раньше.
-    assert.equal(canOpen(profile({ id: 99999, role: 'operator' })), false);
+    assert.equal(flagsWithViewers(profile({ id: 99999, role: 'operator' })).canAccessDialListSection, false);
     // Своё право сильнее просмотра: тот же человек СВ СЗоВ — раздел с правкой.
-    const sv = flags(profile({ id: viewers[0], role: 'sv' }));
+    const sv = flagsWithViewers(profile({ id: TEST_VIEWERS[0], role: 'sv' }));
     assert.equal(sv.canAccessDialListSection, true);
     assert.equal(sv.dialListViewOnly, false);
     // Экран раздела получает «без правки» ровно у просмотра.

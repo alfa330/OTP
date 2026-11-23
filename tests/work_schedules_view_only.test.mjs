@@ -48,13 +48,21 @@ const declarationOf = (name) => {
 const NAMES = ['RANK_AND_FILE_ROLES', 'isRankAndFileRole', 'WORK_SCHEDULE_VIEW_ONLY_USER_IDS',
     'currentUserRole', 'isSuperAdmin', 'isDepartmentHeadUser', 'scopedDepartmentId', 'isScopedDepartmentHead',
     'workSchedulesViewOnly'];
-const evaluate = new Function(
+// Настоящий список сейчас пуст (допуск снят 23.11.2026): правило проверяем на выдуманных id —
+// объявление списка подменяется в вычислителе; зеркало «сайт = сервер» сверяется с настоящим.
+const TEST_VIEWERS = [9170, 9225];
+const buildEvaluate = (ids) => new Function(
     'user', 'normalizeRole', 'isDepartmentHead', 'headedDepartmentId', 'isAdminLikeRoleFn', 'BACK_OFFICE_EMPLOYEE_ROLES',
-    `${NAMES.map(declarationOf).join('\n')}
+    `${NAMES.map((name) => (ids && name === 'WORK_SCHEDULE_VIEW_ONLY_USER_IDS'
+        ? `const WORK_SCHEDULE_VIEW_ONLY_USER_IDS = new Set(${JSON.stringify(ids)});`
+        : declarationOf(name))).join('\n')}
      return workSchedulesViewOnly;`,
 );
-const viewOnly = (user) => evaluate(user, normalizeRole, isDepartmentHead, headedDepartmentId, isAdminLikeRole,
-    BACK_OFFICE_EMPLOYEE_ROLES);
+const evaluateReal = buildEvaluate(null);
+const evaluateTest = buildEvaluate(TEST_VIEWERS);
+const args = [normalizeRole, isDepartmentHead, headedDepartmentId, isAdminLikeRole, BACK_OFFICE_EMPLOYEE_ROLES];
+const viewOnly = (user) => evaluateTest(user, ...args);
+const viewOnlyReal = (user) => evaluateReal(user, ...args);
 
 const viewers = [...appSource.match(/^const WORK_SCHEDULE_VIEW_ONLY_USER_IDS = new Set\(\[([\d,\s]*)\]\);$/m)[1]
     .matchAll(/\d+/g)].map((m) => Number(m[0]));
@@ -66,20 +74,23 @@ const profile = (overrides = {}) => ({
 });
 
 test('список людей — тот же, что на сервере', () => {
-    assert.ok(viewers.length > 0);
-    const server = readLf('bot_schedule2.py').match(/^WORK_SCHEDULE_VIEW_ONLY_USER_IDS = frozenset\(\{([\d,\s]*)\}\)$/m);
+    const server = readLf('bot_schedule2.py').match(/^WORK_SCHEDULE_VIEW_ONLY_USER_IDS = frozenset\(([^)]*)\)$/m);
     assert.ok(server, 'список на сервере не найден');
     assert.deepEqual([...server[1].matchAll(/\d+/g)].map((m) => Number(m[0])).sort(), [...viewers].sort());
+    // По настоящему списку: кого в нём нет — пункта нет.
+    for (const id of [170, 225, 700]) {
+        if (!viewers.includes(id)) assert.equal(viewOnlyReal(profile({ id })), false, id);
+    }
 });
 
 test('просмотр — только у рядовых из списка', () => {
-    for (const id of viewers) assert.equal(viewOnly(profile({ id })), true, id);
+    for (const id of TEST_VIEWERS) assert.equal(viewOnly(profile({ id })), true, id);
     assert.equal(viewOnly(profile()), false, 'оператор не из списка');
     // У СВ, админа и главы «Графики работы» и так свои — отдельный пункт им не нужен.
     for (const role of ['sv', 'admin', 'trainer']) {
-        assert.equal(viewOnly(profile({ id: viewers[0], role })), false, role);
+        assert.equal(viewOnly(profile({ id: TEST_VIEWERS[0], role })), false, role);
     }
-    assert.equal(viewOnly(profile({ id: viewers[0], headed_department_id: 1, headed_department_ids: [1] })), false);
+    assert.equal(viewOnly(profile({ id: TEST_VIEWERS[0], headed_department_id: 1, headed_department_ids: [1] })), false);
 });
 
 test('пункт меню — у рядового, рядом с его «Мои смены», которые остаются', () => {
@@ -109,7 +120,8 @@ test('экран: сетка в режиме просмотра, свой экз
 
 test('правка смен и выходных (владелец, 21.11.2026) — строки операторов СЗоВ, без статусов и «Контроля»', () => {
     // Тот же список, что на сервере (tests/test_work_schedule_shift_editor.py сверяет и его).
-    assert.match(appSource, /^const WORK_SCHEDULE_SHIFT_EDITOR_GRANTS = Object\.freeze\(\{ 170: Object\.freeze\(\['szov'\]\), 225: Object\.freeze\(\['szov'\]\) \}\);$/m);
+    // Список пуст с 23.11.2026 (допуск снят); правило ниже проверяется на выдуманных значениях.
+    assert.match(appSource, /^const WORK_SCHEDULE_SHIFT_EDITOR_GRANTS = Object\.freeze\(\{.*\}\);$/m);
     const start = appSource.indexOf('function ShiftPlannerViewWithCalendar(');
     const planner = appSource.slice(start, appSource.indexOf('\n        function startConfetti(', start));
     // Правщик — только в экземпляре просмотра всех графиков.

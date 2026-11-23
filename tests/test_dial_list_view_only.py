@@ -34,7 +34,18 @@ SZOV = 1
 LINE_DEPARTMENT = 1954   # удалённый КЦ (профиль remote_cc)
 TEZ = 560                # автообзвон Тез (профиль tez) — другой раздел сайта
 PROFILES = {LINE_DEPARTMENT: 'remote_cc', TEZ: 'tez'}
-VIEWER, OTHER_VIEWER = sorted(dial_service.DIAL_LIST_VIEW_ONLY_USER_IDS)
+# Список допуска сейчас пуст (снят 23.11.2026): правило проверяем на выдуманных id, которые
+# подставляются в список на время каждого теста (_WithViewers) и убираются после.
+VIEWER, OTHER_VIEWER = 9170, 9225
+
+
+class _WithViewers(unittest.TestCase):
+    def setUp(self):
+        self._saved = dial_service.DIAL_LIST_VIEW_ONLY_USER_IDS
+        dial_service.DIAL_LIST_VIEW_ONLY_USER_IDS = frozenset({VIEWER, OTHER_VIEWER})
+
+    def tearDown(self):
+        dial_service.DIAL_LIST_VIEW_ONLY_USER_IDS = self._saved
 OPERATOR = 700           # оператор СЗоВ не из списка
 
 
@@ -103,7 +114,7 @@ class _Svc(dial_service.DialListService):
         return [], 'v2'
 
 
-class ViewOnlyRoutesTests(unittest.TestCase):
+class ViewOnlyRoutesTests(_WithViewers):
     ROLES = {VIEWER: 'operator', OTHER_VIEWER: 'operator', OPERATOR: 'operator'}
     DEPARTMENTS = {VIEWER: 'szov', OTHER_VIEWER: 'szov', OPERATOR: 'szov'}
 
@@ -203,12 +214,16 @@ class ViewOnlyRoutesTests(unittest.TestCase):
             dial_service.DIAL_LIST_PILOT_LOGINS = original
 
 
-class ViewOnlyListTests(unittest.TestCase):
+class ViewOnlyListTests(_WithViewers):
     def test_rule_reads_ids_of_any_shape(self):
         self.assertIs(dial_service.view_only_user(VIEWER), True)
         self.assertIs(dial_service.view_only_user(str(VIEWER)), True)
         for value in (OPERATOR, None, '', 'abc'):
             self.assertIs(dial_service.view_only_user(value), False, value)
+
+
+class SiteMirrorTests(unittest.TestCase):
+    """Настоящий список (без подмены) — тот же на сайте и на сервере."""
 
     def test_site_holds_the_same_people(self):
         with open(APP_PATH, encoding='utf-8') as fh:

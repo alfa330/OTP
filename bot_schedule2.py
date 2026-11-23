@@ -2579,7 +2579,8 @@ TRAINER_WORK_SCHEDULE_DEPARTMENT_CODES = ('szov', 'op')
 # _resolve_management_requester / _resolve_work_schedule_editor, куда оператору
 # хода нет. Граница сетки не шире роли: станет СВ или главой — правила роли.
 # Снять — убрать id отсюда и из App.jsx (WORK_SCHEDULE_VIEW_ONLY_USER_IDS).
-WORK_SCHEDULE_VIEW_ONLY_USER_IDS = frozenset({170, 225})
+# Пусто: допуск 170 и 225 снят 23.11.2026 по слову владельца («Эти доступы можно убирать»).
+WORK_SCHEDULE_VIEW_ONLY_USER_IDS = frozenset()
 
 
 def _is_work_schedule_view_only(requester_id):
@@ -2927,7 +2928,8 @@ def _resolve_scoped_operator_for_requester(
 # day_off, shifts_bulk, bulk_actions (у неё лишь смена, выходной и очистка дня).
 # Статусы (отпуск, больничный, увольнение), штрафы, ЧС, перерывы, тренинги —
 # прежние проверки, допуск их не открывает. Снять — убрать id отсюда и из App.jsx.
-WORK_SCHEDULE_SHIFT_EDITOR_GRANTS = {170: ('szov',), 225: ('szov',)}
+# Пусто: допуск 170 и 225 снят 23.11.2026 по слову владельца («Эти доступы можно убирать»).
+WORK_SCHEDULE_SHIFT_EDITOR_GRANTS = {}
 
 
 def _work_schedule_shift_editor_codes(requester_id):

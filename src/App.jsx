@@ -567,8 +567,9 @@ const DIAL_LIST_GROUP_REPORT_HEAD_CODES = new Set(['front_office']);
 // операторов СЗоВ. Решающие — сервер: dial_list.service.DIAL_LIST_VIEW_ONLY_USER_IDS (все
 // отделы раздела, запись — 403) и WORK_SCHEDULE_VIEW_ONLY_USER_IDS в bot_schedule2.py (сетка
 // всех отделов). Здесь — пункты меню и экраны без кнопок правки. Снять — убрать id в обоих местах.
-const DIAL_LIST_VIEW_ONLY_USER_IDS = new Set([170, 225]);
-const WORK_SCHEDULE_VIEW_ONLY_USER_IDS = new Set([170, 225]);
+// Пусто: допуск 170 и 225 снят 23.11.2026 по слову владельца («Эти доступы можно убирать»).
+const DIAL_LIST_VIEW_ONLY_USER_IDS = new Set([]);
+const WORK_SCHEDULE_VIEW_ONLY_USER_IDS = new Set([]);
 // Сетка всех графиков у такого зрителя — отдельный раздел меню: «Графики работы» оператора
 // (work_schedules) — его «Мои смены», и отнимать их на время просмотра нельзя.
 const WORK_SCHEDULES_VIEW_ONLY_VIEW = 'work_schedules_view';
@@ -576,7 +577,7 @@ const WORK_SCHEDULES_VIEW_ONLY_VIEW = 'work_schedules_view';
 // на изменение смен», выбрал «Только СЗоВ» и «Смены и выходные»): users.id → коды отделов, чьи смены
 // и выходные человек правит (операторов, не свои). Статус, «Контроль» и прочее — как в просмотре.
 // Зеркало WORK_SCHEDULE_SHIFT_EDITOR_GRANTS в bot_schedule2.py — решающий сервер.
-const WORK_SCHEDULE_SHIFT_EDITOR_GRANTS = Object.freeze({ 170: Object.freeze(['szov']), 225: Object.freeze(['szov']) });
+const WORK_SCHEDULE_SHIFT_EDITOR_GRANTS = Object.freeze({});
 const dialListPilotAllows = (userLike) => (
     DIAL_LIST_PILOT_LOGINS.size === 0
     || DIAL_LIST_PILOT_LOGINS.has(String(userLike?.login || '').trim().toLowerCase())
