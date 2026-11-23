@@ -20,7 +20,6 @@ Blueprint собирается фабрикой и получает зависи
     PUT    /cards/<id>/substage              подстатус «В работе» / «Приглашен в офис»
     POST   /cards/<id>/move                  переход по этапам
     POST   /cards/<id>/reassign              переназначить / вернуть в пул (руководитель)
-    POST   /cards/<id>/shifts/sync           пересчитать смены из статусов работы сейчас (руками смены не ведутся)
     PUT    /cards/<id>/motivation            выплачено / отменено (руководитель рекрутинга)
     POST   /upload                           файл базы контактов (multipart: file, source_id)
     GET    /batches, /batches/<id>           партии загрузки
@@ -226,6 +225,7 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                     'targets': rules.TARGETS_FROM,
                     'stage_dates': [{'code': code, 'label': label} for code, label in reports.STAGE_DATE_OPTIONS],
                     'shifts_to_hire': rules.SHIFTS_TO_HIRE,
+                    'shifts_for_trainer': rules.SHIFTS_FOR_TRAINER,
                     'idle_days': rules.IDLE_RETURN_DAYS,
                     'grant_kinds': [{'code': code, 'label': rules.GRANT_LABELS[code]} for code in rules.GRANT_KINDS],
                     'reason_kinds': [{'code': code, 'label': rules.REASON_KIND_LABELS[code]} for code in rules.REASON_KINDS],
@@ -353,7 +353,7 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                                                        expand_sources=expand, responses_open=opened)
             sources = queries.list_sources(cursor)
         payload = []
-        for code, label in rules.STAGES:
+        for code, label in rules.BOARD_COLUMNS:
             column = {'stage': code, 'label': label, 'total': counts.get(code, 0),
                       'cards': [public_card(card, ctx) for card in columns.get(code, [])]}
             if code == rules.RESPONSES:
@@ -458,14 +458,6 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
         with db._get_cursor() as cursor:
             assignments = queries.card_assignments(cursor, card_id)
         return jsonify({'card': public_card(card, ctx), 'assignments': _json(assignments)})
-
-    @hiring_route('/cards/<int:card_id>/shifts/sync', methods=('POST',))
-    def hiring_shifts_sync(card_id, ctx):
-        """Пересчитать смены из статусов работы сейчас (джоба делает это сама раз в полчаса)."""
-        card = service.sync_card_shifts(ctx, card_id)
-        with db._get_cursor() as cursor:
-            shifts = queries.card_shifts(cursor, card_id)
-        return jsonify({'card': public_card(card, ctx), 'shifts': _json(shifts)})
 
     @hiring_route('/cards/<int:card_id>/motivation', methods=('PUT',))
     def hiring_motivation(card_id, ctx):

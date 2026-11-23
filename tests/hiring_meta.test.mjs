@@ -39,7 +39,10 @@ test('ten stages in the order of the spec and the «no response» archive last',
     assert.equal(STAGE_LABELS.hired, 'Отработал 7 дней');
     assert.equal(STAGES[10], 'no_response');
     assert.equal(STAGE_LABELS.no_response, 'Не отвечает звонок/чат');
-    assert.deepEqual(FUNNEL_STAGES, ['in_work', 'dialed', 'invited_office', 'invited_training', 'on_training', 'on_line', 'hired']);
+    // «Отработал 10 дней» (SZOV-10) — категория тренера: строка воронки и подпись есть, этапа — нет.
+    assert.deepEqual(FUNNEL_STAGES, ['in_work', 'dialed', 'invited_office', 'invited_training', 'on_training', 'on_line', 'hired', 'hired_10']);
+    assert.equal(STAGE_LABELS.hired_10, 'Отработал 10 дней');
+    assert.ok(!STAGES.includes('hired_10'));
 });
 
 test('times keep Almaty digits as they are', () => {

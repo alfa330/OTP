@@ -42,6 +42,16 @@ STAGE_CODES = tuple(code for code, _ in STAGES)
 STAGE_LABELS = dict(STAGES)
 STAGE_ORDER = {code: index for index, code in enumerate(STAGE_CODES)}
 
+# «Отработал 10 дней» (SZOV-10, 23.11.2026: «отдельная категория для учёта отработанных смен кандидатов тренером») —
+# категория тренера, а не этап: карточка остаётся в «Отработал 7 дней» (найм закрыт, рекрутеру засчитано), а с десятой
+# смены попадает ещё и сюда — «отображается одновременно в категориях «Отработал 7 смен» и «Отработал 10 смен»». Отметка —
+# hiring_cards.hired10_at и строка истории этапов с этим кодом: по ней её видят воронка, «дата этапа» и история карточки.
+HIRED_10 = 'hired_10'
+HIRED_10_LABEL = 'Отработал 10 дней'
+# Колонки доски: этапы и категория тренера сразу за «Отработал 7 дней».
+BOARD_COLUMNS = tuple(item for code, label in STAGES
+                      for item in (((code, label), (HIRED_10, HIRED_10_LABEL)) if code == HIRED else ((code, label),)))
+
 POOL_STAGES = (CONTACTS, RESPONSES)
 FINAL_STAGES = (REFUSED, DROPPED, HIRED)
 # Карточка «в работе» у рекрутера — закреплена и ещё не на обучении: по этим этапам
@@ -52,9 +62,9 @@ ASSIGNED_STAGES = (IN_WORK, INVITED_OFFICE, INVITED_TRAINING)
 NO_RESPONSE_HOURS = 72
 # В пул руководитель возвращает и карточку из «Не отвечает»: её закрепление то же, что «В работе».
 RELEASABLE_STAGES = ASSIGNED_STAGES + (NO_RESPONSE,)
-# Этапы, по которым строится воронка дашборда (ТЗ 8.1, блок 2), в порядке ТЗ.
-FUNNEL_STAGES = (IN_WORK, 'dialed', INVITED_OFFICE, INVITED_TRAINING, ON_TRAINING, ON_LINE, HIRED)
-FUNNEL_LABELS = dict(STAGES, dialed='Дозвон (хотя бы один успешный)')
+# Этапы, по которым строится воронка дашборда (ТЗ 8.1, блок 2), в порядке ТЗ; «Отработал 10 дней» — за 7 днями.
+FUNNEL_STAGES = (IN_WORK, 'dialed', INVITED_OFFICE, INVITED_TRAINING, ON_TRAINING, ON_LINE, HIRED, HIRED_10)
+FUNNEL_LABELS = dict(STAGES, dialed='Дозвон (хотя бы один успешный)', **{HIRED_10: HIRED_10_LABEL})
 
 KIND_CONTACT, KIND_RESPONSE = 'contact', 'response'
 KIND_LABELS = {KIND_CONTACT: 'Контакт', KIND_RESPONSE: 'Отклик'}
@@ -88,11 +98,29 @@ def substage_allowed(stage, substage):
 NO_ANSWER_SUGGEST_AFTER = 3
 # Без касаний столько дней — карточка сама возвращается в пул (ТЗ 7.1: «1 месяц»).
 IDLE_RETURN_DAYS = 30
-# «Отработал 7 дней» = семь отработанных смен на линии (ТЗ 7.2).
+# «Отработал 7 дней» = семь отработанных смен на линии (ТЗ 7.2) — засчитывается рекрутеру.
 SHIFTS_TO_HIRE = 7
+# «Отработал 10 дней» = десять смен — засчитывается тренеру группы (SZOV-10). 8–9 смен: рекрутеру 7 засчитаны, тренеру
+# 10 — нет.
+SHIFTS_FOR_TRAINER = 10
 # Смена считается из статусов работы сотрудника (daily_hours.work_time), а не руками (владелец
-# 30.10.2026): день, где по статусам отработано не меньше часа, — выход на линию.
+# 30.10.2026): день, где по статусам отработано не меньше часа, — выход на линию. Обе категории ставит
+# сама система, без подтверждения в карточке (23.11.2026: «проверку смен надо сделать автоматической»).
 SHIFT_MIN_HOURS = 1.0
+
+
+def shift_credits(stage, hired10_at, shifts):
+    """Какие категории засчитать по числу смен — одним решением для обеих (SZOV-10): «Отработал 7 дней» — карточке на
+    линии с семью сменами и больше, «Отработал 10 дней» — с десятью и больше, если ещё не засчитано. Десять смен за один
+    пересчёт дают обе сразу; недобор до десяти ничего не отклоняет — засчитываются 7. Раз засчитанное не снимается,
+    даже если статусы потом пересчитали в меньшее число."""
+    shifts = int(shifts or 0)
+    credits = []
+    if stage == ON_LINE and shifts >= SHIFTS_TO_HIRE:
+        credits.append(HIRED)
+    if stage in (ON_LINE, HIRED) and not hired10_at and shifts >= SHIFTS_FOR_TRAINER:
+        credits.append(HIRED_10)
+    return credits
 
 # ─── Группы на обучение ───────────────────────────────────────────────────────
 # Вместимость группы задаёт тренер (владелец 18.11.2026): рекрутер, приглашая на обучение, видит, сколько
@@ -148,8 +176,9 @@ TOUCH_LABELS = {TOUCH_CALL: 'Звонок', TOUCH_WHATSAPP: 'WhatsApp', TOUCH_CO
 # «Взять в работу»), lead (руководитель рекрутинга / HR), trainer (тренер группы карточки),
 # dept_head (руководитель отдела, куда был найм).
 # needs — что обязано прийти с переходом: office (дата визита), group (группа на обучение),
-# refusal (инициатор и причина), drop (инициатор, причина, день), line (дата выхода),
-# shifts (семь отмеченных смен).
+# refusal (инициатор и причина), drop (инициатор, причина, день), line (дата выхода).
+# «Вышел на линию» → «Отработал 7 дней» здесь нет: его делает сама система на седьмой смене из статусов
+# (shift_credits, HiringService._credit_shifts), руками не переводят (23.11.2026).
 
 TRANSITIONS = {
     (CONTACTS, IN_WORK): {'who': ('recruiter', 'lead'), 'take': True},
@@ -163,7 +192,6 @@ TRANSITIONS = {
     (INVITED_TRAINING, REFUSED): {'who': ('owner', 'lead'), 'needs': ('refusal',)},
     (ON_TRAINING, ON_LINE): {'who': ('trainer', 'owner', 'lead'), 'needs': ('line',)},
     (ON_TRAINING, DROPPED): {'who': ('trainer', 'owner', 'lead'), 'needs': ('drop',)},
-    (ON_LINE, HIRED): {'who': ('dept_head',), 'needs': ('shifts',)},
     (ON_LINE, DROPPED): {'who': ('dept_head', 'owner', 'lead'), 'needs': ('drop',)},
     (REFUSED, IN_WORK): {'who': ('lead',), 'reactivate': True},
     (DROPPED, IN_WORK): {'who': ('lead',), 'reactivate': True},
@@ -265,9 +293,6 @@ def _check_need(need, payload):
             raise TransitionError('HIRING_NEED_DAY', 'Укажите день отсева — номер дня обучения или день на линии')
     if need == 'line' and not payload.get('line_started_at'):
         raise TransitionError('HIRING_NEED_LINE_DATE', 'Укажите дату выхода на линию')
-    if need == 'shifts' and int(payload.get('shifts_done') or 0) < SHIFTS_TO_HIRE:
-        raise TransitionError('HIRING_NEED_SHIFTS', 'Отмечено смен: %s из %s — подтвердить можно после седьмой' % (
-            int(payload.get('shifts_done') or 0), SHIFTS_TO_HIRE))
 
 
 def _positive_int(value):
@@ -383,7 +408,8 @@ SOURCES_WITHOUT_CHANNEL = ('whatsapp', 'manual')
 
 MOTIVATION_PENDING, MOTIVATION_COUNTED, MOTIVATION_PAID, MOTIVATION_CANCELLED = (
     'pending', 'counted', 'paid', 'cancelled')
-MOTIVATION_LABELS = {MOTIVATION_PENDING: 'Ожидает подтверждения', MOTIVATION_COUNTED: 'Засчитано',
+# «Ждёт 7 смен»: подтверждать начисление больше некому — его засчитывает седьмая смена сама (SZOV-10).
+MOTIVATION_LABELS = {MOTIVATION_PENDING: 'Ждёт 7 смен', MOTIVATION_COUNTED: 'Засчитано',
                      MOTIVATION_PAID: 'Выплачено', MOTIVATION_CANCELLED: 'Отменено'}
 
 GRANT_LEAD, GRANT_STAFF, GRANT_REMOTE = 'lead', 'staff', 'remote'

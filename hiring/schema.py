@@ -527,6 +527,10 @@ _STATEMENTS = [
     # источник ушёл: по этой связи следующий старт доносит метки, которые успел поставить старый экземпляр.
     "ALTER TABLE hiring_sources ADD COLUMN IF NOT EXISTS color VARCHAR(16)",
     "ALTER TABLE hiring_channels ADD COLUMN IF NOT EXISTS source_id INTEGER",
+
+    # «Отработал 10 дней» (SZOV-10): когда кандидату засчитана десятая смена — категория тренера группы. Карточка при
+    # этом остаётся в «Отработал 7 дней»; смены после седьмой считаются дальше, пока отметки нет.
+    "ALTER TABLE hiring_cards ADD COLUMN IF NOT EXISTS hired10_at TIMESTAMP",
 ]
 
 

@@ -229,6 +229,7 @@ def test_boot_rights_and_dictionaries(client):
     assert lead['me']['scope_label'] == 'Руководитель рекрутинга'
     # Десять этапов ТЗ и архив «Не отвечает звонок/чат» последним (владелец 20.11.2026).
     assert len(lead['meta']['stages']) == 11 and lead['meta']['shifts_to_hire'] == 7
+    assert lead['meta']['shifts_for_trainer'] == 10 and 'hired_10' not in {row['code'] for row in lead['meta']['stages']}
     assert lead['meta']['stages'][-1] == {'code': 'no_response', 'label': 'Не отвечает звонок/чат'}
     assert {row['code'] for row in lead['integrations']} == {'hh', 'olx', 'webhook', 'whatsapp'}
     assert lead['dictionaries']['departments']
@@ -252,6 +253,11 @@ def test_card_flow_through_routes(client):
     pool = client.get('/api/hiring/board', headers=as_user(REC2)).get_json()
     responses = next(column for column in pool['columns'] if column['stage'] == 'responses')
     assert responses['total'] == 1 and responses['cards'][0]['phone'] is None and responses['cards'][0]['phone_hidden']
+    # «Отработал 10 дней» — колонка категории тренера сразу за «Отработал 7 дней» (SZOV-10), пока пустая.
+    stages = [column['stage'] for column in pool['columns']]
+    assert stages[stages.index('hired'):] == ['hired', 'hired_10', 'no_response']
+    ten = next(column for column in pool['columns'] if column['stage'] == 'hired_10')
+    assert ten == {'stage': 'hired_10', 'label': 'Отработал 10 дней', 'total': 0, 'cards': []}
     assert client.post('/api/hiring/cards', json={'phone': '8 705 123 45 67', 'source_id': manual['id']}, headers=as_user(REC1)).status_code == 200
     assert client.post('/api/hiring/cards', json={'phone': '12', 'source_id': manual['id']}, headers=as_user(REC1)).get_json()['code'] == 'HIRING_BAD_PHONE'
 
@@ -296,9 +302,12 @@ def test_card_flow_through_routes(client):
     assert [row['stage'] for row in moved['stages']] == ['responses', 'in_work', 'invited_office']
     edited = client.patch('/api/hiring/cards/%s' % card['id'], json={'city': 'Астана', 'next_contact_at': None}, headers=as_user(REC1)).get_json()
     assert edited['card']['city'] == 'Астана' and edited['card']['next_contact_at'] is None
-    # Смены руками не ведутся: старой ручки нет, пересчёт из статусов — только у карточки на линии.
+    # Смены руками не ведутся и не пересчитываются по кнопке: смены и обе категории («Отработал 7 / 10 дней») система
+    # считает сама (SZOV-10) — ни старой ручки отметки, ни ручки пересчёта нет.
     assert client.post('/api/hiring/cards/%s/shifts' % card['id'], json={'date': '2026-10-30'}, headers=as_user(REC1)).status_code == 404
-    assert client.post('/api/hiring/cards/%s/shifts/sync' % card['id'], headers=as_user(REC1)).status_code == 409
+    assert client.post('/api/hiring/cards/%s/shifts/sync' % card['id'], headers=as_user(REC1)).status_code == 404
+    hired = client.post('/api/hiring/cards/%s/move' % card['id'], json={'target': 'hired'}, headers=as_user(SUPER))
+    assert hired.status_code == 409 and hired.get_json()['code'] == 'HIRING_HIRED_AUTO'
 
     full = client.get('/api/hiring/cards/%s' % card['id'], headers=as_user(REC1)).get_json()
     assert full['card']['targets'] == ['invited_training', 'refused'] and 'owner' in full['actor']
@@ -334,7 +343,8 @@ def test_upload_reports_and_settings(client):
     # Загрузка выше пишет карточку текущим временем — месяц отчёта тот же, иначе с ноября тест красный.
     month = rules.month_of(rules.now_almaty())
     dashboard = client.get('/api/hiring/reports/dashboard', query_string={'month': month}, headers=lead).get_json()
-    assert dashboard['filters']['month'] == month and len(dashboard['funnel']) == 7 and dashboard['losses']['refused']['count'] == 0
+    assert dashboard['filters']['month'] == month and len(dashboard['funnel']) == 8 and dashboard['losses']['refused']['count'] == 0
+    assert dashboard['funnel'][-1]['stage'] == 'hired_10'   # «Отработал 10 дней» — за «7 днями» (SZOV-10)
     export = client.get('/api/hiring/reports/dashboard/export', query_string={'month': month}, headers=lead)
     assert export.status_code == 200 and export.data[:2] == b'PK' and 'filename*=UTF-8' in export.headers['Content-Disposition']
     assert client.get('/api/hiring/reports/cards', query_string={'month': month, 'key': 'received'}, headers=lead).get_json()['total'] == 1

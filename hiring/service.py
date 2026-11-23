@@ -844,6 +844,10 @@ class HiringService:
         payload = payload or {}
         if target not in rules.STAGE_CODES:
             raise HiringError('HIRING_BAD_STAGE', 'Такого этапа нет')
+        if target == rules.HIRED:
+            # «Отработал 7 дней» ставит сама система на седьмой смене из статусов работы (SZOV-10, 23.11.2026: «проверку
+            # смен надо сделать автоматической») — в карточке подтверждать нечего.
+            raise HiringError('HIRING_HIRED_AUTO', '«Отработал 7 дней» ставится сам — на седьмой смене по статусам работы', 409)
         if target == rules.IN_WORK:
             # Из пула в работу — только атомарным «Взять в работу» (claim_card): по ЭТАПУ карточки, а не по
             # флагу из тела, иначе любой рекрутер переводил бы чужие контакты в «В работе» без закрепления.
@@ -861,10 +865,8 @@ class HiringService:
             if not has_touch and rules.TRANSITIONS.get((card['stage'], target), {}).get('needs_touch'):
                 has_touch = queries.wa_our_message(cursor, [card.get('phone'), card.get('whatsapp')],
                                                    self._wa_contact_since(cursor, card), whatsapp.AUTO_REPLY_GAP)
-            check = dict(payload)
-            check['shifts_done'] = queries.count_shifts(cursor, card_id)
             try:
-                rule = rules.check_transition(card, target, kinds, has_touch=has_touch, payload=check)
+                rule = rules.check_transition(card, target, kinds, has_touch=has_touch, payload=payload)
             except rules.TransitionError as exc:
                 raise HiringError(exc.code, exc.message, 403 if exc.code == 'HIRING_FORBIDDEN' else 409)
             fields = {'stage': target, 'substage': None, 'updated_at': now}
@@ -891,9 +893,6 @@ class HiringService:
                 fields['line_started_at'] = _parse_date(payload.get('line_started_at'), 'дату выхода на линию')
             elif target in (rules.REFUSED, rules.DROPPED):
                 fields.update(self._closing_fields(cursor, card, target, payload, now))
-            elif target == rules.HIRED:
-                fields.update({'hired_at': now, 'hired_by': ctx['user_id'], 'is_closed': True, 'closed_at': now,
-                               'shifts_done': check['shifts_done']})
             if rule.get('reactivate'):
                 fields.update(self._reactivation_fields(cursor, ctx, card, payload, now))
             cursor.execute("SAVEPOINT hiring_move")
@@ -949,11 +948,6 @@ class HiringService:
             notices.on_line(cursor, fresh, now)
             # Учётка сотрудника и смены по статусам — сразу, не дожидаясь джобы.
             self._sync_card_shifts(cursor, fresh, now)
-        elif target == rules.HIRED:
-            queries.upsert_motivation(cursor, card_id, card.get('recruiter_id'), rules.MOTIVATION_COUNTED, now)
-            queries.set_motivation(cursor, card_id, now, confirmed_at=now, confirmed_by=ctx['user_id'],
-                                   status=rules.MOTIVATION_COUNTED)
-            notices.motivation_counted(cursor, card, card.get('recruiter_id'), now)
         elif target == rules.DROPPED:
             if queries.get_motivation(cursor, card_id):
                 queries.set_motivation(cursor, card_id, now, status=rules.MOTIVATION_CANCELLED,
@@ -1012,7 +1006,8 @@ class HiringService:
     # ─── Смены на линии — из статусов работы (владелец 30.10.2026) ───────────
     # Руками смены не ведутся: кандидат, вышедший на линию, — это сотрудник в «Учете сотрудников»
     # с тем же телефоном, а его дни по статусам работы считает «Учет часов» (daily_hours.work_time).
-    # День, где отработано не меньше SHIFT_MIN_HOURS, — смена; седьмая — колокол руководителю отдела.
+    # День, где отработано не меньше SHIFT_MIN_HOURS, — смена. Седьмая сама ставит «Отработал 7 дней» (рекрутеру),
+    # десятая — «Отработал 10 дней» (тренеру): без подтверждения в карточке (SZOV-10, 23.11.2026).
 
     def _employee_for_card(self, cursor, card):
         """Учётка сотрудника, в которого превратился кандидат, — по телефону; найденная запоминается."""
@@ -1026,48 +1021,67 @@ class HiringService:
         return int(employee['id'])
 
     def _sync_card_shifts(self, cursor, card, now):
-        """Смены одной карточки на линии из daily_hours её сотрудника. Возвращает (сотрудник найден, смен)."""
+        """Смены одной карточки из daily_hours её сотрудника и зачёт категорий по ним. Возвращает (сотрудник найден,
+        смен, засчитанные категории)."""
         employee_id = self._employee_for_card(cursor, card)
         before = int(card.get('shifts_done') or 0)
         if not employee_id or not queries.daily_hours_table_exists(cursor):
-            return bool(employee_id), before
+            return bool(employee_id), before, []
         since = card.get('line_started_at') or (card['taken_at'].date() if card.get('taken_at') else now.date())
         days = queries.worked_days(cursor, employee_id, since, now.date(), rules.SHIFT_MIN_HOURS)
         total = queries.replace_auto_shifts(cursor, card['id'], days, now)
         if total != before:
             queries.update_card(cursor, card['id'], shifts_done=total, updated_at=now)
-        if total >= rules.SHIFTS_TO_HIRE and before < rules.SHIFTS_TO_HIRE:
-            notices.shifts_ready(cursor, queries.get_card(cursor, card['id']), now)
-        return True, total
+        return True, total, self._credit_shifts(cursor, card, total, now)
+
+    def _credit_shifts(self, cursor, card, total, now):
+        """«Отработал 7 дней» и «Отработал 10 дней» — одной функцией и одной транзакцией по фактическому числу смен
+        (SZOV-10: «одна функция, которая выполняется как единый процесс»). Седьмая смена закрывает найм и засчитывает
+        мотивацию закреплённому рекрутеру, десятая отмечает категорию тренера группы. Восемь-девять смен — рекрутеру 7
+        засчитаны, тренеру 10 нет; не дошёл до десяти — ничего не отклоняется. Возвращает засчитанные категории."""
+        credits = rules.shift_credits(card['stage'], card.get('hired10_at'), total)
+        card_id = card['id']
+        if rules.HIRED in credits:
+            queries.update_card(cursor, card_id, stage=rules.HIRED, substage=None, hired_at=now, hired_by=None,
+                                is_closed=True, closed_at=now, updated_at=now)
+            queries.add_stage(cursor, card_id, rules.HIRED, None, None, 'Система', now)
+            queries.upsert_motivation(cursor, card_id, card.get('recruiter_id'), rules.MOTIVATION_COUNTED, now)
+            queries.set_motivation(cursor, card_id, now, confirmed_at=now, confirmed_by=None, status=rules.MOTIVATION_COUNTED)
+            notices.motivation_counted(cursor, card, card.get('recruiter_id'), now)
+        if rules.HIRED_10 in credits:
+            queries.update_card(cursor, card_id, hired10_at=now, updated_at=now)
+            queries.add_stage(cursor, card_id, rules.HIRED_10, None, None, 'Система', now)
+            notices.trainer_counted(cursor, card, now)
+        if credits:
+            log.info('hiring: карточка %s, смен %s — засчитано: %s', card_id, total, ', '.join(credits))
+        return credits
 
     def sync_shifts(self, now=None):
-        """Джоба: смены всех карточек на линии — из статусов работы. Сводка: карточек, с учёткой, смен."""
+        """Джоба раз в полчаса: смены карточек на линии и «Отработал 7 дней» до десятой — из статусов работы, с зачётом
+        категорий. Сводка: карточек, с учёткой, смен, засчитано «7 дней» и «10 дней»."""
         now = now or self._now()
-        summary = {'cards': 0, 'matched': 0, 'shifts': 0}
+        summary = {'cards': 0, 'matched': 0, 'shifts': 0, 'hired': 0, 'hired_10': 0}
         with self._cursor() as cursor:
-            cards = queries.on_line_cards(cursor)
+            cards = queries.shift_cards(cursor)
         for card in cards:
             with self._cursor() as cursor:
                 fresh = queries.get_card(cursor, card['id'], lock=True)
-                if not fresh or fresh['stage'] != rules.ON_LINE or fresh['is_closed']:
+                if not fresh or not self._counts_shifts(fresh):
                     continue
-                matched, total = self._sync_card_shifts(cursor, fresh, now)
+                matched, total, credits = self._sync_card_shifts(cursor, fresh, now)
             summary['cards'] += 1
             summary['matched'] += int(matched)
             summary['shifts'] += total
+            summary['hired'] += int(rules.HIRED in credits)
+            summary['hired_10'] += int(rules.HIRED_10 in credits)
         return summary
 
-    def sync_card_shifts(self, ctx, card_id):
-        """«Обновить из статусов» в карточке — тому, кто её видит; джоба делает то же раз в полчаса."""
-        now = self._now()
-        with self._cursor() as cursor:
-            card = self._load_visible(cursor, ctx, card_id, lock=True)
-            if not self.involved(ctx, card):
-                raise _forbidden(READ_ONLY_MESSAGE)
-            if card['stage'] != rules.ON_LINE:
-                raise HiringError('HIRING_NOT_ON_LINE', 'Смены считаются после выхода на линию', 409)
-            self._sync_card_shifts(cursor, card, now)
-            return queries.get_card(cursor, card_id)
+    @staticmethod
+    def _counts_shifts(card):
+        """Карточке ещё считаются смены: на линии — до «7 дней», в «7 днях» — до «10 дней»."""
+        if card['stage'] == rules.ON_LINE:
+            return not card['is_closed']
+        return card['stage'] == rules.HIRED and not card.get('hired10_at')
 
     # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ───────────────────
 

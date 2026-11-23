@@ -58,6 +58,37 @@ class StageTests(unittest.TestCase):
         self.assertIn('no_response', rules.RELEASABLE_STAGES)
         self.assertNotIn('no_response', [dst for (_src, dst) in rules.TRANSITIONS])   # туда — только сторож
 
+    def test_ten_days_is_a_category_next_to_seven(self):
+        # «Отработал 10 дней» (SZOV-10) — категория тренера, а не этап: колонка доски и строка воронки сразу за
+        # «Отработал 7 дней», карточка же остаётся в «7 днях» — поэтому в этапах и переходах её нет.
+        self.assertNotIn('hired_10', rules.STAGE_CODES)
+        self.assertEqual([code for code, _ in rules.BOARD_COLUMNS],
+                         ['contacts', 'responses', 'in_work', 'invited_office', 'invited_training', 'refused', 'on_training',
+                          'on_line', 'dropped', 'hired', 'hired_10', 'no_response'])
+        self.assertEqual(dict(rules.BOARD_COLUMNS)['hired_10'], 'Отработал 10 дней')
+        self.assertEqual(rules.FUNNEL_STAGES[-2:], ('hired', 'hired_10'))
+        self.assertEqual(rules.FUNNEL_LABELS['hired_10'], 'Отработал 10 дней')
+        self.assertNotIn('hired_10', [dst for (_src, dst) in rules.TRANSITIONS])
+        # «Отработал 7 дней» руками тоже не ставится — только система по сменам.
+        self.assertNotIn('hired', [dst for (_src, dst) in rules.TRANSITIONS])
+
+    def test_shift_credits_one_decision_for_seven_and_ten(self):
+        """Логика SZOV-10 буквально: 7 смен — «7 дней»; 10 — обе; 8 — рекрутеру 7, тренеру ничего; недобор до 10 не
+        отклоняет «7 дней»; раз засчитанное не повторяется."""
+        credits = rules.shift_credits
+        self.assertEqual(credits('on_line', None, 6), [])
+        self.assertEqual(credits('on_line', None, 7), ['hired'])
+        self.assertEqual(credits('on_line', None, 8), ['hired'])
+        self.assertEqual(credits('on_line', None, 9), ['hired'])
+        self.assertEqual(credits('on_line', None, 10), ['hired', 'hired_10'])     # обе за один пересчёт
+        self.assertEqual(credits('on_line', None, 12), ['hired', 'hired_10'])
+        self.assertEqual(credits('hired', None, 8), [])                          # 7 уже засчитано, до 10 не дошёл
+        self.assertEqual(credits('hired', None, 10), ['hired_10'])
+        self.assertEqual(credits('hired', '2026-11-23 12:12', 11), [])           # 10 уже засчитано
+        for stage in ('on_training', 'dropped', 'refused', 'in_work', None):
+            self.assertEqual(credits(stage, None, 15), [], stage)                # только линия и «7 дней»
+        self.assertEqual((rules.SHIFTS_TO_HIRE, rules.SHIFTS_FOR_TRAINER), (7, 10))
+
     def test_substages_of_tz_4_1(self):
         self.assertEqual([c for c, _ in rules.SUBSTAGES['in_work']], ['dial', 'no_answer', 'whatsapp'])
         self.assertEqual([c for c, _ in rules.SUBSTAGES['invited_office']], ['expected', 'came', 'no_show'])
@@ -70,7 +101,7 @@ class StageTests(unittest.TestCase):
     def test_targets_follow_tz_4_2(self):
         self.assertEqual(rules.TARGETS_FROM['in_work'], ['invited_office', 'invited_training', 'refused'])
         self.assertEqual(rules.TARGETS_FROM['invited_office'], ['invited_training', 'refused'])
-        self.assertEqual(rules.TARGETS_FROM['on_line'], ['dropped', 'hired'])
+        self.assertEqual(rules.TARGETS_FROM['on_line'], ['dropped'])   # «Отработал 7 дней» — сам, по сменам
         self.assertEqual(rules.TARGETS_FROM['refused'], ['in_work'])
         self.assertNotIn('hired', rules.TARGETS_FROM)
 
@@ -166,9 +197,13 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertIn("if (codeOf(error) === 'HIRING_CAPACITY_BELOW_TAKEN') onStale(group?.id);", self.groups)
 
     def test_card_is_read_only_for_reader(self):
-        # Тренер в чужой карточке только читает: поля комментария и «Обновить из статусов» нет (сервер их и не примет).
+        # Тренер в чужой карточке только читает: поля комментария нет (сервер его и не примет). «Обновить из статусов»
+        # нет ни у кого: смены и обе категории система считает сама (SZOV-10).
         self.assertIn('const readOnly = Boolean(data?.read_only);', self.sheet)
-        self.assertEqual(self.sheet.count('{!readOnly && ('), 2)
+        self.assertEqual(self.sheet.count('{!readOnly && ('), 1)
+        self.assertNotIn('shifts/sync', self.sheet)
+        self.assertNotIn('Обновить из статусов', self.sheet)
+        self.assertNotIn("setMove('hired')", self.sheet)
         self.assertIn('placeholder="Комментарий в ленту"', self.sheet[self.sheet.index('{!readOnly && ('):])
         # Рекрутер в отборе доски — и тренеру: он читает всю воронку.
         self.assertIn('{(caps.lead || caps.read_all) && (', self.board)
@@ -327,14 +362,16 @@ class TransitionTests(unittest.TestCase):
         self.check(card, 'refused', ['owner'], payload={'initiator': 'candidate', 'reason_id': 3})
 
     def test_who_may_do_what(self):
+        # «Отработал 7 дней» не переход ни для кого — ни для руководителя отдела с семью сменами (SZOV-10).
+        for kinds in (['dept_head'], ['owner', 'lead'], ['dept_head', 'owner', 'lead', 'trainer']):
+            with self.assertRaises(rules.TransitionError) as caught:
+                self.check({'stage': 'on_line'}, 'hired', kinds, payload={'shifts_done': 12})
+            self.assertEqual(caught.exception.code, 'HIRING_BAD_TRANSITION')
         with self.assertRaises(rules.TransitionError) as caught:
-            self.check({'stage': 'on_line'}, 'hired', ['owner', 'lead'], payload={'shifts_done': 7})
+            self.check({'stage': 'on_line'}, 'dropped', ['trainer'], payload={'initiator': 'self', 'reason_id': 1, 'day': 2})
         self.assertEqual(caught.exception.code, 'HIRING_FORBIDDEN')
         self.assertIn('руководитель отдела', caught.exception.message)
-        with self.assertRaises(rules.TransitionError) as caught:
-            self.check({'stage': 'on_line'}, 'hired', ['dept_head'], payload={'shifts_done': 6})
-        self.assertEqual(caught.exception.code, 'HIRING_NEED_SHIFTS')
-        self.check({'stage': 'on_line'}, 'hired', ['dept_head'], payload={'shifts_done': 7})
+        self.check({'stage': 'on_line'}, 'dropped', ['dept_head'], payload={'initiator': 'self', 'reason_id': 1, 'day': 2})
         self.check({'stage': 'invited_training'}, 'on_training', ['trainer'])
         with self.assertRaises(rules.TransitionError):
             self.check({'stage': 'refused'}, 'in_work', ['owner'])

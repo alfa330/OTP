@@ -482,13 +482,13 @@ _CARD_COLUMNS = """
     c.id, c.candidate_no, c.kind, c.full_name, c.phone, c.whatsapp, c.city, c.vacancy_id, c.vacancy_text, c.plan_id,
     c.source_id, c.batch_id, c.platform_ref, c.campaign, c.referred_by, c.received_at, c.stage, c.substage,
     c.recruiter_id, c.taken_at, c.next_contact_at, c.last_touch_at, c.no_answer_streak, c.office_visit_at,
-    c.group_id, c.training_started_at, c.line_started_at, c.shifts_done, c.hired_at, c.hired_by,
+    c.group_id, c.training_started_at, c.line_started_at, c.shifts_done, c.hired_at, c.hired_by, c.hired10_at,
     c.close_initiator, c.close_reason_id, c.close_reason_text, c.close_stage, c.close_day, c.close_comment,
     c.is_closed, c.closed_at, c.repeat_of_card_id, c.reactivations, c.comment, c.created_by, c.created_at, c.updated_at,
     c.employee_user_id, e.name AS employee_name,
     v.name AS vacancy_name, COALESCE(v.department_id, g.department_id) AS department_id,
     s.name AS source_name, s.code AS source_code, r.name AS recruiter_name, g.name AS group_name,
-    g.start_date AS group_start_date, g.trainer_id AS trainer_id, b.file_name AS batch_file,
+    g.start_date AS group_start_date, g.trainer_id AS trainer_id, tr.name AS trainer_name, b.file_name AS batch_file,
     s.color AS source_color
 """
 _CARD_FROM = """
@@ -499,6 +499,7 @@ _CARD_FROM = """
     LEFT JOIN users r ON r.id = c.recruiter_id
     LEFT JOIN hiring_batches b ON b.id = c.batch_id
     LEFT JOIN users e ON e.id = c.employee_user_id
+    LEFT JOIN users tr ON tr.id = g.trainer_id
 """
 
 
@@ -551,7 +552,7 @@ def update_card(cursor, card_id, **fields):
                'last_touch_at', 'no_answer_streak', 'office_visit_at', 'group_id', 'training_started_at',
                'line_started_at', 'shifts_done', 'hired_at', 'hired_by', 'close_initiator', 'close_reason_id',
                'close_reason_text', 'close_stage', 'close_day', 'close_comment', 'is_closed', 'closed_at',
-               'reactivations', 'comment', 'updated_at', 'candidate_no', 'employee_user_id')
+               'reactivations', 'comment', 'updated_at', 'candidate_no', 'employee_user_id', 'hired10_at')
     return _update('hiring_cards', card_id, fields, allowed=allowed, cursor=cursor)
 
 
@@ -697,9 +698,16 @@ def card_shifts(cursor, card_id):
     return _all(cursor)
 
 
-def on_line_cards(cursor):
-    """Открытые карточки «Вышел на линию» — им смены считаются из статусов работы."""
-    cursor.execute("SELECT " + _CARD_COLUMNS + _CARD_FROM + " WHERE c.stage = 'on_line' AND NOT c.is_closed ORDER BY c.id")
+def shift_cards(cursor):
+    """Карточки, которым смены считаются из статусов работы: открытые «Вышел на линию» — до седьмой смены, и
+    «Отработал 7 дней» без «Отработал 10 дней» — до десятой (SZOV-10). Уволенный сотрудник смен больше не наберёт —
+    его «7 дней» не пересчитываются, иначе список рос бы без конца."""
+    cursor.execute("SELECT " + _CARD_COLUMNS + _CARD_FROM + """
+         WHERE (c.stage = 'on_line' AND NOT c.is_closed)
+            OR (c.stage = 'hired' AND c.hired10_at IS NULL AND c.employee_user_id IS NOT NULL
+                AND COALESCE(e.status, '') <> 'fired')
+         ORDER BY c.id
+    """)
     return _all(cursor)
 
 
@@ -1149,6 +1157,18 @@ def board(cursor, caps, user_id, filters, per_column=60, responses_period=None, 
     for row in rows:
         row.pop('rn', None)
         columns.setdefault(row['stage'], []).append(row)
+    # «Отработал 10 дней» (SZOV-10) — колонка категории, а не этапа: те же карточки «Отработал 7 дней», у которых засчитана
+    # десятая смена, — кандидат виден в обеих колонках сразу. Свежие засчитанные сверху; запросы — только когда на доске
+    # вообще есть «7 дней».
+    columns[rules.HIRED_10] = []
+    if counts.get(rules.HIRED):
+        ten_where = base_where + " AND c.stage = 'hired' AND c.hired10_at IS NOT NULL"
+        cursor.execute("SELECT COUNT(*) " + _CARD_FROM + " WHERE " + ten_where, scope_params + params)
+        counts[rules.HIRED_10] = int(cursor.fetchone()[0])
+        if counts[rules.HIRED_10]:
+            cursor.execute("SELECT " + _CARD_COLUMNS + _CARD_FROM + " WHERE " + ten_where
+                           + " ORDER BY c.hired10_at DESC, c.id DESC LIMIT %s", scope_params + params + [int(per_column)])
+            columns[rules.HIRED_10] = _all(cursor)
     return columns, counts, by_source
 
 

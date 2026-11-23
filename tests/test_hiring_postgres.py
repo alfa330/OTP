@@ -7,8 +7,8 @@
     телефон сотрудника, повторное обращение после завершённой карточки;
   * «Взять в работу» закрепляет за одним рекрутером, второй получает «Уже в работе» (ТЗ 7.1);
   * касания ставят подстатус сами, три недозвона подряд — подсказка (ТЗ 4.2, 5.4);
-  * переходы по правилам ТЗ 4.2 со всеми следствиями: группа, обучение, линия, смены,
-    подтверждение «Отработал 7 дней» руководителем отдела, мотивация (ТЗ 7.2);
+  * переходы по правилам ТЗ 4.2 со всеми следствиями: группа, обучение, линия, смены из статусов,
+    «Отработал 7 дней» и «Отработал 10 дней» — сами по сменам (SZOV-10), мотивация (ТЗ 7.2);
   * отказ и отсев с причинами, повторная активация руководителем;
   * возврат в пул без касаний месяц, напоминания о дате контакта, уведомления колокола;
   * загрузка базы файлом, вебхук площадок, отклики OLX из журнала робота;
@@ -363,7 +363,7 @@ def test_full_path_to_hired(world):
         assert total == 1 and rows[0]['kind'] == notices.KIND_ON_LINE
     # Смены — из статусов работы сотрудника (владелец 30.10.2026), руками не ведутся: пока учётки с
     # телефоном кандидата в «Учете сотрудников» нет — смен нет.
-    assert service.sync_shifts() == {'cards': 1, 'matched': 0, 'shifts': 0}
+    assert service.sync_shifts() == {'cards': 1, 'matched': 0, 'shifts': 0, 'hired': 0, 'hired_10': 0}
     with world['db']._get_cursor() as cur:
         cur.execute("INSERT INTO users (id, name, role, status, department_id, phone) VALUES (77, 'Новый Оператор', 'operator', 'working', 367, %s)",
                     ('8 (%s) %s-%s-%s' % (card['phone'][2:5], card['phone'][5:8], card['phone'][8:10], card['phone'][10:]),))
@@ -372,45 +372,188 @@ def test_full_path_to_hired(world):
         cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (77, '2026-10-31', 0.75)")   # меньше часа — не смена
         cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (77, '2026-10-20', 8)")      # до выхода на линию
     clock.now = datetime(2026, 11, 3, 12, 0)
-    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 6}
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 6, 'hired': 0, 'hired_10': 0}
     with world['db']._get_cursor() as cur:
         fresh = queries.get_card(cur, card['id'])
         assert fresh['shifts_done'] == 6 and fresh['employee_user_id'] == 77 and fresh['employee_name'] == 'Новый Оператор'
+        assert fresh['stage'] == 'on_line' and not fresh['is_closed']
         shifts = queries.card_shifts(cur, card['id'])
         assert [str(s['shift_date']) for s in shifts] == ['2026-10-%02d' % d for d in range(25, 31)]
         assert shifts[0]['source'] == 'auto' and float(shifts[0]['work_hours']) == 7.5
-    with pytest.raises(HiringError) as caught:
-        service.move(head, card['id'], 'hired', {})
-    assert caught.value.code == 'HIRING_NEED_SHIFTS'
-    # Седьмой день с часом работы — седьмая смена и колокол руководителю отдела; повторный прогон ничего не удваивает.
+    # «Отработал 7 дней» руками не ставит никто — ни руководитель отдела, ни руководитель рекрутинга (SZOV-10:
+    # «проверку смен надо сделать автоматической»).
+    for who in (head, lead, ctx_of(world, SUPER)):
+        with pytest.raises(HiringError) as caught:
+            service.move(who, card['id'], 'hired', {})
+        assert caught.value.code == 'HIRING_HIRED_AUTO' and caught.value.status == 409
+    # Седьмой день с часом работы — седьмая смена: найм закрывается сам, мотивация засчитывается рекрутеру.
     with world['db']._get_cursor() as cur:
         cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (77, '2026-11-01', 1.0)")
-    card = service.sync_card_shifts(head, card['id'])
-    assert card['shifts_done'] == 7
-    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 7}
+    clock.now = datetime(2026, 11, 3, 12, 42)
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 7, 'hired': 1, 'hired_10': 0}
     with world['db']._get_cursor() as cur:
-        total, rows = queries.bell(cur, OP_HEAD, 10)
-        assert any(row['title'].startswith('Семь смен на линии') for row in rows)
-    with pytest.raises(HiringError) as caught:
-        service.sync_card_shifts(ctx_of(world, REC2), card['id'])
-    assert caught.value.code == 'HIRING_NOT_FOUND'
-    with pytest.raises(HiringError) as caught:
-        service.move(lead, card['id'], 'hired', {})
-    assert caught.value.code == 'HIRING_FORBIDDEN'
-    card = service.move(head, card['id'], 'hired', {})
-    assert card['stage'] == 'hired' and card['is_closed'] and card['hired_by'] == OP_HEAD
-    with world['db']._get_cursor() as cur:
+        card = queries.get_card(cur, card['id'])
+        assert card['stage'] == 'hired' and card['is_closed'] and card['hired_by'] is None
+        assert card['hired_at'] == clock.now and card['closed_at'] == clock.now and card['hired10_at'] is None
+        assert card['shifts_done'] == 7
         motivation = queries.get_motivation(cur, card['id'])
         assert motivation['status'] == 'counted' and motivation['recruiter_id'] == REC1
+        assert motivation['confirmed_at'] == clock.now and motivation['confirmed_by'] is None
         assert queries.bell(cur, REC1, 10)[1][0]['kind'] == notices.KIND_MOTIVATION
-        stages = [row['stage'] for row in queries.card_stages(cur, card['id'])]
-        assert stages == ['responses', 'in_work', 'invited_office', 'invited_training', 'on_training', 'on_line', 'hired']
+        history = queries.card_stages(cur, card['id'])
+        assert [row['stage'] for row in history] == ['responses', 'in_work', 'invited_office', 'invited_training',
+                                                     'on_training', 'on_line', 'hired']
+        assert history[-1]['by_user_id'] is None and history[-1]['by_user_name'] == 'Система'
         facts = queries.plan_facts(cur, datetime(2026, 11, 1), datetime(2026, 12, 1))
         assert facts == [{'vacancy_id': world['vacancy_id'], 'department_id': 367, 'recruiter_id': REC1}]
+        # Руководителю отдела подтверждать нечего: его колокол — только «вышел на линию», без «подтвердите».
+        _total, rows = queries.bell(cur, OP_HEAD, 10)
+        assert [row['kind'] for row in rows] == [notices.KIND_ON_LINE]
+        assert 'подтвердите' not in (rows[0]['body'] or '').lower()
+    # Повторный прогон ничего не удваивает; до десятой смены «7 дней» считаются дальше.
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 7, 'hired': 0, 'hired_10': 0}
+    # Восьмая и девятая смены: рекрутеру по-прежнему 7, тренеру 10 не засчитаны — и ничего не отклонено.
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (77, '2026-11-02', 4), (77, '2026-11-03', 2)")
+    clock.now = datetime(2026, 11, 4, 9, 12)
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 9, 'hired': 0, 'hired_10': 0}
+    with world['db']._get_cursor() as cur:
+        card = queries.get_card(cur, card['id'])
+        assert card['stage'] == 'hired' and card['shifts_done'] == 9 and card['hired10_at'] is None
+        assert card['hired_at'] == datetime(2026, 11, 3, 12, 42)
+        assert queries.get_motivation(cur, card['id'])['status'] == 'counted'
+        assert queries.bell(cur, TRAINER, 10)[0] == 0
+    # Десятая — «Отработал 10 дней»: засчитано тренеру группы, карточка остаётся и в «Отработал 7 дней».
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (77, '2026-11-04', 1.5)")
+    clock.now = datetime(2026, 11, 5, 9, 12)
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 10, 'hired': 0, 'hired_10': 1}
+    with world['db']._get_cursor() as cur:
+        card = queries.get_card(cur, card['id'])
+        assert card['stage'] == 'hired' and card['is_closed'] and card['hired10_at'] == clock.now and card['shifts_done'] == 10
+        assert card['trainer_id'] == TRAINER and card['trainer_name'] == 'Тренер Групп'
+        assert [row['stage'] for row in queries.card_stages(cur, card['id'])][-2:] == ['hired', 'hired_10']
+        total, rows = queries.bell(cur, TRAINER, 10)
+        assert total == 1 and rows[0]['kind'] == notices.KIND_MOTIVATION and rows[0]['card_id'] == card['id']
+        assert rows[0]['title'].startswith('Отработал 10 дней')
+        assert queries.get_motivation(cur, card['id'])['recruiter_id'] == REC1     # рекрутеру его «7 дней» остаются
+        # Доска: один кандидат — в обеих колонках («отображается одновременно в категориях»).
+        columns, counts, _by_source = queries.board(cur, {'lead': True}, SUPER, {})
+        assert counts['hired'] == 1 and counts['hired_10'] == 1
+        assert [c['id'] for c in columns['hired']] == [card['id']] == [c['id'] for c in columns['hired_10']]
+        assert columns['hired_10'][0]['stage'] == 'hired'
+        # Отборы доски действуют и на колонку категории.
+        columns, counts, _by_source = queries.board(cur, {'lead': True}, SUPER, {'recruiter_id': REC2})
+        assert 'hired_10' not in counts and columns['hired_10'] == []
+    # Обе категории засчитаны — карточка больше не пересчитывается, повторов нет.
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (77, '2026-11-05', 8)")
+    clock.now = datetime(2026, 11, 6, 9, 12)
+    assert service.sync_shifts() == {'cards': 0, 'matched': 0, 'shifts': 0, 'hired': 0, 'hired_10': 0}
+    with world['db']._get_cursor() as cur:
+        assert queries.get_card(cur, card['id'])['hired10_at'] == datetime(2026, 11, 5, 9, 12)
+        assert queries.bell(cur, TRAINER, 10)[0] == 1
     paid = service.set_motivation(lead, card['id'], 'paid')
     assert paid['status'] == 'paid'
     with pytest.raises(HiringError):
         service.set_motivation(me, card['id'], 'paid')
+
+
+def _to_line(world, phone, line_day='2026-10-25'):
+    """Кандидат на линии, его учётка сотрудника с тем же телефоном — смены считаются из её статусов."""
+    service = world['service']
+    card = take_and_touch(world, REC1, phone)
+    service.move(ctx_of(world, REC1), card['id'], 'invited_training', {'group_id': world['group_id']})
+    service.move(ctx_of(world, TRAINER), card['id'], 'on_training', {})
+    card = service.move(ctx_of(world, REC1), card['id'], 'on_line', {'line_started_at': line_day})
+    employee_id = 700 + card['id']
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO users (id, name, role, status, department_id, phone) VALUES (%s, 'Сотрудник', 'operator', 'working', 367, %s)",
+                    (employee_id, card['phone']))
+    return card, employee_id
+
+
+def _work(world, employee_id, first_day, days, hours=8):
+    with world['db']._get_cursor() as cur:
+        for offset in range(days):
+            cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (%s, %s, %s)",
+                        (employee_id, first_day + timedelta(days=offset), hours))
+
+
+def test_ten_shifts_at_once_credit_both_categories_in_one_pass(world):
+    """Статусы дошли разом (например, учётку нашли поздно): шесть смен → десять за один пересчёт — «Отработал 7 дней» и
+    «Отработал 10 дней» засчитываются одним проходом, с одной отметкой времени (SZOV-10: «единый процесс»)."""
+    service, clock = world['service'], world['clock']
+    card, employee_id = _to_line(world, '8 705 901 00 01')
+    _work(world, employee_id, datetime(2026, 10, 25).date(), 6)
+    clock.now = datetime(2026, 11, 1, 12, 12)
+    assert service.sync_shifts()['shifts'] == 6
+    _work(world, employee_id, datetime(2026, 10, 31).date(), 4)
+    clock.now = datetime(2026, 11, 3, 12, 12)
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 10, 'hired': 1, 'hired_10': 1}
+    with world['db']._get_cursor() as cur:
+        fresh = queries.get_card(cur, card['id'])
+        assert fresh['stage'] == 'hired' and fresh['hired_at'] == fresh['hired10_at'] == clock.now
+        assert [row['stage'] for row in queries.card_stages(cur, card['id'])][-2:] == ['hired', 'hired_10']
+        assert queries.get_motivation(cur, card['id'])['status'] == 'counted'
+        assert queries.bell(cur, REC1, 10)[1][0]['title'].startswith('Мотивация засчитана')
+        assert queries.bell(cur, TRAINER, 10)[1][0]['title'].startswith('Отработал 10 дней')
+        # Дашборд когорты: кандидат и в «7 днях», и в «10 днях»; дата этапа «Отработал 10 дней» отбирает его.
+        filters = reports.parse_filters({'month': '2026-10'})
+        data = reports.dashboard(cur, filters)
+        funnel = {row['stage']: row['count'] for row in data['funnel']}
+        assert funnel['hired'] == 1 and funnel['hired_10'] == 1
+        assert {row['key']: row['value'] for row in data['totals'] if row['label'] == 'Отработали 10 дней'} == {'total:hired_10': 1}
+        assert reports.card_ids_for(cur, filters, 'total:hired_10') == [card['id']]
+        assert data['by_recruiter'][0]['stages']['hired_10']['count'] == 1
+        staged = reports.parse_filters({'month': '2026-10', 'stage': 'hired_10', 'stage_from': '2026-11-03', 'stage_to': '2026-11-03'})
+        assert reports.dashboard(cur, staged)['cohort_size'] == 1
+        assert reports.export_dashboard(data, 'Воронка')[:2] == b'PK'
+
+
+def test_shift_credits_stay_and_fired_employee_drops_out_of_counting(world):
+    """Засчитанное не снимается, если статусы потом пересчитали в меньшее число; уволенный сотрудник с «7 днями» больше
+    не пересчитывается — до десяти он не дойдёт, тренеру 10 не засчитаны; восемь смен — рекрутеру 7 (SZOV-10)."""
+    service, clock = world['service'], world['clock']
+    card, employee_id = _to_line(world, '8 705 902 00 02')
+    _work(world, employee_id, datetime(2026, 10, 25).date(), 8)
+    clock.now = datetime(2026, 11, 3, 12, 12)
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 8, 'hired': 1, 'hired_10': 0}
+    with world['db']._get_cursor() as cur:
+        cur.execute("DELETE FROM daily_hours WHERE operator_id = %s AND day >= '2026-10-31'", (employee_id,))
+    clock.now = datetime(2026, 11, 3, 12, 42)
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 6, 'hired': 0, 'hired_10': 0}
+    with world['db']._get_cursor() as cur:
+        fresh = queries.get_card(cur, card['id'])
+        assert fresh['stage'] == 'hired' and fresh['shifts_done'] == 6 and fresh['hired_at'] == datetime(2026, 11, 3, 12, 12)
+        assert queries.get_motivation(cur, card['id'])['status'] == 'counted'
+        cur.execute("UPDATE users SET status = 'fired' WHERE id = %s", (employee_id,))
+    _work(world, employee_id, datetime(2026, 11, 1).date(), 5)
+    clock.now = datetime(2026, 11, 7, 12, 12)
+    assert service.sync_shifts() == {'cards': 0, 'matched': 0, 'shifts': 0, 'hired': 0, 'hired_10': 0}
+    with world['db']._get_cursor() as cur:
+        fresh = queries.get_card(cur, card['id'])
+        assert fresh['hired10_at'] is None and fresh['shifts_done'] == 6
+        assert queries.bell(cur, TRAINER, 10)[0] == 0
+
+
+def test_line_start_with_ready_statuses_hires_in_the_same_move(world):
+    """Выход на линию отмечен задним числом, а статусы за семь смен уже есть: переход сразу засчитывает «Отработал 7
+    дней» — тем же действием, без ожидания джобы."""
+    service, clock = world['service'], world['clock']
+    card = take_and_touch(world, REC1, '8 705 903 00 03')
+    service.move(ctx_of(world, REC1), card['id'], 'invited_training', {'group_id': world['group_id']})
+    service.move(ctx_of(world, TRAINER), card['id'], 'on_training', {})
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO users (id, name, role, status, department_id, phone) VALUES (903, 'Сотрудник', 'operator', 'working', 367, %s)",
+                    (card['phone'],))
+    _work(world, 903, datetime(2026, 10, 1).date(), 7)
+    clock.now = datetime(2026, 10, 20, 10, 0)
+    moved = service.move(ctx_of(world, TRAINER), card['id'], 'on_line', {'line_started_at': '2026-10-01'})
+    assert moved['stage'] == 'hired' and moved['is_closed'] and moved['shifts_done'] == 7 and moved['hired10_at'] is None
+    with world['db']._get_cursor() as cur:
+        assert [row['stage'] for row in queries.card_stages(cur, card['id'])][-2:] == ['on_line', 'hired']
+        assert queries.get_motivation(cur, card['id'])['status'] == 'counted'
 
 
 def test_refusal_and_reactivation(world):
@@ -764,15 +907,14 @@ def test_trainer_reads_whole_funnel_but_acts_only_in_own_groups(world):
     for card in (pooled, working, other):
         assert service.visible(trainer, card) and not service.involved(trainer, card)
     assert service.involved(trainer, own)
-    # Читать — да, действовать — нет: ни комментария, ни перехода, ни взятия, ни правки, ни пересчёта смен.
+    # Читать — да, действовать — нет: ни комментария, ни перехода, ни взятия, ни правки.
     for action in (lambda: service.touch(trainer, working['id'], {'kind': 'comment', 'body': 'x'}),
                    lambda: service.touch(trainer, pooled['id'], {'kind': 'comment', 'body': 'x'}),
                    lambda: service.move(trainer, other['id'], 'on_training', {}),
                    lambda: service.move(trainer, working['id'], 'refused', {'initiator': 'ours', 'reason_id': 1}),
                    lambda: service.take(trainer, pooled['id']),
                    lambda: service.edit_card(trainer, working['id'], {'city': 'Астана'}),
-                   lambda: service.set_substage(trainer, working['id'], 'dial'),
-                   lambda: service.sync_card_shifts(trainer, other['id'])):
+                   lambda: service.set_substage(trainer, working['id'], 'dial')):
         with pytest.raises(HiringError) as caught:
             action()
         assert caught.value.code == 'HIRING_FORBIDDEN', caught.value.code
@@ -1150,8 +1292,8 @@ def test_dashboard_cohort_and_click_through(world):
                     (hired['phone'],))
         for day in range(20, 27):
             cur.execute("INSERT INTO daily_hours (operator_id, day, work_time) VALUES (78, %s, 8)", (datetime(2026, 10, day).date(),))
-    assert service.sync_shifts()['shifts'] == 7
-    service.move(head, hired['id'], 'hired', {})
+    # Седьмая смена — «Отработал 7 дней» сам, без подтверждения (SZOV-10).
+    assert service.sync_shifts() == {'cards': 1, 'matched': 1, 'shifts': 7, 'hired': 1, 'hired_10': 0}
     world['clock'].now = NOW
     refused = take_and_touch(world, REC2, '8 705 100 00 02')
     with world['db']._get_cursor() as cur:
@@ -1167,9 +1309,11 @@ def test_dashboard_cohort_and_click_through(world):
         data = reports.dashboard(cur, filters, with_ids=True)
         assert data['cohort_size'] == 2
         counts = {row['stage']: row['count'] for row in data['funnel']}
-        assert counts == {'in_work': 2, 'dialed': 2, 'invited_office': 0, 'invited_training': 1, 'on_training': 1, 'on_line': 1, 'hired': 1}
+        assert counts == {'in_work': 2, 'dialed': 2, 'invited_office': 0, 'invited_training': 1, 'on_training': 1, 'on_line': 1,
+                          'hired': 1, 'hired_10': 0}
         assert [row['through'] for row in data['funnel']][:2] == [100.0, 100.0]
-        assert data['funnel'][-1]['through'] == 50.0
+        assert [row['through'] for row in data['funnel']][-2:] == [50.0, 0.0]
+        assert [row['label'] for row in data['funnel']][-2:] == ['Отработал 7 дней', 'Отработал 10 дней']
         totals = {tile['label']: tile for tile in data['totals']}
         assert totals['Поступило']['value'] == 3
         # План месяца закрывают наймы, подтверждённые в этом месяце (plan_facts): седьмая смена
@@ -1178,6 +1322,7 @@ def test_dashboard_cohort_and_click_through(world):
         november = reports.dashboard(cur, reports.parse_filters({'month': '2026-11'}))
         assert {tile['label']: tile['value'] for tile in november['totals']}['Закрыто FTE плана'] == 1
         assert totals['Засчитано мотивации']['value'] == 1
+        assert totals['Отработали 10 дней']['value'] == 0 and totals['Отработали 7 дней']['value'] == 1
         assert data['losses']['refused']['count'] == 1 and data['losses']['refused']['by_initiator']['ours']['count'] == 1
         assert data['losses']['refused']['reasons'][0]['reason'] == 'Языковой барьер'
         recruiters = {row['label']: row for row in data['by_recruiter']}

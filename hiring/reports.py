@@ -7,6 +7,7 @@
   их дальнейшее движение считается на дату просмотра;
 * карточка достигла этапа, если ХОТЬ РАЗ была в этой колонке (hiring_card_stages),
   а не только находится в ней сейчас; «Дозвон» — хотя бы один звонок с результатом «дозвон»;
+  «Отработал 10 дней» — тоже строка истории (категория тренера, SZOV-10): такой кандидат есть и в «7 днях»;
   «Недозвон / не ответил» — кто из когорты СЕЙЧАС в этом подстатусе «В работе» (как и потери);
 * конверсия этапа = достигли ÷ достигли предыдущего; сквозная = достигли ÷ взято в работу;
 * кандидаты — в головах; план месяца — в FTE: каждый «Отработал 7 дней» закрывает 1 FTE.
@@ -29,7 +30,7 @@ from . import queries, rules
 STAGE_DATE_OPTIONS = (
     ('received', 'Поступление'), (rules.IN_WORK, 'Взятие в работу'), (rules.INVITED_TRAINING, 'Приглашен на обучение'),
     (rules.ON_TRAINING, 'Вышел на обучение'), (rules.ON_LINE, 'Вышел на линию'), (rules.HIRED, 'Отработал 7 дней'),
-    (rules.REFUSED, 'Отказ'), (rules.DROPPED, 'Отсев'),
+    (rules.HIRED_10, rules.HIRED_10_LABEL), (rules.REFUSED, 'Отказ'), (rules.DROPPED, 'Отсев'),
 )
 STAGE_DATE_CODES = tuple(code for code, _ in STAGE_DATE_OPTIONS)
 
@@ -351,6 +352,8 @@ def dashboard(cursor, filters, *, with_ids=False):
         {'key': 'total:on_training', 'label': 'Вышли на обучение', 'value': counts[rules.ON_TRAINING]},
         {'key': 'total:on_line', 'label': 'Вышли на линию', 'value': counts[rules.ON_LINE]},
         {'key': 'total:hired', 'label': 'Отработали 7 дней', 'value': counts[rules.HIRED]},
+        # Категория тренера (SZOV-10): у кандидата с десятью сменами засчитаны обе — он есть и здесь, и в «7 днях».
+        {'key': 'total:hired_10', 'label': 'Отработали 10 дней', 'value': counts[rules.HIRED_10]},
         {'key': 'total:hired', 'label': 'Найм закрыт', 'value': len(hired_ids), 'hint': 'в головах'},
         {'key': 'closed_fte', 'label': 'Закрыто FTE плана', 'value': closed_fte, 'plan': plan_fte},
         {'key': 'total:hired', 'label': 'Сквозная конверсия', 'value': rules.through_rate(counts[rules.HIRED], counts[rules.IN_WORK]),

@@ -8,7 +8,8 @@
     наступила дата следующего контакта      закреплённый рекрутер
     карточка возвращена в пул по сроку      рекрутер и руководитель рекрутинга
     выход на линию                          руководитель отдела, куда был найм
-    начисление мотивации                    рекрутер
+    начисление мотивации (7 смен)           рекрутер
+    «Отработал 10 дней» (10 смен)           тренер группы кандидата
     номер WhatsApp найма остановлен / не на связи / телефон давно не в сети — руководители рекрутинга
 
 Руководитель рекрутинга для тревог — HR и выдача «lead» (queries.alert_user_ids); супер-админам раздел открыт, но
@@ -105,23 +106,14 @@ def _department_head(cursor, card):
 
 
 def on_line(cursor, card, now):
-    """Выход на линию — руководителю отдела, куда был найм: смены считаются из статусов сами, седьмую подтвердить."""
+    """Выход на линию — руководителю отдела, куда был найм: смены и обе категории считаются сами (SZOV-10)."""
     head = _department_head(cursor, card)
     if not head:
         return 0
     return queries.push_notification(cursor, [head], KIND_ON_LINE, 'Вышел на линию: %s' % card_title(card),
-                                     'Смены считаются из статусов работы сами; после седьмой подтвердите «Отработал 7 дней»',
+                                     'Смены считаются из статусов работы сами: на седьмой — «Отработал 7 дней», '
+                                     'на десятой — «Отработал 10 дней»',
                                      card['id'], now, dedupe_key='line:%s' % card['id'])
-
-
-def shifts_ready(cursor, card, now):
-    """Семь смен по статусам набраны — руководителю отдела подтвердить «Отработал 7 дней»."""
-    head = _department_head(cursor, card)
-    if not head:
-        return 0
-    return queries.push_notification(cursor, [head], KIND_ON_LINE, 'Семь смен на линии: %s' % card_title(card),
-                                     'Подтвердите «Отработал 7 дней» в карточке', card['id'], now,
-                                     dedupe_key='shifts7:%s' % card['id'])
 
 
 def motivation_counted(cursor, card, recruiter_id, now):
@@ -131,6 +123,17 @@ def motivation_counted(cursor, card, recruiter_id, now):
                                      'Мотивация засчитана: %s' % card_title(card),
                                      'Кандидат отработал 7 смен — найм закрыт', card['id'], now,
                                      dedupe_key='motivation:%s' % card['id'])
+
+
+def trainer_counted(cursor, card, now):
+    """«Отработал 10 дней» — тренеру группы кандидата: десятая смена засчитана ему (SZOV-10). Без группы — некому."""
+    trainer_id = card.get('trainer_id')
+    if not trainer_id:
+        return 0
+    return queries.push_notification(cursor, [trainer_id], KIND_MOTIVATION,
+                                     'Отработал 10 дней: %s' % card_title(card),
+                                     'Кандидат вашей группы отработал 10 смен — засчитано вам', card['id'], now,
+                                     dedupe_key='shifts10:%s' % card['id'])
 
 
 # ─── Telegram (только нарушения сроков) ───────────────────────────────────────

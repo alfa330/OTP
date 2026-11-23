@@ -4,7 +4,7 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosModal, IosSegmented, iosBtnSecondary, iosCard } from '../ui/ios';
 import {
-    FUNNEL_LABELS, MOTIVATION_LABELS, MOTIVATION_TONES, STAGE_LABELS, currentMonth,
+    FUNNEL_LABELS, FUNNEL_STAGES, MOTIVATION_LABELS, MOTIVATION_TONES, STAGE_LABELS, currentMonth,
     errorOf, fullDate, monthLabel, percent, shortTime,
 } from './hiringMeta';
 import { DATE_TRIGGER, Empty, FiltersRow, FiltersToggle, Group, Loading, MonthSwitch, Pill, Stat, TOOLBAR_BTN, Table } from './hiringUi';
@@ -149,8 +149,10 @@ const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
 
     const onCell = (key, label, row) => setRequest({ key, label: row?.label ? `${row.label} · ${label}` : label });
     const dictionaries = boot.dictionaries || {};
-    const stageColumns = (boot.meta?.stages ? ['in_work', 'dialed', 'invited_office', 'invited_training', 'on_training', 'on_line', 'hired'] : [])
-        .map((code) => ({ key: code, label: FUNNEL_LABELS[code], align: 'right', render: (row) => row.stages[code].count, keyOf: (row) => row.stages[code].key }));
+    // Колонки этапов — те же, что строки воронки, с «Отработал 10 дней» (SZOV-10). Ответ сервера без этой категории
+    // (старый экземпляр во время выкладки) — пустая клетка, а не падение отчёта.
+    const stageColumns = (boot.meta?.stages ? FUNNEL_STAGES : [])
+        .map((code) => ({ key: code, label: FUNNEL_LABELS[code], align: 'right', render: (row) => row.stages[code]?.count ?? '—', keyOf: (row) => row.stages[code]?.key }));
     const groupColumns = (withMotivation, extra = []) => [
         { key: 'label', label: '' },
         { key: 'taken', label: 'Взято', align: 'right', render: (row) => row.taken },

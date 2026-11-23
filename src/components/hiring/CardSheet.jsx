@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     ArrowRight, Check, ChevronDown, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone, PhoneIncoming,
-    PhoneMissed, PhoneOutgoing, Play, RefreshCw, Repeat, UserCog, X,
+    PhoneMissed, PhoneOutgoing, Play, Repeat, UserCog, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
@@ -20,7 +20,8 @@ import { WhatsAppThread } from './WhatsAppPanel';
 /*
  * Карточка кандидата (ТЗ 6): одно окно на весь раздел. Внутри — поля по группам ТЗ 6.1,
  * лента касаний и входов в этапы, переходы по правилам ТЗ 4.2 с их обязательными полями,
- * смены на линии и подтверждение «Отработал 7 дней» (руководитель отдела), мотивация.
+ * смены на линии и мотивация. «Отработал 7 дней» и «Отработал 10 дней» система ставит сама по сменам из
+ * статусов (SZOV-10) — в карточке их не подтверждают.
  *
  * Связь с кандидатом — кнопками «Позвонить» (icore-phone:call — звонок уходит в iCore Phone на
  * этом компьютере) и «Написать в WhatsApp» — переписка в окне «Чаты» раздела с номера найма (владелец
@@ -220,7 +221,6 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
         invited_office: 'Дата и время собеседования в офисе', invited_training: 'Группа на обучение: старт и свободные места',
         refused: 'Сначала инициатор, затем причина из его списка', dropped: 'Инициатор, причина и день отсева',
         on_training: 'Дата первого дня обучения', on_line: 'Дата выхода на линию',
-        hired: `Семь отработанных смен подтверждает руководитель отдела — отмечено ${card?.shifts_done || 0} из ${boot.meta.shifts_to_hire}`,
         in_work: backToWork ? 'Снова к закреплённому рекрутеру — 72 часа без ответа считаются заново'
             : 'Повторная активация: закрепление сохраняется или назначается заново',
     }[target];
@@ -290,12 +290,6 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
                             <textarea className={`${FIELD} min-h-[72px]`} value={form.comment} onChange={set('comment')} />
                         </div>
                     </>
-                )}
-                {target === 'hired' && (
-                    <div className="text-[13px] text-slate-700">
-                        После подтверждения найм закрыт: кандидат засчитывается в факт месячной задачи, мотивация засчитывается
-                        закреплённому рекрутеру{card?.recruiter_name ? ` — ${card.recruiter_name}` : ''}.
-                    </div>
                 )}
                 {target === 'in_work' && !backToWork && (
                     <div>
@@ -653,7 +647,6 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
     const [cancelling, setCancelling] = useState(false);
     const [comment, setComment] = useState('');
     const [savingComment, setSavingComment] = useState(false);
-    const [syncingShifts, setSyncingShifts] = useState(false);
     // Касание звонка, с которым рекрутер работает сейчас (панель в ленте).
     const [activeCallId, setActiveCallId] = useState(null);
 
@@ -693,7 +686,6 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
     const canMoveTo = (target) => {
         if (!card) return false;
         if (!(card.targets || []).includes(target)) return false;
-        if (target === 'hired') return actor.includes('dept_head');
         // Из «Не отвечает звонок/чат» снова в работу — закреплённый рекрутер (владелец 20.11.2026), из «Отказа» и «Отсева» —
         // повторная активация руководителем.
         if (target === 'in_work') {
@@ -803,18 +795,6 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
             load();
         }
     };
-    // Смены на линии считаются из статусов работы сами (джоба раз в полчаса); здесь — пересчёт сейчас.
-    const syncShifts = async () => {
-        setSyncingShifts(true);
-        try {
-            await api.post(`/cards/${card.id}/shifts/sync`);
-            changed();
-        } catch (requestError) {
-            toast(errorOf(requestError, 'Смены не обновились'), 'error');
-        } finally {
-            setSyncingShifts(false);
-        }
-    };
     const motivation = async (status, reason = null) => {
         try {
             await api.put(`/cards/${card.id}/motivation`, { status, reason });
@@ -831,8 +811,11 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
         card.vacancy_name || card.vacancy_text, card.city].filter(Boolean).join(' · ') : '';
     const substages = card ? (boot.meta.substages[card.stage] || []) : [];
     const shiftsDone = data?.shifts?.length || 0;
+    // Смены считаются, пока не засчитаны обе категории (SZOV-10): на линии — до седьмой, в «Отработал 7 дней» — до десятой.
+    const shiftsGoal = card?.stage === 'on_line' ? boot.meta.shifts_to_hire
+        : card?.stage === 'hired' && !card.hired10_at ? (boot.meta.shifts_for_trainer || 10) : null;
     const touchCount = (data?.touches || []).length;
-    const showHire = Boolean(card && (card.stage === 'on_line' || data?.motivation));
+    const showHire = Boolean(card && (card.stage === 'on_line' || card.stage === 'hired' || data?.motivation));
     // Переписка с номером WhatsApp найма — вкладкой (только чтение), только когда она есть и телефон виден человеку.
     // У кого есть окно «Чаты», тому вместо вкладки — кнопка в чат: там можно и ответить (владелец 20.11.2026).
     const whatsappCount = data?.whatsapp?.messages || 0;
@@ -861,6 +844,7 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                         {/* Этап и действия — всегда на виду, над вкладками. */}
                         <div className="flex flex-wrap items-center gap-2">
                             <Pill tone={STAGE_TONES[card.stage]} className="text-[13px]">{STAGE_LABELS[card.stage]}</Pill>
+                            {card.hired10_at && <Pill tone={STAGE_TONES.hired_10} className="text-[13px]">{STAGE_LABELS.hired_10}</Pill>}
                             {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]}>{SUBSTAGE_LABELS[card.substage]}</Pill>}
                             {/* Источник завершённой карточки — разрез отчёта: его правит только руководитель (сервер — так же). */}
                             <SourcePicker card={card} sources={boot.dictionaries?.sources || []} canEdit={isOwnerOrLead && (!card.is_closed || Boolean(caps.lead))}
@@ -948,7 +932,8 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                                         {card.group_name && <InfoRow label="Группа">{card.group_name}{card.group_start_date ? ` · с ${fullDate(card.group_start_date)}` : ''}</InfoRow>}
                                         {card.training_started_at && <InfoRow label="Вышел на обучение">{fullDate(card.training_started_at)}</InfoRow>}
                                         {card.line_started_at && <InfoRow label="Вышел на линию">{fullDate(card.line_started_at)}</InfoRow>}
-                                        {card.hired_at && <InfoRow label="7 смен подтверждены">{longTime(card.hired_at)}</InfoRow>}
+                                        {card.hired_at && <InfoRow label={STAGE_LABELS.hired}>{longTime(card.hired_at)}</InfoRow>}
+                                        {card.hired10_at && <InfoRow label={STAGE_LABELS.hired_10}>{longTime(card.hired10_at)}</InfoRow>}
                                         {card.is_closed && card.stage !== 'hired' && (
                                             <>
                                                 <InfoRow label={card.stage === 'refused' ? 'Отказ' : 'Отсев'}>
@@ -984,11 +969,12 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                         {activeTab === 'hire' && (
                             <div className="space-y-4">
                                 {/* Смены на линии (ТЗ 7.2) — из статусов работы сотрудника (владелец 30.10.2026: руками не
-                                    ведутся): день с работой по статусам не меньше часа — смена. Седьмую подтверждает
-                                    руководитель отдела, куда был найм. */}
-                                {card.stage === 'on_line' && (
-                                    <Section title={`Смены на линии · ${shiftsDone} из ${boot.meta.shifts_to_hire}`}
-                                             right={<IosHint align="right" text="Смены считаются из статусов работы сами: день, где по статусам отработано не меньше часа, — смена. Руками смены не отмечаются; пересчёт идёт раз в полчаса." />}>
+                                    ведутся): день с работой по статусам не меньше часа — смена. Седьмая сама ставит
+                                    «Отработал 7 дней», десятая — «Отработал 10 дней» (SZOV-10): ни проверять, ни подтверждать
+                                    в карточке нечего. */}
+                                {(card.stage === 'on_line' || card.stage === 'hired') && (
+                                    <Section title={`Смены на линии · ${shiftsDone}${shiftsGoal ? ` из ${shiftsGoal}` : ''}`}
+                                             right={<IosHint align="right" text={`Смены считаются из статусов работы сами, раз в полчаса: день, где по статусам отработано не меньше часа, — смена. На ${boot.meta.shifts_to_hire}-й карточка сама переходит в «Отработал 7 дней» — засчитывается рекрутеру, на ${boot.meta.shifts_for_trainer || 10}-й — в «Отработал 10 дней» — засчитывается тренеру группы.`} />}>
                                         <div className="py-1.5 text-[12.5px] text-slate-500">
                                             {card.employee_name
                                                 ? <>По статусам работы сотрудника <span className="font-medium text-slate-700">{card.employee_name}</span></>
@@ -1002,16 +988,6 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                                             ))}
                                             {shiftsDone === 0 && <span className="text-[12.5px] text-slate-500">Смен пока нет</span>}
                                         </div>
-                                        <div className="flex flex-wrap items-center gap-2 py-1.5">
-                                            {!readOnly && (
-                                                <button type="button" className={TOOLBAR_BTN} onClick={syncShifts} disabled={syncingShifts}>
-                                                    <RefreshCw size={14} className={syncingShifts ? 'animate-spin' : ''} /> Обновить из статусов
-                                                </button>
-                                            )}
-                                            {shiftsDone >= boot.meta.shifts_to_hire && canMoveTo('hired') && (
-                                                <button type="button" className={iosBtnPrimary} onClick={() => setMove('hired')}>Подтвердить «Отработал 7 дней»</button>
-                                            )}
-                                        </div>
                                     </Section>
                                 )}
                                 {data.motivation && (
@@ -1023,7 +999,11 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                                     ) : null}>
                                         <InfoRow label="Статус"><Pill tone={MOTIVATION_TONES[data.motivation.status]}>{MOTIVATION_LABELS[data.motivation.status]}</Pill></InfoRow>
                                         <InfoRow label="Рекрутер">{data.motivation.recruiter_name}</InfoRow>
-                                        {data.motivation.confirmed_at && <InfoRow label="Подтверждено">{longTime(data.motivation.confirmed_at)}</InfoRow>}
+                                        {/* Категория тренера (SZOV-10): десятая смена засчитана тренеру группы кандидата. */}
+                                        {card.hired10_at && (
+                                            <InfoRow label="Тренер">{card.trainer_name ? `${card.trainer_name} · засчитано 10 смен` : 'без группы — засчитывать некому'}</InfoRow>
+                                        )}
+                                        {data.motivation.confirmed_at && <InfoRow label="Засчитано">{longTime(data.motivation.confirmed_at)}</InfoRow>}
                                         {data.motivation.paid_at && <InfoRow label="Выплачено">{longTime(data.motivation.paid_at)}</InfoRow>}
                                         {data.motivation.cancel_reason && <InfoRow label="Отмена">{data.motivation.cancel_reason}</InfoRow>}
                                     </Section>

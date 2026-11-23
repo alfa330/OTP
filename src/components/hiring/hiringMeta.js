@@ -22,6 +22,9 @@ export const STAGE_LABELS = {
     on_line: 'Вышел на линию',
     dropped: 'Отсев',
     hired: 'Отработал 7 дней',
+    // Категория тренера (SZOV-10), не этап: карточка остаётся в «Отработал 7 дней», с десятой смены — ещё и здесь
+    // (колонка доски за «7 днями», строка воронки, история). Ставит система сама, как и «7 дней».
+    hired_10: 'Отработал 10 дней',
     no_response: 'Не отвечает звонок/чат',
 };
 /* «Не отвечает звонок/чат» — архив молчащих (владелец 20.11.2026: «отдельный список как архив», «по умолчанию
@@ -29,7 +32,7 @@ export const STAGE_LABELS = {
 export const ARCHIVE_STAGE = 'no_response';
 export const POOL_STAGES = ['contacts', 'responses'];
 export const FINAL_STAGES = ['refused', 'dropped', 'hired'];
-export const FUNNEL_STAGES = ['in_work', 'dialed', 'invited_office', 'invited_training', 'on_training', 'on_line', 'hired'];
+export const FUNNEL_STAGES = ['in_work', 'dialed', 'invited_office', 'invited_training', 'on_training', 'on_line', 'hired', 'hired_10'];
 export const FUNNEL_LABELS = { ...STAGE_LABELS, dialed: 'Дозвон' };
 
 /* «Недозвон / не ответил» — кандидат не ответил ни на звонок, ни на сообщение в WhatsApp (владелец
@@ -127,7 +130,7 @@ export const sourceRequestBody = (form, existing = null) => {
 
 /* Цвет только со смыслом: завершения (отказ, отсев — красный; найм закрыт — зелёный),
    просрочка — янтарный. Рабочие этапы не красятся. */
-export const STAGE_TONES = { refused: 'red', dropped: 'red', hired: 'green', no_response: 'gray' };
+export const STAGE_TONES = { refused: 'red', dropped: 'red', hired: 'green', hired_10: 'green', no_response: 'gray' };
 export const SUBSTAGE_TONES = { no_answer: 'amber', no_show: 'red', came: 'green', dial: 'green' };
 
 export const TOUCH_LABELS = {
@@ -144,7 +147,7 @@ export const fmtDuration = (seconds) => {
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 };
 export const MOTIVATION_LABELS = {
-    pending: 'Ожидает подтверждения', counted: 'Засчитано', paid: 'Выплачено', cancelled: 'Отменено',
+    pending: 'Ждёт 7 смен', counted: 'Засчитано', paid: 'Выплачено', cancelled: 'Отменено',
 };
 export const MOTIVATION_TONES = { pending: 'amber', counted: 'green', paid: 'green', cancelled: 'red' };
 export const GRANT_LABELS = { lead: 'Руководитель рекрутинга', staff: 'Штатный рекрутер', remote: 'Удалённый рекрутер' };
