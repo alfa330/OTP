@@ -2,7 +2,7 @@ import React from 'react';
 
 import { Tap } from './screenKit';
 
-/* Корпус учебного КОМПЬЮТЕРА: окно браузера в Windows с НЕСКОЛЬКИМИ вкладками.
+/* Корпус учебного КОМПЬЮТЕРА: окно браузера с вкладками.
  *
  * Зачем оно вообще нарисовано. Тренажёры про водителя показывают телефон,
  * потому что водитель работает с телефона. Оператор работает за компьютером, и
@@ -16,6 +16,11 @@ import { Tap } from './screenKit';
  * сразу, как на смене, а переключение между ними — свободное действие
  * (runner.browse), а не ход урока: наказывать за взгляд в справочник значит
  * отучать туда смотреть.
+ *
+ * Окно — в стиле macOS (владелец, 23.11.2026: «удобно и аккуратно, в стиле
+ * iOS/macOS»): «светофор» слева, вкладка с мягкими углами, адресная строка-
+ * капсула. Раньше окно было «как в Windows» — по системе операторов, — но
+ * владелец выбрал единый спокойный вид всего портала.
  *
  * Кнопки окна и крестик вкладки, наоборот, НЕ декоративные: по ним промахиваются
  * в жизни, и тренажёр обязан на это ответить объяснением, а не молчанием.
@@ -59,9 +64,29 @@ const Lock = () => (
     </svg>
 );
 
-/** Полоса вкладок с кнопками окна Windows (прямоугольные, не «светофор» macOS). */
+/* Кнопки окна macOS. Значки на кружках проявляются при наведении на группу
+   (CSS), как в системе. */
+const Lights = ({ tap, target }) => (
+    <div className="wt-win__lights">
+        <Tap id="win_close" target={target} tap={tap} className="wt-win__light is-close"
+            aria-label="Закрыть окно">
+            <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.8 3.8l4.4 4.4M8.2 3.8 3.8 8.2" /></svg>
+        </Tap>
+        <Tap id="win_min" target={target} tap={tap} className="wt-win__light is-min"
+            aria-label="Свернуть окно">
+            <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.2 6h5.6" /></svg>
+        </Tap>
+        <Tap id="win_max" target={target} tap={tap} className="wt-win__light is-max"
+            aria-label="Развернуть окно">
+            <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4 8V4.6M4 8h3.4M8 4v3.4M8 4H4.6" /></svg>
+        </Tap>
+    </div>
+);
+
+/** Полоса вкладок: «светофор» macOS слева, за ним вкладки и «+». */
 const TabStrip = ({ tap, target, tabs, active, onSwitch }) => (
     <div className="wt-win__tabs">
+        <Lights tap={tap} target={target} />
         {/* Вкладка — НЕ одна большая кнопка: внутри неё живёт крестик, который
             сам является целью движка. Кнопка в кнопке — невалидная разметка, и
             клик по крестику заодно переключал бы вкладку. Поэтому переключение
@@ -99,28 +124,6 @@ const TabStrip = ({ tap, target, tabs, active, onSwitch }) => (
             </svg>
         </Tap>
 
-        {/* Кнопки окна. У Windows они в правом верхнем углу и подписаны
-            чёрточкой, квадратом и крестиком — по ним и узнаётся система. */}
-        <div className="wt-win__controls">
-            <Tap id="win_min" target={target} tap={tap} aria-label="Свернуть окно">
-                <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true">
-                    <path d="M2 6h8" stroke="currentColor" strokeWidth="1.1" />
-                </svg>
-            </Tap>
-            <Tap id="win_max" target={target} tap={tap} aria-label="Развернуть окно">
-                <svg viewBox="0 0 12 12" width="11" height="11" fill="none" aria-hidden="true">
-                    <rect x="2.4" y="2.4" width="7.2" height="7.2" stroke="currentColor"
-                        strokeWidth="1.1" />
-                </svg>
-            </Tap>
-            <Tap id="win_close" target={target} tap={tap} className="is-close"
-                aria-label="Закрыть окно">
-                <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true">
-                    <path d="M2.6 2.6l6.8 6.8M9.4 2.6 2.6 9.4" stroke="currentColor"
-                        strokeWidth="1.1" />
-                </svg>
-            </Tap>
-        </div>
     </div>
 );
 
@@ -138,9 +141,15 @@ const Toolbar = ({ tap, target, url }) => (
             <span className="wt-win__url">{url}</span>
         </Tap>
 
-        {/* Аватар профиля браузера — только картинка: промахнуться по нему
-            мимо формы можно, но объяснять там нечего. */}
-        <span className="wt-win__avatar" aria-hidden="true">ШХ</span>
+        {/* Профиль браузера — только картинка: промахнуться по нему мимо
+            формы можно, но объяснять там нечего. Безымянный: учётка у каждого
+            стажёра своя, чужие инициалы здесь путали бы. */}
+        <span className="wt-win__avatar" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+                <circle cx="12" cy="8.6" r="3.7" />
+                <path d="M4.6 19.4c1.3-3.5 4.1-5.3 7.4-5.3s6.1 1.8 7.4 5.3z" />
+            </svg>
+        </span>
     </div>
 );
 

@@ -42,7 +42,9 @@ export const frameWidth = (width) => (width >= WIDE ? width
 
 /* Свои правила внутри фрейма: подсветка цели движка (та же, что на рабочем
    месте, см. .wt-desk .is-target в trainer.css) и плашка учебной среды. */
-const FRAME_CSS = `
+/* Экспорт — для тестов: они сверяют, что прокрутка списков и закреплённый
+   столбец действий на месте. */
+export const FRAME_CSS = `
 .is-target {
     outline: 3px solid #e11d48 !important;
     outline-offset: 2px;
@@ -74,6 +76,68 @@ const FRAME_CSS = `
    строкой ниже, вправо. Где место есть, строка как в рабочей CRM. */
 .detail-row:not(.detail-row--text):not(.detail-row--action) { flex-wrap: wrap; }
 .detail-row:not(.detail-row--text):not(.detail-row--action) > .detail-row__value { margin-left: auto; }
+
+/* Поверх окна парит Барс с облачком (TrainerPlayer, floatCorner.js). Запас
+   прокрутки внизу страницы — чтобы всё, что в самом конце (кнопки
+   «Сохранить», «Отправить», последние строки ведомости), можно было
+   докрутить выше облачка, а не нажимать сквозь него. */
+.app-body .main { padding-bottom: 40vh; }
+
+/* Списки CRM (обращения, учётки, обращения в Яндекс) шире окна тренажёра:
+   на мониторе оператора они влезают, а здесь CRM уже. Страница CRM вбок не
+   прокручивается (overflow-x: hidden у .app-body), поэтому таблица
+   прокручивается сама (.wt-scroll-x), а столбец действий — «глаз»,
+   «Подробнее», «Код» — закреплён у правого края и виден всегда. Без этого
+   до кнопки «открыть обращение» было не добраться вовсе. */
+.wt-scroll-x { overflow-x: auto; }
+.wt-scroll-x > .table { margin-bottom: 0; }
+.wt-scroll-x--actions .table-listing td:last-of-type,
+.wt-scroll-x--actions .table-listing th:last-of-type {
+    position: sticky;
+    right: 0;
+    z-index: 1;
+    display: table-cell;
+    text-align: right;
+    white-space: nowrap;
+    padding-left: 14px;
+    background: #fff;
+}
+/* Кнопки в строку, как в рабочей CRM: ячейка теперь узкая, и ряд кнопок
+   (.row — flex с переносом) иначе складывался столбиком. */
+.wt-scroll-x--actions .table-listing td:last-of-type > .row { flex-wrap: nowrap; justify-content: flex-end; }
+.wt-scroll-x--actions .table-hover tbody tr:hover td:last-of-type { background: #ececec; }
+/* Край закреплённого столбца — плавный: столбец, ушедший под него,
+   растворяется, а не режется по букве. */
+.wt-scroll-x--actions .table-listing td:last-of-type::before,
+.wt-scroll-x--actions .table-listing th:last-of-type::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -28px;
+    width: 28px;
+    pointer-events: none;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0), #fff);
+}
+.wt-scroll-x--actions .table-hover tbody tr:hover td:last-of-type::before {
+    background: linear-gradient(90deg, rgba(236, 236, 236, 0), #ececec);
+}
+
+/* Полоса прокрутки — всегда на виду. В macOS она скрыта, пока не начнёшь
+   крутить, и что таблица шире окна, было бы не догадаться. */
+.wt-scroll-x::-webkit-scrollbar,
+.table-responsive::-webkit-scrollbar { height: 10px; }
+.wt-scroll-x::-webkit-scrollbar-track,
+.table-responsive::-webkit-scrollbar-track { background: transparent; }
+.wt-scroll-x::-webkit-scrollbar-thumb,
+.table-responsive::-webkit-scrollbar-thumb {
+    background: rgba(15, 23, 42, .26);
+    background-clip: padding-box;
+    border: 3px solid transparent;
+    border-radius: 999px;
+}
+.wt-scroll-x::-webkit-scrollbar-thumb:hover,
+.table-responsive::-webkit-scrollbar-thumb:hover { background-color: rgba(15, 23, 42, .4); }
 `;
 
 const SRC_DOC = `<!doctype html><html lang="ru"><head><meta charset="utf-8">

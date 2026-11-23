@@ -220,50 +220,53 @@ export const YaList = ({ ui }) => {
                             </div>
                         </form>
                         {' '}
-                        <table className="table table-hover table-listing">
-                            <thead>
-                                <tr>
-                                    <th style={{ width: 16 }} /><th>Вопрос</th><th>Статус</th><th>Автор</th><th>Таксопарк</th>
-                                    <th className="text-nowrap"><a href="#" onClick={(e) => { noNav(e); sortBy('updated'); }}>Обновлено{arrow('updated')}</a></th>
-                                    <th className="text-nowrap"><a href="#" onClick={(e) => { noNav(e); sortBy('created'); }}>Создано{arrow('created')}</a></th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {rows.map((appeal) => {
-                                    const [park, city] = splitPark(appeal.park);
-                                    const status = yaStatus(appeal.status);
-                                    return (
-                                        <tr key={appeal.id}>
-                                            <td>
-                                                {isUnread(world, appeal) ? (
-                                                    <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#e55353' }}
-                                                        title="Новый ответ поддержки — вы ещё не открывали" />
-                                                ) : null}
-                                            </td>
-                                            <td>
-                                                <a className={`text-body${ui.t(`ya_row_${appeal.id}`, 'ya_row')}`} href="#"
-                                                    onClick={(e) => {
-                                                        noNav(e);
-                                                        ui.go('ya_show', {
-                                                            yaOpen: appeal.id,
-                                                            yaRead: [...new Set([...(world.yaRead || []), appeal.id])],
-                                                        }, `ya_row_${appeal.id}`, { id: appeal.id });
-                                                    }}>
-                                                    {' '}{cut(appealText(appeal))}{' '}
-                                                </a>
-                                                {' '}
-                                                <small className="text-muted d-block"> {appeal.topic.join(' • ')} </small>
-                                            </td>
-                                            <td><span className={`badge badge-${status.tone}`}>{status.label}</span></td>
-                                            <td> {appeal.author} <small className="text-muted d-block">{YA_EMAIL}</small></td>
-                                            <td> {park} <small className="text-muted d-block">{city}</small></td>
-                                            <td className="text-nowrap">{appealUpdated(world, appeal)}</td>
-                                            <td className="text-nowrap">{appealCreated(world, appeal)}</td>
-                                        </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
+                        {/* Шире окна тренажёра — прокрутка вбок (wt-scroll-x, crmFrame.jsx). */}
+                        <div className="wt-scroll-x">
+                            <table className="table table-hover table-listing">
+                                <thead>
+                                    <tr>
+                                        <th style={{ width: 16 }} /><th>Вопрос</th><th>Статус</th><th>Автор</th><th>Таксопарк</th>
+                                        <th className="text-nowrap"><a href="#" onClick={(e) => { noNav(e); sortBy('updated'); }}>Обновлено{arrow('updated')}</a></th>
+                                        <th className="text-nowrap"><a href="#" onClick={(e) => { noNav(e); sortBy('created'); }}>Создано{arrow('created')}</a></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {rows.map((appeal) => {
+                                        const [park, city] = splitPark(appeal.park);
+                                        const status = yaStatus(appeal.status);
+                                        return (
+                                            <tr key={appeal.id}>
+                                                <td>
+                                                    {isUnread(world, appeal) ? (
+                                                        <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#e55353' }}
+                                                            title="Новый ответ поддержки — вы ещё не открывали" />
+                                                    ) : null}
+                                                </td>
+                                                <td>
+                                                    <a className={`text-body${ui.t(`ya_row_${appeal.id}`, 'ya_row')}`} href="#"
+                                                        onClick={(e) => {
+                                                            noNav(e);
+                                                            ui.go('ya_show', {
+                                                                yaOpen: appeal.id,
+                                                                yaRead: [...new Set([...(world.yaRead || []), appeal.id])],
+                                                            }, `ya_row_${appeal.id}`, { id: appeal.id });
+                                                        }}>
+                                                        {' '}{cut(appealText(appeal))}{' '}
+                                                    </a>
+                                                    {' '}
+                                                    <small className="text-muted d-block"> {appeal.topic.join(' • ')} </small>
+                                                </td>
+                                                <td><span className={`badge badge-${status.tone}`}>{status.label}</span></td>
+                                                <td> {appeal.author} <small className="text-muted d-block">{YA_EMAIL}</small></td>
+                                                <td> {park} <small className="text-muted d-block">{city}</small></td>
+                                                <td className="text-nowrap">{appealUpdated(world, appeal)}</td>
+                                                <td className="text-nowrap">{appealCreated(world, appeal)}</td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
                         {' '}
                         {!rows.length ? <p className="text-muted">Обращений не найдено.</p> : null}
                         <div className="row">

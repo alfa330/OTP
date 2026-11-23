@@ -3981,18 +3981,281 @@
    остальных тренажёров, «примерно синий» вместо #4273fa делает экран чужим.
    ═════════════════════════════════════════════════════════════════════════ */
 
+/* ═════════════════════════════════════════════════════════════════════════
+   РАБОЧЕЕ МЕСТО ОПЕРАТОРА — В СТИЛЕ macOS
+   ─────────────────────────────────────────────────────────────────────────
+   Владелец, 23.11.2026: «удобно и аккуратно, в стиле iOS/macOS»; Барс — не
+   колонка, а помощник, который парит поверх окна и говорит облачком, что
+   делать; справа — плашка с прогрессом. Значит две колонки одной высоты:
+   окно браузера и ход урока; вся остальная ширина — окну, чтобы CRM была
+   крупной. Цвет выбора и прогресса — системный голубой, текущий шаг —
+   голубая подложка, а не чёрный.
+   ═════════════════════════════════════════════════════════════════════════ */
 .wt-root--desk {
+    --wt-accent: #0a84ff;
+    --wt-accent-soft: #e8f1fe;
+    --wt-green: #34c759;
     /* Центру нужна ширина: форма CRM — это подпись слева и поле справа, и в
-       колонке под телефон подписи ломались бы на три строки каждая. */
-    grid-template-columns: minmax(200px, 0.6fr) minmax(0, 3fr) minmax(210px, 0.68fr);
+       узкой колонке подписи ломались бы на три строки каждая. */
+    /* Плашка прогресса — по ширине экрана, но не уже 212 px. */
+    grid-template-columns: minmax(0, 1fr) clamp(212px, 17vw, 284px);
+    align-items: stretch;
+    gap: clamp(12px, 1.2vw, 18px);
+    padding: clamp(12px, 1.3vw, 20px);
 }
 
-.wt-stage--desk {
+.wt-root--desk .wt-side {
+    justify-self: stretch;
+    align-self: stretch;
+    max-width: none;
+    min-height: 0;
+    gap: 12px;
+    padding: 16px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, .8);
+    -webkit-backdrop-filter: saturate(180%) blur(24px);
+    backdrop-filter: saturate(180%) blur(24px);
+    border: 0.5px solid rgba(0, 0, 0, .08);
+    border-radius: 16px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 12px 32px rgba(15, 23, 42, .08);
+}
+
+/* ── Парящий Барс ────────────────────────────────────────────────────────
+   Стоит в углу окна (is-br — дом, is-bl — правее меню CRM, is-tr — выбирает
+   floatCorner.js, чтобы облачко не закрывало цель шага и меню CRM). Сам контейнер щелчки пропускает: ловят их
+   только Барс и облачко, пустое место между ними CRM не загораживает. */
+.wt-helper--float {
+    position: absolute;
+    z-index: 40;
+    display: flex;
+    flex-direction: row;
+    align-items: flex-end;
+    gap: 8px;
+    width: auto;
+    max-width: calc(100% - 36px);
+    padding: 0;
+    pointer-events: none;
+    background: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+.wt-helper--float.is-bl { left: calc(var(--wt-float-left, 0px) + 18px); bottom: 18px; }
+.wt-helper--float.is-br { right: 18px; bottom: 18px; flex-direction: row-reverse; }
+.wt-helper--float.is-tr { top: var(--wt-float-top, 96px); right: 18px; flex-direction: row-reverse; align-items: flex-start; }
+
+/* Барс — кнопка: щелчок сворачивает и раскрывает облачко. Парит: мягко
+   ходит вверх-вниз, тень под ним остаётся на месте. */
+.wt-helper--float .wt-helper__leo {
+    flex: 0 0 auto;
+    width: clamp(76px, 5.6vw, 96px);
+    padding: 0;
+    pointer-events: auto;
+    cursor: pointer;
+    background: none;
+    border: 0;
+    filter: drop-shadow(0 10px 14px rgba(15, 23, 42, .16));
+    animation: wt-hover 3.4s ease-in-out infinite;
+}
+.wt-helper--float .wt-helper__leo:focus-visible { outline: 2px solid var(--wt-accent); outline-offset: 4px; border-radius: 14px; }
+@keyframes wt-hover {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-6px); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .wt-helper--float .wt-helper__leo { animation: none; }
+}
+
+/* Облачко: белое, полупрозрачное, с мягкой тенью и хвостиком к Барсу. */
+.wt-cloud {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: clamp(250px, 21vw, 330px);
+    margin-bottom: 28px;
+    padding: 14px 16px;
+    pointer-events: auto;
+    color: #1d1d1f;
+    background: rgba(255, 255, 255, .94);
+    -webkit-backdrop-filter: saturate(180%) blur(24px);
+    backdrop-filter: saturate(180%) blur(24px);
+    border: 0.5px solid rgba(0, 0, 0, .08);
+    border-radius: 18px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, .06), 0 20px 50px rgba(15, 23, 42, .2);
+    transform-origin: bottom left;
+}
+.wt-helper--float.is-br .wt-cloud { transform-origin: bottom right; }
+.wt-helper--float.is-tr .wt-cloud { margin: 30px 0 0; transform-origin: top right; }
+
+.wt-cloud::before {
+    content: '';
+    position: absolute;
+    bottom: 22px;
+    left: -6px;
+    width: 13px;
+    height: 13px;
+    background: inherit;
+    border-left: 0.5px solid rgba(0, 0, 0, .08);
+    border-bottom: 0.5px solid rgba(0, 0, 0, .08);
+    border-radius: 0 0 0 3px;
+    transform: rotate(45deg);
+}
+.wt-helper--float.is-br .wt-cloud::before { left: auto; right: -6px; transform: rotate(-135deg); }
+.wt-helper--float.is-tr .wt-cloud::before { top: 22px; bottom: auto; left: auto; right: -6px; transform: rotate(-135deg); }
+
+/* Текст реплики — с прокруткой, если длинный: облачко не растёт выше
+   половины окна и не закрывает CRM целиком. */
+.wt-cloud__body {
+    max-height: min(34vh, 300px);
+    overflow-y: auto;
+    font-size: 14.5px;
+    line-height: 1.5;
+}
+.wt-cloud__body p { margin: 0; }
+.wt-cloud .wt-bubble__who {
     display: block;
+    margin-bottom: 3px;
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    color: #8e8e93;
+}
+.wt-cloud--error { background: rgba(255, 241, 240, .96); }
+.wt-cloud--error .wt-cloud__body { color: #b3261e; }
+.wt-cloud--error .wt-bubble__who { color: #ff3b30; }
+.wt-cloud--hint .wt-bubble__who { color: var(--wt-accent); }
+
+.wt-cloud .wt-goal {
+    flex: 0 0 auto;
+    padding: 9px 11px;
+    background: var(--wt-accent-soft);
+    border: 0;
+    border-radius: 12px;
+}
+.wt-cloud .wt-goal span {
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--wt-accent);
+}
+.wt-cloud .wt-goal b { font-size: 14px; font-weight: 600; color: #1d1d1f; }
+
+.wt-cloud .wt-hint-btn {
+    align-self: flex-start;
+    padding: 7px 12px;
+    font-size: 13px;
+    border-radius: 999px;
+    transition: background .15s ease;
+}
+.wt-cloud .wt-hint-btn:hover:not(:disabled) { background: #d9e9fd; }
+
+/* Ход урока: заголовок без капса, прогресс — тонкая системная полоса,
+   блоки — список с прокруткой, кнопки — внизу. */
+/* Подзаголовок («Обращения · Учётные записи · …») повторял бы список
+   блоков ниже — на рабочем месте его нет. */
+.wt-root--desk .wt-side__head span { display: none; }
+.wt-root--desk .wt-side__head strong { font-size: 17px; font-weight: 650; letter-spacing: -.01em; color: #1d1d1f; }
+.wt-root--desk .wt-side__percent b { font-size: 30px; letter-spacing: -.02em; }
+.wt-root--desk .wt-bar { height: 6px; background: #e5e5ea; }
+.wt-root--desk .wt-bar > i { background: var(--wt-accent); }
+.wt-root--desk .wt-side__progress > span { font-size: 12.5px; font-weight: 500; color: #6e6e73; }
+
+.wt-root--desk .wt-blocks,
+.wt-root--desk .wt-side > .wt-steps { flex: 1 1 auto; margin: 0 -6px; padding: 0 6px; }
+.wt-root--desk .wt-blocks { gap: 4px; }
+.wt-root--desk .wt-blocks > li { gap: 4px; }
+.wt-root--desk .wt-blocks__head { padding: 6px 4px; font-size: 13.5px; color: #8e8e93; }
+.wt-root--desk .wt-blocks__head i { width: 22px; height: 22px; border-radius: 50%; background: #e5e5ea; color: #8e8e93; }
+.wt-root--desk .wt-blocks > li.is-current .wt-blocks__head { color: #1d1d1f; }
+.wt-root--desk .wt-blocks > li.is-done .wt-blocks__head { color: #3a3a3c; }
+.wt-root--desk .wt-blocks .wt-steps { gap: 1px; padding-left: 14px; }
+
+.wt-root--desk .wt-steps { gap: 1px; font-size: 13px; color: #8e8e93; }
+.wt-root--desk .wt-steps li {
+    align-items: center;
+    padding: 5px 8px;
+    border-radius: 8px;
+    transition: color .42s ease, background .42s ease;
+}
+.wt-root--desk .wt-steps li i { width: 18px; height: 18px; font-size: 10.5px; background: #e5e5ea; color: #8e8e93; }
+.wt-root--desk .wt-steps li.is-current { color: #1d1d1f; background: var(--wt-accent-soft); }
+.wt-root--desk .wt-steps li.is-current i { transform: none; color: #fff; background: var(--wt-accent); }
+.wt-root--desk .wt-steps li.is-done { color: #3a3a3c; }
+.wt-root--desk .wt-steps li.is-done i { color: #fff; background: var(--wt-green); }
+.wt-root--desk .wt-steps li.is-fail i { color: #fff; background: #ff3b30; }
+
+.wt-root--desk .wt-side__foot { gap: 10px; padding-top: 12px; border-top: 0.5px solid rgba(0, 0, 0, .1); }
+.wt-root--desk .wt-counters { font-size: 12px; color: #8e8e93; }
+.wt-root--desk .wt-side__buttons { gap: 6px; }
+.wt-root--desk .wt-side__btn {
+    padding: 8px 10px;
+    font-size: 13px;
+    color: #1d1d1f;
+    background: #f2f2f7;
+    border-radius: 10px;
+}
+.wt-root--desk .wt-side__btn:hover { background: #e5e5ea; color: #1d1d1f; }
+.wt-root--desk .wt-side__btn--close { flex-basis: 100%; color: #1d1d1f; background: #f2f2f7; }
+.wt-root--desk .wt-side__btn--close:hover { background: #e5e5ea; color: #1d1d1f; }
+.wt-root--desk .wt-side__btn--finish { color: #fff; background: var(--wt-accent); }
+.wt-root--desk .wt-side__btn--finish:hover { color: #fff; background: #0071e3; }
+
+/* Панель звонка — тёмная полупрозрачная плашка, как уведомления и HUD
+   macOS, а не синий градиент; кнопки — капсулы системных цветов. Стоит НАД
+   окном, отдельной строкой, а не поверх него: поверх она закрывала
+   «светофор», вкладку и половину адресной строки. Видна всегда — CRM
+   прокручивается внутри окна, а не вместе с плашкой. */
+.wt-root--desk .wt-desk__inner { flex-direction: column; gap: 10px; }
+.wt-root--desk .wt-cp {
+    position: relative;
+    top: auto;
+    right: auto;
+    left: auto;
+    order: -1;
+    flex: 0 0 auto;
+    padding: 10px 12px 10px 14px;
+    color: #f5f5f7;
+    background: rgba(28, 28, 30, .84);
+    -webkit-backdrop-filter: saturate(180%) blur(22px);
+    backdrop-filter: saturate(180%) blur(22px);
+    border: 0.5px solid rgba(255, 255, 255, .14);
+    border-radius: 14px;
+    box-shadow: 0 18px 44px rgba(0, 0, 0, .28);
+}
+.wt-root--desk .wt-cp.is-wrapup { background: rgba(22, 48, 30, .86); }
+.wt-root--desk .wt-cp.is-ended,
+.wt-root--desk .wt-cp.is-offline { background: rgba(44, 44, 46, .86); }
+.wt-root--desk .wt-cp__state { font-size: 11.5px; letter-spacing: 0; text-transform: none; font-weight: 600; color: #a1a1a6; }
+.wt-root--desk .wt-cp__queue,
+.wt-root--desk .wt-cp__waited,
+.wt-root--desk .wt-cp__who,
+.wt-root--desk .wt-cp__mic { color: #a1a1a6; }
+.wt-root--desk .wt-cp__btn { border-radius: 999px; background: rgba(255, 255, 255, .14); }
+.wt-root--desk .wt-cp__btn:hover { background: rgba(255, 255, 255, .22); }
+.wt-root--desk .wt-cp__btn.is-answer { background: #34c759; }
+.wt-root--desk .wt-cp__btn.is-answer:hover { background: #2fb350; }
+.wt-root--desk .wt-cp__btn.is-reject { background: #ff3b30; }
+.wt-root--desk .wt-cp__btn.is-reject:hover { background: #e6352b; }
+.wt-root--desk .wt-cp__dir { border-radius: 12px; box-shadow: 0 0 0 0.5px rgba(0, 0, 0, .12), 0 16px 40px rgba(0, 0, 0, .22); }
+
+.wt-stage--desk {
+    display: flex;
+    flex-direction: column;
     width: 100%;
     height: 100%;
     min-height: 0;
 }
+
+/* Вступление и итог — по центру, как окно-диалог macOS, а не прижатыми к
+   верху: боковые панели теперь во всю высоту, и карточка под потолком
+   оставляла пустой низ. */
+.wt-stage--desk > .wt-card { margin: auto; }
+/* Справа внизу парит Барс со своим облачком — карточка встаёт левее, рядом
+   с ним, а не под его облачком. */
+.wt-stage--desk.wt-stage--card { padding-right: clamp(300px, 30vw, 470px); }
 
 /* Подсветка цели — та же, что в телефоне, но своим правилом: исходное
    привязано к .wt-phone, а корпуса-телефона здесь нет. */
@@ -4072,8 +4335,10 @@
 .wt-call__said span { color: #8ea3d8; margin-right: 4px; }
 
 /* ── Окно браузера ───────────────────────────────────────────────────────
-   Windows, а не macOS: кнопки окна прямоугольные и справа, вкладка с уголками
-   сверху. Оператор сидит на Windows, и «светофор» слева читался бы чужим. */
+   macOS (владелец, 23.11.2026: «удобно и аккуратно, в стиле iOS/macOS»):
+   «светофор» слева, вкладка с мягкими углами, адресная строка-капсула,
+   тонкая граница и мягкая тень окна. Сама CRM внутри — один в один с
+   рабочей, меняется только рамка вокруг неё. */
 .wt-desk__window {
     flex: 1 1 auto;
     min-height: 0;
@@ -4087,28 +4352,68 @@
     min-height: 0;
     overflow: hidden;
     border-radius: 12px;
-    background: #dee1e6;
-    box-shadow: 0 24px 60px rgba(15, 23, 42, .26);
+    background: #e9e9ed;
+    box-shadow:
+        0 0 0 0.5px rgba(0, 0, 0, .16),
+        0 1px 2px rgba(0, 0, 0, .06),
+        0 22px 64px rgba(15, 23, 42, .22);
 }
 
 .wt-win__tabs {
     display: flex;
     align-items: flex-end;
     flex: 0 0 auto;
-    gap: 4px;
-    height: 38px;
-    padding-left: 8px;
+    gap: 2px;
+    height: 40px;
+    padding: 0 10px 0 14px;
 }
+
+/* «Светофор»: закрыть, свернуть, развернуть. Значки на кружках — только при
+   наведении на группу, как в системе. */
+.wt-win__lights {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    align-self: center;
+    margin-right: 14px;
+}
+
+.wt-win__light {
+    display: grid;
+    place-items: center;
+    width: 12px;
+    height: 12px;
+    padding: 0;
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, .22);
+}
+
+.wt-win__light svg {
+    width: 8px;
+    height: 8px;
+    fill: none;
+    stroke: rgba(0, 0, 0, .6);
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    opacity: 0;
+    transition: opacity .12s ease;
+}
+
+.wt-win__light.is-close { background: #ff5f57; }
+.wt-win__light.is-min { background: #febc2e; }
+.wt-win__light.is-max { background: #28c840; }
+.wt-win__lights:hover .wt-win__light svg { opacity: 1; }
 
 .wt-win__tab {
     display: flex;
     align-items: center;
     gap: 4px;
-    max-width: 250px;
-    height: 31px;
-    padding: 0 6px 0 10px;
+    max-width: 240px;
+    height: 32px;
+    padding: 0 6px 0 12px;
     border-radius: 9px 9px 0 0;
-    background: #f5f8ff;
+    color: #1d1d1f;
+    background: #fff;
 }
 
 /* «Лицо» вкладки — значок и название. Переключение висит здесь, а не на всей
@@ -4126,8 +4431,8 @@
 .wt-win__tab-name {
     overflow: hidden;
     font-size: 12px;
-    font-weight: 550;
-    color: #33373d;
+    font-weight: 500;
+    color: #1d1d1f;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -4139,39 +4444,23 @@
     place-items: center;
     width: 20px;
     height: 20px;
-    border-radius: 50%;
-    color: #5f6368;
+    border-radius: 6px;
+    color: #6e6e73;
 }
 
 .wt-win__tab-x:hover,
-.wt-win__tab-add:hover { background: rgba(0, 0, 0, .1); }
-.wt-win__tab-add { margin-bottom: 5px; }
-
-.wt-win__controls {
-    display: flex;
-    align-self: stretch;
-    margin-left: auto;
-}
-
-.wt-win__controls button {
-    display: grid;
-    place-items: center;
-    width: 44px;
-    color: #33373d;
-}
-
-.wt-win__controls button:hover { background: rgba(0, 0, 0, .09); }
-.wt-win__controls .is-close:hover { background: #e81123; color: #fff; }
+.wt-win__tab-add:hover { background: rgba(0, 0, 0, .07); color: #1d1d1f; }
+.wt-win__tab-add { margin: 0 0 6px 4px; }
 
 .wt-win__bar {
     display: flex;
     align-items: center;
     flex: 0 0 auto;
-    gap: 5px;
+    gap: 4px;
     height: 42px;
     padding: 0 10px;
-    background: #f5f8ff;
-    border-bottom: 1px solid #e2e8f4;
+    background: #fff;
+    border-bottom: 0.5px solid rgba(0, 0, 0, .12);
 }
 
 .wt-win__nav {
@@ -4180,12 +4469,12 @@
     place-items: center;
     width: 28px;
     height: 28px;
-    border-radius: 50%;
-    color: #4a5568;
+    border-radius: 7px;
+    color: #3a3a3c;
 }
 
-.wt-win__nav:hover { background: rgba(15, 23, 42, .07); }
-.wt-win__nav.is-off { color: #c2cad8; }
+.wt-win__nav:hover { background: rgba(0, 0, 0, .06); }
+.wt-win__nav.is-off { color: #c7c7cc; }
 
 /* Адресная строка — цель для промаха: по ней уходят «поискать в интернете»
    посреди заполнения, и форма очищается. */
@@ -4193,36 +4482,39 @@
     display: flex;
     align-items: center;
     flex: 1 1 auto;
-    gap: 8px;
+    gap: 7px;
     min-width: 0;
-    height: 28px;
+    height: 30px;
+    margin: 0 6px;
     padding: 0 12px;
-    border-radius: 14px;
-    background: #eaeff8;
+    border-radius: 9px;
+    background: #f2f2f7;
     text-align: left;
+    transition: background .15s ease;
 }
 
-.wt-win__lock { display: flex; flex: 0 0 auto; color: #5f6368; }
+.wt-win__omni:hover { background: #ebebf0; }
+
+.wt-win__lock { display: flex; flex: 0 0 auto; color: #8e8e93; }
 
 .wt-win__url {
     overflow: hidden;
-    font-size: 12.5px;
-    color: #33373d;
+    font-size: 13px;
+    color: #1d1d1f;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
+/* Профиль браузера — безымянный значок: учётка у каждого стажёра своя. */
 .wt-win__avatar {
     display: grid;
     flex: 0 0 auto;
     place-items: center;
-    width: 25px;
-    height: 25px;
+    width: 26px;
+    height: 26px;
     border-radius: 50%;
-    background: #4273fa;
-    font-size: 10px;
-    font-weight: 700;
-    color: #fff;
+    background: #e5e5ea;
+    color: #8e8e93;
 }
 
 /* Содержимое вкладки. Прокрутка ЗДЕСЬ, а не у страницы: форма длиннее окна,
@@ -4272,9 +4564,9 @@
     .wt-call__facts { gap: 4px 14px; }
 }
 
-/* Неактивная вкладка окна — приглушена, крестика у неё нет. */
-.wt-win__tab:not(.is-active) { background: #cdd1d8; color: #4b5563; }
-.wt-win__tab:not(.is-active):hover { background: #d8dce2; }
+/* Неактивная вкладка окна — без подложки, крестика у неё нет. */
+.wt-win__tab:not(.is-active) { background: transparent; color: #6e6e73; }
+.wt-win__tab:not(.is-active):hover { background: rgba(0, 0, 0, .05); }
 .wt-win__tab-x.is-ghost { width: 20px; }
 
 /* Карта систем на месте прогресса — только в свободной среде. */
@@ -4298,9 +4590,9 @@
 /* ═════════════════════════════════════════════════════════════════════════
    ПАНЕЛЬ ЗВОНКА
    ─────────────────────────────────────────────────────────────────────────
-   Стоит ПОВЕРХ окна браузера, а не внутри CRM: во время разговора оператор
+   Стоит над окном браузера, а не внутри CRM: во время разговора оператор
    листает карточку водителя и окна CRM, и кнопки «Удержание» и «Перевод»
-   обязаны ехать за ним.
+   обязаны оставаться на виду.
    Цитаты водителя здесь нет — стажёр слушает, а не читает.
    ═════════════════════════════════════════════════════════════════════════ */
 

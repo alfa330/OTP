@@ -16,6 +16,7 @@ import {
 import { callNext, emptyCall, syncReady, talkMs } from './callMachine';
 import { EVENT_TITLES, createEventLog } from './trainerEvents';
 import { SCREENS } from './screenMap';
+import { chooseCorner, measureFloat } from './floatCorner';
 import './trainer.css';
 
 /* Сцена с машиной приезжает отдельным чанком вместе с three.js.
@@ -239,6 +240,14 @@ export function TrainerPlayer({
      * текста разной длины наложились бы друг на друга нечитаемой кашей. */
     const SWAP = reduceMotion ? 0 : 0.42;
     const SWAP_EASE = [0.32, 0.72, 0.28, 1];
+    /* Рабочее место (владелец, 23.11.2026: «более плавные анимации открытия
+       и закрытия»): окно проявляется с лёгким приближением, как окно macOS, и
+       так же уходит; за ним — плашка прогресса и Барс, с небольшой лесенкой.
+       Длительность ухода близка к приходу: короткий уход читался как рывок. */
+    const SOFT = [0.22, 1, 0.36, 1];
+    const SOFT_OUT = [0.4, 0, 0.6, 1];
+    const deskIn = (delay = 0) => ({ duration: reduceMotion ? 0 : 0.5, ease: SOFT, delay: reduceMotion ? 0 : delay });
+    const deskOut = { duration: reduceMotion ? 0 : 0.32, ease: SOFT_OUT };
 
     // Сценарий сменился (в списке тренажёров их два) — попытка начинается заново.
     /* Смена сценария начинает попытку заново. Слепок сюда обязателен: без него
@@ -269,6 +278,48 @@ export function TrainerPlayer({
        при этом ждёт то же действие — прячется только подсветка. */
     const target = step.hideTarget && run.hintedIndex !== run.index ? null : expectedTap(run);
     const finished = isFinished(run);
+
+    /* Барс на рабочем месте парит поверх окна (владелец, 23.11.2026) и не
+       закрывает цель шага: если она под облачком, он перелетает в другой угол
+       (floatCorner.js). Облачко сворачивается щелчком по Барсу и снова
+       раскрывается на новом шаге — новая реплика должна быть видна. */
+    const [corner, setCorner] = useState('br');
+    /* Верхний угол — под панелью браузера (и плашкой звонка, если она есть),
+       левый — правее меню CRM: меню Барс не закрывает никогда. */
+    const [floatInset, setFloatInset] = useState({ top: 96, left: 0 });
+    const [cloudOpen, setCloudOpen] = useState(true);
+    useEffect(() => { setCloudOpen(true); }, [step.key]);
+    const targetKey = Array.isArray(target) ? target.join(',') : String(target || '');
+    useEffect(() => {
+        if (!deskMode) return undefined;
+        let frame = 0;
+        const check = () => {
+            cancelAnimationFrame(frame);
+            frame = requestAnimationFrame(() => {
+                /* Помощника ищем в сцене, а не по ref: он прямой потомок
+                   AnimatePresence, и ref на нём framer-motion 12 читает через
+                   props.ref — React 18 ругается в консоль. */
+                const stage = stageRef.current;
+                const measured = measureFloat(stage, stage && stage.querySelector('.wt-helper--float'));
+                if (!measured) return;
+                const inset = { top: Math.round(measured.topInset), left: Math.round(measured.leftInset) };
+                setFloatInset((prev) => (prev.top === inset.top && prev.left === inset.left ? prev : inset));
+                setCorner((current) => chooseCorner({ ...measured, current }));
+            });
+        };
+        check();
+        // Прокрутка CRM к цели плавная: проверяем и когда она доедет.
+        const later = setTimeout(check, 560);
+        window.addEventListener('resize', check);
+        const frameDoc = stageRef.current?.querySelector('.wt-crmframe iframe')?.contentDocument || null;
+        frameDoc?.addEventListener('scroll', check, true);
+        return () => {
+            cancelAnimationFrame(frame);
+            clearTimeout(later);
+            window.removeEventListener('resize', check);
+            frameDoc?.removeEventListener('scroll', check, true);
+        };
+    }, [deskMode, step.key, targetKey, cloudOpen, run.world.crmView, run.world.drvTab]);
     /* Курс из блоков (scenario.blocks): прогресс показываем по блокам, а не
        общим списком из двух десятков пунктов. */
     const blocks = scenario.blocks || null;
@@ -539,6 +590,156 @@ export function TrainerPlayer({
     const Screen = SCREENS[scenario.key]?.[step.screen];
     const purpose = scenario.egovPurpose ? scenario.egovPurpose(step.key) : 'docs';
 
+    /* ── Части помощника ────────────────────────────────────────────────────
+       Одни и те же у колонки (телефонные тренажёры) и у парящего Барса
+       (рабочее место): меняется раскладка, а не содержание. */
+
+    /* Перекрёстный переход настроения. Слой абсолютный, размер держит сам
+       слот — иначе на время перехода стояли бы два барса друг под другом, а
+       замер пробежки (slotRef) уехал бы вместе с высотой. */
+    const leoLayers = (
+        <AnimatePresence initial={false}>
+            <motion.span
+                key={mood}
+                className="wt-helper__leo-layer"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: SWAP, ease: 'easeInOut' }}
+            >
+                <SnowLeopard state={mood} />
+            </motion.span>
+        </AnimatePresence>
+    );
+
+    /* aria-live остаётся на постоянном узле: перевесить его на сменяемый
+       абзац — значит потерять объявление, потому что скринридер следит за
+       ИЗМЕНЕНИЯМИ внутри области, а не за её заменой. key по тексту: новая
+       реплика проявляется на месте, старая исчезает мгновенно — высота
+       меняется один раз, а не дважды. */
+    const sayText = (
+        <p aria-live="polite">
+            <motion.span
+                key={said.text}
+                className="wt-bubble__text"
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: SWAP, ease: SWAP_EASE }}
+            >
+                {withCodes(said.text, run.world.codes)}
+            </motion.span>
+        </p>
+    );
+
+    const goalBlock = !finished && !noLesson ? (
+        <div className="wt-goal">
+            <span>Сейчас</span>
+            <motion.b
+                key={goal}
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: SWAP, ease: SWAP_EASE, delay: SWAP * 0.25 }}
+            >
+                {goal}
+            </motion.b>
+        </div>
+    ) : null;
+
+    /* Подсказка — часть урока. В свободной среде подсказывать нечего:
+       правильного следующего действия там нет; на аттестации подсказок не
+       бывает (scenario.noHints). */
+    const hintButton = noLesson || scenario.noHints ? null : (
+        <button type="button" className="wt-hint-btn" onClick={doHint} disabled={finished}>
+            <HelpCircle size={15} /> {scenario.hintLabel || 'Подсказка'}
+        </button>
+    );
+
+    /* Парящий Барс рабочего места: сам Барс и облачко с репликой, «Сейчас»
+       и «Спросить Барса». Стоит в углу окна (corner), щелчок по Барсу
+       сворачивает облачко.
+
+       Анимации (владелец, 23.11.2026: «более плавные анимации открытия и
+       закрытия»): Барс появляется вслед за окном и плашкой; в другой угол не
+       прыгает и не едет через всё окно, а гаснет и проявляется на новом месте
+       (AnimatePresence по углу); облачко раскрывается ИЗ Барса и сворачивается
+       в него — точка роста у того края, где стоит Барс. Сдвиг раскладкой
+       (layout) здесь нельзя: при сворачивании облачка коробка помощника
+       сужается, и Барс дёргался бы вслед за ней. */
+    const origin = {
+        originX: corner === 'bl' ? 0 : 1,
+        originY: corner === 'tr' ? 0 : 1,
+    };
+    const lift = corner === 'tr' ? -10 : 12;
+    const helperFloat = (
+        <AnimatePresence mode="wait" initial={animateEntrance && !reduceMotion}>
+            {(
+                <motion.aside
+                    key={corner}
+                    className={`wt-helper wt-helper--float is-${corner}${cloudOpen ? '' : ' is-folded'}`}
+                    style={{
+                        ...origin,
+                        '--wt-float-top': `${floatInset.top}px`,
+                        '--wt-float-left': `${floatInset.left}px`,
+                    }}
+                    initial={{ opacity: 0, scale: 0.92, y: lift }}
+                    /* Закрытие тренажёра — уход вместе с окном, в его темпе;
+                       смена угла (exit) — быстрее: новая реплика не ждёт. */
+                    animate={leaving
+                        ? { opacity: 0, scale: 0.94, y: lift * 0.6 }
+                        : { opacity: 1, scale: 1, y: 0 }}
+                    exit={{
+                        opacity: 0,
+                        scale: 0.94,
+                        y: lift * 0.6,
+                        transition: { duration: reduceMotion ? 0 : 0.2, ease: SOFT_OUT },
+                    }}
+                    transition={leaving ? deskOut
+                        : (phase === 'done' ? { duration: reduceMotion ? 0 : 0.36, ease: SOFT } : deskIn(0.18))}
+                    onAnimationComplete={() => {
+                        if (!leaving) setPhase((p) => (p === 'cards' ? (skipRunner ? 'done' : 'run') : p));
+                    }}
+                >
+                    <button
+                        type="button"
+                        className="wt-helper__leo"
+                        ref={slotRef}
+                        aria-expanded={cloudOpen}
+                        aria-label={cloudOpen ? 'Свернуть подсказку Барса' : 'Показать подсказку Барса'}
+                        title={cloudOpen ? 'Свернуть' : 'Что сейчас делать?'}
+                        onClick={() => setCloudOpen((open) => !open)}
+                    >
+                        {leoLayers}
+                    </button>
+                    <AnimatePresence initial={false}>
+                        {cloudOpen ? (
+                            <motion.div
+                                key="cloud"
+                                className={`wt-cloud wt-cloud--${said.tone}`}
+                                style={origin}
+                                initial={{ opacity: 0, scale: 0.86, y: lift * 0.5 }}
+                                animate={{ opacity: 1, scale: 1, y: 0 }}
+                                exit={{
+                                    opacity: 0,
+                                    scale: 0.9,
+                                    y: lift * 0.4,
+                                    transition: { duration: reduceMotion ? 0 : 0.22, ease: SOFT_OUT },
+                                }}
+                                transition={{ duration: reduceMotion ? 0 : 0.38, ease: SOFT }}
+                            >
+                                <div className="wt-cloud__body">
+                                    <span className="wt-bubble__who">Барс</span>
+                                    {sayText}
+                                </div>
+                                {goalBlock}
+                                {hintButton}
+                            </motion.div>
+                        ) : null}
+                    </AnimatePresence>
+                </motion.aside>
+            )}
+        </AnimatePresence>
+    );
+
     return (
         /* Пока идёт анимация, прокрутка выключена.
            Телефон в этот момент стоит ниже экрана (translateY 110 %), а
@@ -568,6 +769,9 @@ export function TrainerPlayer({
                     duration: reduceMotion ? 0 : (leaving ? 0.36 : 0.34),
                     ease: leaving ? 'easeIn' : 'easeOut',
                 }}
+                /* Телефона на рабочем месте нет, и сигнал «ушли» подаёт
+                   подложка: она гаснет последней. */
+                onAnimationComplete={() => { if (leaving && deskMode) onExited?.(); }}
             />
 
             {/* ── СЛЕВА: помощник ────────────────────────────────────────────
@@ -575,89 +779,38 @@ export function TrainerPlayer({
                 чем в остальном портале: это не подпись к картинке, а то, ради
                 чего экран открыт, — человек читает объяснение и идёт делать.
                 Выезжает из-за телефона: карточка стартует сдвинутой ВПРАВО, к
-                телефону, и уходит на своё место влево. */}
-            <motion.aside
-                className="wt-helper"
-                initial={animateEntrance && !reduceMotion
-                    ? { opacity: 0, x: 120, scale: 0.94 } : false}
-                animate={leaving
-                    ? { opacity: 0, x: 120, scale: 0.94 }
-                    : (cardsOut ? { opacity: 1, x: 0, scale: 1 } : {})}
-                transition={{
-                    duration: leaving ? 0.24 : 0.46,
-                    ease: leaving ? EASE_LEAVE : EASE,
-                }}
-                onAnimationComplete={() => {
-                    if (!leaving) setPhase((p) => (p === 'cards' ? (skipRunner ? 'done' : 'run') : p));
-                }}
-            >
-                {/* Место барса в карточке. Пока он бежит, слот пуст — иначе
-                    зверь окажется в двух местах сразу. */}
-                <div className="wt-helper__leo" ref={slotRef}
-                    style={{ opacity: settled || leaving ? 1 : 0 }}>
-                    {/* Перекрёстный переход настроения. Слой абсолютный, размер
-                        держит сам слот — иначе на время перехода в колонке стояли
-                        бы два барса друг под другом, а замер пробежки (slotRef)
-                        уехал бы вместе с высотой. */}
-                    <AnimatePresence initial={false}>
-                        <motion.span
-                            key={mood}
-                            className="wt-helper__leo-layer"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            transition={{ duration: SWAP, ease: 'easeInOut' }}
-                        >
-                            <SnowLeopard state={mood} />
-                        </motion.span>
-                    </AnimatePresence>
-                </div>
-                <div className={`wt-bubble wt-bubble--${said.tone}`}>
-                    <span className="wt-bubble__who">Барс</span>
-                    {/* aria-live остаётся на постоянном узле: перевесить его на
-                        сменяемый абзац — значит потерять объявление, потому что
-                        скринридер следит за ИЗМЕНЕНИЯМИ внутри области, а не за
-                        её заменой. */}
-                    <p aria-live="polite">
-                        {/* key по тексту: новая реплика проявляется на месте.
-                            Уход не анимируем — старый абзац исчезает мгновенно,
-                            а новый уже занимает его место прозрачным, поэтому
-                            карточка меняет высоту один раз, а не дважды. */}
-                        <motion.span
-                            key={said.text}
-                            className="wt-bubble__text"
-                            initial={{ opacity: 0, y: 5 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: SWAP, ease: SWAP_EASE }}
-                        >
-                            {withCodes(said.text, run.world.codes)}
-                        </motion.span>
-                    </p>
-                </div>
-
-                {!finished && !noLesson && (
-                    <div className="wt-goal">
-                        <span>Сейчас</span>
-                        <motion.b
-                            key={goal}
-                            initial={{ opacity: 0, y: 5 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: SWAP, ease: SWAP_EASE, delay: SWAP * 0.25 }}
-                        >
-                            {goal}
-                        </motion.b>
+                телефону, и уходит на своё место влево. На рабочем месте колонки
+                нет — Барс парит поверх окна (helperFloat, внутри сцены). */}
+            {deskMode ? null : (
+                <motion.aside
+                    className="wt-helper"
+                    initial={animateEntrance && !reduceMotion
+                        ? { opacity: 0, x: 120, scale: 0.94 } : false}
+                    animate={leaving
+                        ? { opacity: 0, x: 120, scale: 0.94 }
+                        : (cardsOut ? { opacity: 1, x: 0, scale: 1 } : {})}
+                    transition={{
+                        duration: leaving ? 0.24 : 0.46,
+                        ease: leaving ? EASE_LEAVE : EASE,
+                    }}
+                    onAnimationComplete={() => {
+                        if (!leaving) setPhase((p) => (p === 'cards' ? (skipRunner ? 'done' : 'run') : p));
+                    }}
+                >
+                    {/* Место барса в карточке. Пока он бежит, слот пуст — иначе
+                        зверь окажется в двух местах сразу. */}
+                    <div className="wt-helper__leo" ref={slotRef}
+                        style={{ opacity: settled || leaving ? 1 : 0 }}>
+                        {leoLayers}
                     </div>
-                )}
-
-                {/* Подсказка — часть урока. В свободной среде подсказывать
-                    нечего: правильного следующего действия там нет; на
-                    аттестации подсказок не бывает (scenario.noHints). */}
-                {noLesson || scenario.noHints ? null : (
-                    <button type="button" className="wt-hint-btn" onClick={doHint} disabled={finished}>
-                        <HelpCircle size={15} /> {scenario.hintLabel || 'Подсказка'}
-                    </button>
-                )}
-            </motion.aside>
+                    <div className={`wt-bubble wt-bubble--${said.tone}`}>
+                        <span className="wt-bubble__who">Барс</span>
+                        {sayText}
+                    </div>
+                    {goalBlock}
+                    {hintButton}
+                </motion.aside>
+            )}
 
             {/* Лента действий. Сервера у неё пока нет — она копится в памяти и
                 видна здесь, чтобы разбор можно было писать уже сейчас. Только
@@ -682,8 +835,18 @@ export function TrainerPlayer({
             {/* ── ЦЕНТР: учебный телефон ───────────────────────────────────
                 Высота считается от окна, ширина — от пропорций корпуса, поэтому
                 на большом экране телефон крупный, а на маленьком не вылезает. */}
-            <div className={`wt-stage${worldMode ? ' wt-stage--world' : ''}`
-                + `${deskMode ? ' wt-stage--desk' : ''}`} ref={stageRef}>
+            <motion.div className={`wt-stage${worldMode ? ' wt-stage--world' : ''}`
+                + `${deskMode ? ' wt-stage--desk' : ''}`
+                + `${deskMode && step.screen !== 'desk' ? ' wt-stage--card' : ''}`} ref={stageRef}
+                /* Окно рабочего места проявляется с лёгким приближением и так
+                   же уходит. Масштаб, а не сдвиг: окно на компьютере не
+                   выезжает из-за края, оно открывается на месте. */
+                initial={deskMode && animateEntrance && !reduceMotion
+                    ? { opacity: 0, scale: 0.97, y: 10 } : false}
+                animate={deskMode
+                    ? (leaving ? { opacity: 0, scale: 0.975, y: 8 } : { opacity: 1, scale: 1, y: 0 })
+                    : undefined}
+                transition={leaving ? deskOut : deskIn(0)}>
                 {worldMode || deskMode ? (
                     /* Мир вокруг человека и рабочее место оператора. Вступление
                        и финал в обоих режимах — обычные карточки: показывать их
@@ -875,7 +1038,8 @@ export function TrainerPlayer({
                 </motion.div>
                 </div>
                 )}
-            </div>
+                {deskMode ? helperFloat : null}
+            </motion.div>
 
             {/* ── СПРАВА: прогресс ─────────────────────────────────────────
                 Полоса, доля и список шагов инструкции вместе: полоса отвечает
@@ -885,14 +1049,14 @@ export function TrainerPlayer({
             <motion.aside
                 className="wt-side"
                 initial={animateEntrance && !reduceMotion
-                    ? { opacity: 0, x: -120, scale: 0.94 } : false}
+                    ? (deskMode ? { opacity: 0, x: 24, scale: 0.98 } : { opacity: 0, x: -120, scale: 0.94 })
+                    : false}
                 animate={leaving
-                    ? { opacity: 0, x: -120, scale: 0.94 }
+                    ? (deskMode ? { opacity: 0, x: 16, scale: 0.98 } : { opacity: 0, x: -120, scale: 0.94 })
                     : (cardsOut ? { opacity: 1, x: 0, scale: 1 } : {})}
-                transition={{
-                    duration: leaving ? 0.24 : 0.46,
-                    ease: leaving ? EASE_LEAVE : EASE,
-                }}
+                transition={deskMode
+                    ? (leaving ? deskOut : deskIn(0.08))
+                    : { duration: leaving ? 0.24 : 0.46, ease: leaving ? EASE_LEAVE : EASE }}
             >
                 <header className="wt-side__head">
                     <span>{scenario.subtitle}</span>

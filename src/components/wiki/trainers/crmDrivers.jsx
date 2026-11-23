@@ -179,107 +179,110 @@ export const AccountSearch = ({ ui }) => {
                             <LookupHistory ui={ui} items={world.drvHistory || []} expanded={!rows.length}
                                 onPick={(text) => run(text, 'drv_history')} />
 
-                            <table className="table table-hover table-listing">
-                                <thead>
-                                    <tr>
-                                        <th>ID</th>
-                                        <th>Аккаунт</th>
-                                        <th>Водитель</th>
-                                        <th>Название парка</th>
-                                        <th>Работает</th>
-                                        <th>Статус</th>
-                                        <th>Тип сотрудничества</th>
-                                        <th>Обновлено</th>
-                                        <th />
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {rows.map((row) => {
-                                        const [workLabel, workTone] = WORK_LABEL[row.workStatus] || ['Нет', 'badge-warning'];
-                                        return (
-                                            <tr key={row.id}>
-                                                <td>{row.id}</td>
-                                                <td>
-                                                    <a href="#" target="_blank" className={ui.t('drv_fleet_link').trim() || undefined}
-                                                        onClick={(e) => { noNav(e); ui.act('drv_fleet_link', { crmNote: FLEET_NOTE }); }}>
-                                                        {' '}{row.accountId}{' '}
-                                                    </a>
-                                                </td>
-                                                <td>
-                                                    <a href="#" target="_blank" onClick={(e) => { noNav(e); stub(ui, 'drv_driver_link', 'drivers'); }}>
-                                                        {' '}{row.driverId}{' '}
-                                                    </a>
-                                                </td>
-                                                <td>{row.park}</td>
-                                                <td><span className={`badge ${workTone}`}> {workLabel} </span></td>
-                                                <td>
-                                                    <span className={row.online === 'Офлайн' ? 'text-muted' : 'text-success'}>
-                                                        <i className="fa fa-circle" style={{ fontSize: 8 }} /> {row.online}
-                                                    </span>
-                                                </td>
-                                                <td>{row.employmentShort}</td>
-                                                <td><small> {world.now.slice(0, 16)} </small></td>
-                                                <td>
-                                                    <div className="row no-gutters">
-                                                        <div className="col-auto mr-1">
-                                                            <a className={`btn btn-sm btn-primary${ui.t('drv_open')}`} href="#" title="Подробнее" role="button"
-                                                                onClick={(e) => { noNav(e); openCard(ui, 'drv_open', row); }}>
-                                                                <i className="fa fa-eye" /> Подробнее
-                                                            </a>
-                                                        </div>
-                                                        {row.employmentKind === 'park_employee' ? (
-                                                            <div className="col-auto ml-1">
-                                                                <a className={`btn btn-sm btn-spinner btn-warning${ui.t('drv_smz')}`} href="#" title="Перевести в СМЗ" role="button"
-                                                                    onClick={(e) => { noNav(e); stub(ui, 'drv_smz', 'smz', { accountId: row.accountId }); }}> СМЗ </a>
+                            {/* Шире окна тренажёра — прокрутка вбок (wt-scroll-x, crmFrame.jsx). */}
+                            <div className="wt-scroll-x wt-scroll-x--actions">
+                                <table className="table table-hover table-listing">
+                                    <thead>
+                                        <tr>
+                                            <th>ID</th>
+                                            <th>Аккаунт</th>
+                                            <th>Водитель</th>
+                                            <th>Название парка</th>
+                                            <th>Работает</th>
+                                            <th>Статус</th>
+                                            <th>Тип сотрудничества</th>
+                                            <th>Обновлено</th>
+                                            <th />
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {rows.map((row) => {
+                                            const [workLabel, workTone] = WORK_LABEL[row.workStatus] || ['Нет', 'badge-warning'];
+                                            return (
+                                                <tr key={row.id}>
+                                                    <td>{row.id}</td>
+                                                    <td>
+                                                        <a href="#" target="_blank" className={ui.t('drv_fleet_link').trim() || undefined}
+                                                            onClick={(e) => { noNav(e); ui.act('drv_fleet_link', { crmNote: FLEET_NOTE }); }}>
+                                                            {' '}{row.accountId}{' '}
+                                                        </a>
+                                                    </td>
+                                                    <td>
+                                                        <a href="#" target="_blank" onClick={(e) => { noNav(e); stub(ui, 'drv_driver_link', 'drivers'); }}>
+                                                            {' '}{row.driverId}{' '}
+                                                        </a>
+                                                    </td>
+                                                    <td>{row.park}</td>
+                                                    <td><span className={`badge ${workTone}`}> {workLabel} </span></td>
+                                                    <td>
+                                                        <span className={row.online === 'Офлайн' ? 'text-muted' : 'text-success'}>
+                                                            <i className="fa fa-circle" style={{ fontSize: 8 }} /> {row.online}
+                                                        </span>
+                                                    </td>
+                                                    <td>{row.employmentShort}</td>
+                                                    <td><small> {world.now.slice(0, 16)} </small></td>
+                                                    <td>
+                                                        <div className="row no-gutters">
+                                                            <div className="col-auto mr-1">
+                                                                <a className={`btn btn-sm btn-primary${ui.t('drv_open')}`} href="#" title="Подробнее" role="button"
+                                                                    onClick={(e) => { noNav(e); openCard(ui, 'drv_open', row); }}>
+                                                                    <i className="fa fa-eye" /> Подробнее
+                                                                </a>
                                                             </div>
-                                                        ) : null}
-                                                        {['individual_entrepreneur', 'selfemployed'].includes(row.employmentKind) ? (
+                                                            {row.employmentKind === 'park_employee' ? (
+                                                                <div className="col-auto ml-1">
+                                                                    <a className={`btn btn-sm btn-spinner btn-warning${ui.t('drv_smz')}`} href="#" title="Перевести в СМЗ" role="button"
+                                                                        onClick={(e) => { noNav(e); stub(ui, 'drv_smz', 'smz', { accountId: row.accountId }); }}> СМЗ </a>
+                                                                </div>
+                                                            ) : null}
+                                                            {['individual_entrepreneur', 'selfemployed'].includes(row.employmentKind) ? (
+                                                                <div className="col-auto ml-1">
+                                                                    <a className={`btn btn-sm btn-spinner text-white${ui.t('drv_individual')}`} href="#" role="button"
+                                                                        style={{ backgroundColor: '#20a8d8' }} title="Перерегистрировать в физическое лицо"
+                                                                        onClick={(e) => { noNav(e); stub(ui, 'drv_individual', 'individual', { accountId: row.accountId }); }}> Физлицо </a>
+                                                                </div>
+                                                            ) : null}
                                                             <div className="col-auto ml-1">
-                                                                <a className={`btn btn-sm btn-spinner text-white${ui.t('drv_individual')}`} href="#" role="button"
-                                                                    style={{ backgroundColor: '#20a8d8' }} title="Перерегистрировать в физическое лицо"
-                                                                    onClick={(e) => { noNav(e); stub(ui, 'drv_individual', 'individual', { accountId: row.accountId }); }}> Физлицо </a>
+                                                                <a className={`btn btn-sm text-white${ui.t('drv_limit')}`} href="#" style={{ backgroundColor: '#63c2de' }} title="Управление лимитом"
+                                                                    onClick={(e) => { noNav(e); stub(ui, 'drv_limit', 'limit', { accountId: row.accountId }); }}>
+                                                                    <i className="fa fa-money" /> Лимит
+                                                                </a>
                                                             </div>
-                                                        ) : null}
-                                                        <div className="col-auto ml-1">
-                                                            <a className={`btn btn-sm text-white${ui.t('drv_limit')}`} href="#" style={{ backgroundColor: '#63c2de' }} title="Управление лимитом"
-                                                                onClick={(e) => { noNav(e); stub(ui, 'drv_limit', 'limit', { accountId: row.accountId }); }}>
-                                                                <i className="fa fa-money" /> Лимит
-                                                            </a>
+                                                            <div className="col-auto ml-1">
+                                                                <a className={`btn btn-sm btn-spinner text-white${ui.t('drv_car')}`} href="#" role="button"
+                                                                    style={{ backgroundColor: '#6f42c1' }} title="Редаĸтор автомобиля"
+                                                                    onClick={(e) => { noNav(e); stub(ui, 'drv_car', 'car_editor', { accountId: row.accountId }); }}> Автомобиль </a>
+                                                            </div>
+                                                            <div className="col-auto ml-1">
+                                                                <form onSubmit={(event) => event.preventDefault()}>
+                                                                    <button className={`btn btn-sm btn-spinner text-white${ui.t('drv_code')}`} style={{ backgroundColor: '#f86c6b' }}
+                                                                        type="button" title="Отправить водителю новый код подтверждения"
+                                                                        onClick={(event) => {
+                                                                            /* Не та кнопка в уроке — сразу объяснение, без
+                                                                               окна: подтверждение перед ошибкой сбивает. */
+                                                                            if (ui.misses('drv_code')) { ui.act('drv_code', null, { accountId: row.accountId }); return; }
+                                                                            const view = event.currentTarget.ownerDocument.defaultView;
+                                                                            if (!view.confirm(CODE_CONFIRM)) {
+                                                                                ui.touch('drv_code_cancel');
+                                                                                return;
+                                                                            }
+                                                                            ui.act('drv_code', {
+                                                                                drvCodeSent: [...(world.drvCodeSent || []), { accountId: row.accountId, at: world.now }],
+                                                                                crmNote: { title: 'Готово', text: 'Учебная среда: SMS не отправлено', type: 'success' },
+                                                                            }, { accountId: row.accountId });
+                                                                        }}>
+                                                                        <i className="fa fa-key" /> Код
+                                                                    </button>
+                                                                </form>
+                                                            </div>
                                                         </div>
-                                                        <div className="col-auto ml-1">
-                                                            <a className={`btn btn-sm btn-spinner text-white${ui.t('drv_car')}`} href="#" role="button"
-                                                                style={{ backgroundColor: '#6f42c1' }} title="Редаĸтор автомобиля"
-                                                                onClick={(e) => { noNav(e); stub(ui, 'drv_car', 'car_editor', { accountId: row.accountId }); }}> Автомобиль </a>
-                                                        </div>
-                                                        <div className="col-auto ml-1">
-                                                            <form onSubmit={(event) => event.preventDefault()}>
-                                                                <button className={`btn btn-sm btn-spinner text-white${ui.t('drv_code')}`} style={{ backgroundColor: '#f86c6b' }}
-                                                                    type="button" title="Отправить водителю новый код подтверждения"
-                                                                    onClick={(event) => {
-                                                                        /* Не та кнопка в уроке — сразу объяснение, без
-                                                                           окна: подтверждение перед ошибкой сбивает. */
-                                                                        if (ui.misses('drv_code')) { ui.act('drv_code', null, { accountId: row.accountId }); return; }
-                                                                        const view = event.currentTarget.ownerDocument.defaultView;
-                                                                        if (!view.confirm(CODE_CONFIRM)) {
-                                                                            ui.touch('drv_code_cancel');
-                                                                            return;
-                                                                        }
-                                                                        ui.act('drv_code', {
-                                                                            drvCodeSent: [...(world.drvCodeSent || []), { accountId: row.accountId, at: world.now }],
-                                                                            crmNote: { title: 'Готово', text: 'Учебная среда: SMS не отправлено', type: 'success' },
-                                                                        }, { accountId: row.accountId });
-                                                                    }}>
-                                                                    <i className="fa fa-key" /> Код
-                                                                </button>
-                                                            </form>
-                                                        </div>
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
                             {!rows.length ? (
                                 <div className="alert alert-secondary py-3 mb-0">
                                     {' '}Общий список вам недоступен: здесь показываются только аккаунты найденного водителя. Введите ID в

@@ -44,6 +44,15 @@ export const TrainMark = ({ children = 'Учебный экран' }) => (
    Их разметка не зависит от приложения — меняются только название сценария и
    список шагов, а он и так лежит в сценарии. */
 
+/* Пункты для вступления. Короткий список — целиком: у аттестации пять
+   ситуаций, и четыре из пяти читались как потерянная пятая. Длинную
+   инструкцию — первыми четырьмя и «ещё N», чтобы карточка не росла. */
+export const introSteps = (checklist) => {
+    const items = (checklist || []).map((item, index) => `${index + 1}. ${item}`);
+    if (items.length <= 6) return items;
+    return [...items.slice(0, 4), `…и ещё ${items.length - 4}`];
+};
+
 export const IntroScreen = ({ scenario, tap, target }) => (
     <div className="wt-screen wt-intro">
         <span className="wt-intro__chip">{scenario.app} · учебный режим</span>
@@ -66,8 +75,8 @@ export const IntroScreen = ({ scenario, tap, target }) => (
                     ? scenario.blocks.map((block, index) => (
                         <span key={block.title}>Блок {index + 1}. {block.title}</span>
                     ))
-                    : (scenario.checklist || []).slice(0, 4).map((item, index) => (
-                        <span key={`${index}-${item}`}>{index + 1}. {item}</span>
+                    : introSteps(scenario.checklist).map((item, index) => (
+                        <span key={`${index}-${item}`}>{item}</span>
                     ))}
             </div>
         )}

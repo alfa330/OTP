@@ -36,6 +36,7 @@ import {
 } from '../src/components/wiki/trainers/crmCard.js';
 import { nearestShift, revealInFrame } from '../src/components/wiki/trainers/crmReveal.js';
 import { resultExamItems, resultVerdict } from '../src/components/wiki/trainerResult.js';
+import { CORNERS, chooseCorner, cornerRect, overlaps } from '../src/components/wiki/trainers/floatCorner.js';
 import { TRAINERS } from '../src/components/wiki/trainers/registry.js';
 import { PHONE_HIDDEN_TRAINERS } from '../src/trainers_embed/trainerList.js';
 
@@ -57,6 +58,9 @@ async function loadCrm() {
                 "export { DeskScreen, makeUi, viewPatch, crmTitle } from './screensCrm.jsx';",
                 "export { accountSearchPatch, CODE_CONFIRM } from './crmDrivers.jsx';",
                 "export { yaAppealFrom } from './crmYandexAppeals.jsx';",
+                "export { FRAME_CSS } from './crmFrame.jsx';",
+                "export { introSteps } from './screenKit.jsx';",
+                "export { default as BrowserChrome } from './BrowserChrome.jsx';",
             ].join('\n'),
             resolveDir: fileURLToPath(new URL('../src/components/wiki/trainers/', import.meta.url)),
             loader: 'jsx',
@@ -1106,4 +1110,84 @@ test('статистика: метка итога — балл аттестац�
     assert.ok(items.every((item) => item.ok && item.answered && !item.problems.length));
     assert.deepEqual(resultExamItems({ exam: { items: [null, { key: 'code', ok: false, answered: false }] } }),
         [{ title: 'code', ok: false, answered: false, problems: [] }]);
+});
+
+test('списки CRM шире окна тренажёра: прокрутка вбок, кнопки строки — в закреплённом столбце', () => {
+    /* На мониторе оператора списки влезают, в окне тренажёра — нет, а страница
+       CRM вбок не прокручивается: без обёртки «глаз» уезжал за край, и открыть
+       обращение было нельзя (владелец, 23.11.2026). */
+    const lastCellHasTarget = (html) => {
+        const at = html.indexOf('is-target');
+        assert.ok(at > 0, 'цели нет на экране');
+        const rowStart = html.lastIndexOf('<tr', at);
+        const row = html.slice(rowStart, html.indexOf('</tr>', at));
+        return row.lastIndexOf('<td') < at - rowStart;
+    };
+    const wrapped = (cls) => new RegExp(`<div class="${cls}"><table class="table table-hover table-listing">`);
+
+    const requests = renderDesk(until('b1_row_show'));
+    assert.match(requests, wrapped('wt-scroll-x wt-scroll-x--actions'), 'список обращений без прокрутки');
+    assert.ok(lastCellHasTarget(requests), '«глаз» не в последнем столбце — закрепление его не покажет');
+
+    const accounts = renderDesk(until('b2_open'));
+    assert.match(accounts, wrapped('wt-scroll-x wt-scroll-x--actions'), 'список учёток без прокрутки');
+    assert.ok(lastCellHasTarget(accounts), '«Подробнее» не в последнем столбце');
+
+    // Обращение в Яндекс открывается всей строкой — закреплять нечего.
+    assert.match(renderDesk(until('b3_unread')), wrapped('wt-scroll-x'), 'список обращений в Яндекс без прокрутки');
+
+    assert.match(CRM.FRAME_CSS, /\.wt-scroll-x \{ overflow-x: auto; \}/);
+    assert.match(CRM.FRAME_CSS, /position: sticky;\s*right: 0;/);
+    assert.match(CRM.FRAME_CSS, /\.wt-scroll-x::-webkit-scrollbar/, 'полоса прокрутки в macOS не видна без своих стилей');
+});
+
+test('вступление: короткий список целиком, длинный — первые четыре и «ещё N»', () => {
+    assert.deepEqual(CRM.introSteps(['а', 'б', 'в', 'г', 'д']), ['1. а', '2. б', '3. в', '4. г', '5. д'],
+        'у аттестации пять ситуаций — показать все пять');
+    assert.deepEqual(CRM.introSteps(Array.from({ length: 9 }, (_, i) => `ш${i + 1}`)),
+        ['1. ш1', '2. ш2', '3. ш3', '4. ш4', '…и ещё 5']);
+    assert.deepEqual(CRM.introSteps(undefined), []);
+    assert.equal(CRM.introSteps(attestation.checklist).length, 5);
+});
+
+test('окно браузера в стиле macOS: «светофор» слева — цели движка, профиль без чужих инициалов', () => {
+    const html = renderToStaticMarkup(React.createElement(CRM.BrowserChrome, {
+        tap() {}, target: 'win_close', tabs: [{ id: 'crm', title: 'Обращения - ITaxi' }], active: 'crm',
+        onSwitch() {}, url: 'backend.yataxi.kz/admin/list-requests',
+    }, 'страница'));
+    for (const id of ['win_close', 'win_min', 'win_max', 'tab_close', 'tab_new', 'browser_back', 'address_bar']) {
+        assert.match(html, new RegExp(`data-tap="${id}"`), `нет цели ${id} — промах по ней не объяснится`);
+    }
+    assert.match(html, /wt-win__light is-close is-target/);
+    assert.ok(html.indexOf('wt-win__lights') < html.indexOf('wt-win__tab-name'), '«светофор» не слева от вкладки');
+    assert.doesNotMatch(html, /ШХ|wt-win__controls/, 'остались кнопки Windows или чужие инициалы');
+});
+
+test('парящий Барс: облачко не закрывает ни цель шага, ни меню CRM — дом внизу справа', () => {
+    const stage = { left: 0, top: 0, right: 1300, bottom: 900 };
+    const size = { width: 440, height: 280 };
+    assert.deepEqual(CORNERS, ['br', 'bl', 'tr']);
+    assert.deepEqual(cornerRect('br', stage, size), { left: 842, top: 602, right: 1282, bottom: 882 });
+    // Левый угол — правее меню CRM (leftInset), а не поверх него.
+    assert.deepEqual(cornerRect('bl', stage, size, 96, 200), { left: 218, top: 602, right: 658, bottom: 882 });
+    assert.deepEqual(cornerRect('tr', stage, size, 100), { left: 842, top: 100, right: 1282, bottom: 380 });
+
+    // Цель вверху — Барс дома, даже если до этого улетал.
+    const top = { left: 600, top: 150, right: 640, bottom: 180 };
+    assert.equal(chooseCorner({ stage, size, target: top, current: 'tr' }), 'br');
+    // «Обновить» справа внизу — налево вниз, правее меню.
+    const refresh = { left: 1000, top: 700, right: 1080, bottom: 740 };
+    assert.equal(chooseCorner({ stage, size, target: refresh, leftInset: 200 }), 'bl');
+    // Широкое поле во весь низ — вверх направо, под адресную строку.
+    const comment = { left: 200, top: 700, right: 1200, bottom: 760 };
+    assert.equal(chooseCorner({ stage, size, target: comment, topInset: 100, leftInset: 200 }), 'tr');
+    // Занято всё — Барс не мечется, остаётся где был.
+    const huge = { left: 0, top: 0, right: 1300, bottom: 900 };
+    assert.equal(chooseCorner({ stage, size, target: huge, current: 'bl' }), 'bl');
+    // Цели нет (аттестация, «Звонок») — дома; нечего мерить — как есть.
+    assert.equal(chooseCorner({ stage, size, target: null, current: 'tr' }), 'br');
+    assert.equal(chooseCorner({ stage: null, size, target: top, current: 'bl' }), 'bl');
+    // Вплотную к цели — тоже мешает: запас 10 px.
+    assert.equal(overlaps({ left: 0, top: 0, right: 10, bottom: 10 }, { left: 15, top: 0, right: 20, bottom: 10 }), true);
+    assert.equal(overlaps({ left: 0, top: 0, right: 10, bottom: 10 }, { left: 25, top: 0, right: 30, bottom: 10 }), false);
 });

@@ -677,57 +677,60 @@ export const RequestList = ({ ui }) => {
                                     </div>
                                 </div>
                             </form>
-                            <table className="table table-hover table-listing">
-                                <thead>
-                                    <tr>
-                                        <th><a><span className="fa fa-sort-amount-desc" /> ID</a></th>
-                                        <th><a><span className="fa" /> Время создания</a></th>
-                                        <th><a><span className="fa" /> ФИО оператора</a></th>
-                                        <th>Звонок/Чат</th>
-                                        <th>Номер телефона</th>
-                                        <th>Номер В/У</th>
-                                        <th><a><span className="fa" /> Таксопарк</a></th>
-                                        <th><a><span className="fa" /> Город</a></th>
-                                        <th><a><span className="fa" /> Категория</a></th>
-                                        <th><a><span className="fa" /> Акция</a></th>
-                                        <th>Номер тикета</th>
-                                        <th />
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {rows.map((row) => (
-                                        <tr key={row.id} className="">
-                                            <td>{row.id}</td>
-                                            <td>{row.at}</td>
-                                            <td>{row.operator}</td>
-                                            <td>{row.source}</td>
-                                            <td>{row.phone}</td>
-                                            <td>{row.license}</td>
-                                            <td>{row.park}</td>
-                                            <td>{row.city}</td>
-                                            <td>{row.category}</td>
-                                            <td>{row.promotion}</td>
-                                            <td>{row.ticket ? <a href="#" onClick={noNav}>{row.ticket}</a> : null}</td>
-                                            <td>
-                                                <div className="row no-gutters">
-                                                    <div className="col-auto">
-                                                        <a className={`btn btn-sm btn-spinner btn-info${ui.t('lr_row_show')}`} href="#" role="button" title="Показать"
-                                                            onClick={(e) => { noNav(e); ui.go('request_show', { crmShown: row }, 'lr_row_show', { id: row.id, own: row.operator === 'Стажёр' }); }}>
-                                                            <i className="fa fa-eye" />
-                                                        </a>
-                                                    </div>
-                                                    <div className="col-auto">
-                                                        <a className="btn btn-sm btn-spinner btn-info" href="#" role="button" title="Правка"
-                                                            onClick={(e) => { noNav(e); ui.act('lr_row_edit', { crmView: 'stub', crmStub: 'request_edit' }); }}>
-                                                            <i className="fa fa-edit" />
-                                                        </a>
-                                                    </div>
-                                                </div>
-                                            </td>
+                            {/* Шире окна тренажёра — прокрутка вбок (wt-scroll-x, crmFrame.jsx). */}
+                            <div className="wt-scroll-x wt-scroll-x--actions">
+                                <table className="table table-hover table-listing">
+                                    <thead>
+                                        <tr>
+                                            <th><a><span className="fa fa-sort-amount-desc" /> ID</a></th>
+                                            <th><a><span className="fa" /> Время создания</a></th>
+                                            <th><a><span className="fa" /> ФИО оператора</a></th>
+                                            <th>Звонок/Чат</th>
+                                            <th>Номер телефона</th>
+                                            <th>Номер В/У</th>
+                                            <th><a><span className="fa" /> Таксопарк</a></th>
+                                            <th><a><span className="fa" /> Город</a></th>
+                                            <th><a><span className="fa" /> Категория</a></th>
+                                            <th><a><span className="fa" /> Акция</a></th>
+                                            <th>Номер тикета</th>
+                                            <th />
                                         </tr>
-                                    ))}
-                                </tbody>
-                            </table>
+                                    </thead>
+                                    <tbody>
+                                        {rows.map((row) => (
+                                            <tr key={row.id} className="">
+                                                <td>{row.id}</td>
+                                                <td>{row.at}</td>
+                                                <td>{row.operator}</td>
+                                                <td>{row.source}</td>
+                                                <td>{row.phone}</td>
+                                                <td>{row.license}</td>
+                                                <td>{row.park}</td>
+                                                <td>{row.city}</td>
+                                                <td>{row.category}</td>
+                                                <td>{row.promotion}</td>
+                                                <td>{row.ticket ? <a href="#" onClick={noNav}>{row.ticket}</a> : null}</td>
+                                                <td>
+                                                    <div className="row no-gutters">
+                                                        <div className="col-auto">
+                                                            <a className={`btn btn-sm btn-spinner btn-info${ui.t('lr_row_show')}`} href="#" role="button" title="Показать"
+                                                                onClick={(e) => { noNav(e); ui.go('request_show', { crmShown: row }, 'lr_row_show', { id: row.id, own: row.operator === 'Стажёр' }); }}>
+                                                                <i className="fa fa-eye" />
+                                                            </a>
+                                                        </div>
+                                                        <div className="col-auto">
+                                                            <a className="btn btn-sm btn-spinner btn-info" href="#" role="button" title="Правка"
+                                                                onClick={(e) => { noNav(e); ui.act('lr_row_edit', { crmView: 'stub', crmStub: 'request_edit' }); }}>
+                                                                <i className="fa fa-edit" />
+                                                            </a>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
                             <div className="row">
                                 <div className="col-sm">
                                     <span className="pagination-caption"> 1 to {rows.length} of total {rows.length} items.</span>
