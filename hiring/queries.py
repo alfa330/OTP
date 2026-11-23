@@ -1026,9 +1026,30 @@ def hh_claim_topic(cursor, item, now):
     return cursor.rowcount == 1
 
 
-def hh_finish_topic(cursor, topic_id, outcome, card_id):
-    cursor.execute("UPDATE hiring_hh_topics SET outcome = %s, card_id = %s WHERE topic_id = %s",
-                   (outcome, card_id, int(topic_id)))
+def hh_finish_topic(cursor, topic_id, outcome, card_id, item=None):
+    """Исход темы. Резюме и письмо отклика — только когда тема стала карточкой или повторным откликом в ней:
+    у отклика мимо воронки персональным данным здесь делать нечего."""
+    item = item if card_id and item else {}
+    cursor.execute("""
+        UPDATE hiring_hh_topics
+           SET outcome = %s, card_id = %s, vacancy_name = %s, resume_url = %s, letter = %s, resume = %s::jsonb
+         WHERE topic_id = %s
+    """, (outcome, card_id, item.get('vacancy_name'), item.get('resume_url'), item.get('letter'),
+          json.dumps(item['resume'], ensure_ascii=False) if item.get('resume') else None, int(topic_id)))
+
+
+def hh_card_responses(cursor, card_id):
+    """Отклики hh карточки с резюме или письмом — новые сверху (вкладка «Резюме»)."""
+    cursor.execute("""
+        SELECT topic_id, hh_vacancy_id, vacancy_name, responded_at, resume_url, letter, resume
+          FROM hiring_hh_topics
+         WHERE card_id = %s AND (letter IS NOT NULL OR resume IS NOT NULL)
+         ORDER BY responded_at DESC NULLS LAST, topic_id DESC
+         LIMIT 20
+    """, (int(card_id),))
+    return [{'topic_id': str(row[0]), 'vacancy_id': str(row[1]), 'vacancy_name': row[2], 'responded_at': row[3],
+             'resume_url': row[4], 'letter': row[5],
+             'resume': json.loads(row[6]) if isinstance(row[6], str) else row[6]} for row in cursor.fetchall()]
 
 
 def hh_save_report(cursor, now, *, state, error, report, received, ok):

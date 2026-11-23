@@ -546,6 +546,14 @@ _STATEMENTS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_hiring_hh_topics_created ON hiring_hh_topics (created_at)",
+    # Резюме и сопроводительное письмо отклика (владелец 23.11.2026: «все резюме и письмо человека который обратился
+    # отобразились сразу в карточке»): мост открывает новый отклик и приносит резюме без контактов. Хранятся только у
+    # откликов, ставших карточкой или повторным откликом в ней, — их показывает вкладка «Резюме» карточки.
+    "ALTER TABLE hiring_hh_topics ADD COLUMN IF NOT EXISTS vacancy_name VARCHAR(200)",
+    "ALTER TABLE hiring_hh_topics ADD COLUMN IF NOT EXISTS resume_url TEXT",
+    "ALTER TABLE hiring_hh_topics ADD COLUMN IF NOT EXISTS letter TEXT",
+    "ALTER TABLE hiring_hh_topics ADD COLUMN IF NOT EXISTS resume JSONB",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_hh_topics_card ON hiring_hh_topics (card_id) WHERE card_id IS NOT NULL",
 
     # Отчёт за день (HR-3, hiring/day_report.py): «Другая работа» — текст рекрутера за день о том, что не касается
     # кандидатов (владелец 23.11.2026: поле под таблицей, цифры таблицы руками не правятся). Одна запись на человека и

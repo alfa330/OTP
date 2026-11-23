@@ -796,7 +796,8 @@ def test_hh_bridge_is_signed_and_vacancies_are_lead_only(client, monkeypatch):
                              {'id': '139508734', 'name': 'Младший маркетолог', 'area': 'Алматы', 'responses': 9}],
                'items': [{'topic_id': '9001', 'vacancy_id': '139079696', 'vacancy_name': 'Оператор call-центра',
                           'responded_at': rules.now_almaty().isoformat(timespec='seconds'), 'last_name': 'Сейтова',
-                          'first_name': 'Алия', 'phone': '+7 (705) 555-90-01', 'city': 'Алматы', 'resume_hash': 'b' * 38}]}
+                          'first_name': 'Алия', 'phone': '+7 (705) 555-90-01', 'city': 'Алматы', 'resume_hash': 'b' * 38,
+                          'resume': {'title': 'Оператор', 'employment': ['full']}, 'letter': 'Хочу у вас работать'}]}
     body = _json_mod.dumps(payload).encode('utf-8')
     assert client.post(push, json=payload).status_code == 401
     tampered = signer.headers('POST', push, body)
@@ -816,6 +817,12 @@ def test_hh_bridge_is_signed_and_vacancies_are_lead_only(client, monkeypatch):
     assert [(v['id'], v['on'], v['vacancy_id']) for v in hh_row['hh']['vacancies']] == [
         ('139079696', True, None), ('139508734', False, None)]
     assert client.post('/api/hiring/integrations/hh/run', headers=lead).status_code == 404
+    # Карточка отклика несёт резюме и письмо (вкладка «Резюме»; владелец 23.11.2026) — тому, кому карточка видна.
+    with client.world['db']._get_cursor() as cur:
+        card_id = queries.open_card_by_phone(cur, '+77055559001')['id']
+    shown = client.get('/api/hiring/cards/%s' % card_id, headers=lead).get_json()
+    assert [(r['topic_id'], r['letter'], r['resume']['title'], r['resume']['employment']) for r in shown['hh']] == [
+        ('9001', 'Хочу у вас работать', 'Оператор', ['полная занятость'])]
 
     vacancy_id = client.world['vacancy_id']
     change = {'vacancies': {'139079696': {'on': True, 'vacancy_id': vacancy_id}, '139508734': {'on': False}}}

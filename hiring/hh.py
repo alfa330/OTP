@@ -17,7 +17,9 @@ API hh.ru отдаёт отклики работодателю только с �
      "vacancies": [{"id": "139079696", "name": "…", "area": "Алматы", "responses": 152}]   (null — не перечитывал),
      "items": [{"topic_id": "…", "vacancy_id": "…", "vacancy_name": "…",
                 "responded_at": "2026-11-23T12:30:00+03:00", "last_name": "…", "first_name": "…",
-                "middle_name": "…", "phone": "+7 (701) 234-56-78", "city": "Алматы", "resume_hash": "…"}]}
+                "middle_name": "…", "phone": "+7 (701) 234-56-78", "city": "Алматы", "resume_hash": "…",
+                "resume": {"title": "…", "experience": [...], "education": [...], …}   (с hh/1.3.0, без контактов),
+                "letter": "сопроводительное письмо или null"}]}
 
 Портал отвечает исходом по каждой теме, настройками (с какого момента отклики переносятся и какие вакансии
 выключены — их мост не читает вовсе) и паузой до следующего опроса (next_poll_sec). Настройки руководителя
@@ -111,7 +113,139 @@ def clean_item(raw):
         'phone': _text(raw.get('phone'), 40),
         'city': _text(raw.get('city'), 120),
         'resume_url': resume_url(resume_hash, vacancy_id, topic_id),
+        'resume': clean_resume(raw.get('resume')),
+        'letter': _long_text(raw.get('letter'), LETTER_MAX),
     }
+
+
+# ─── Резюме и сопроводительное письмо отклика ──────────────────────────────────
+# Владелец 23.11.2026: «надо бы сделать так что бы все резюме и письмо человека который обратился отобразились сразу в
+# карточке» — и выбрал «Полное резюме и письмо»: мост открывает новый отклик (в hh он «Просмотрен») и приносит резюме без
+# контактов. Здесь — проверка формы и подписи к кодам hh (как на сайте hh), чтобы карточка показывала готовый текст.
+
+LETTER_MAX = 10000
+_SHORT, _DESCRIPTION, _ABOUT = 300, 4000, 6000
+RESUME_LABELS = {
+    'gender': {'male': 'мужчина', 'female': 'женщина'},
+    'relocation': {'no_relocation': 'не готов к переезду', 'relocation_possible': 'готов к переезду',
+                   'relocation_desirable': 'хочет переехать'},
+    'business_trips': {'never': 'не готов к командировкам', 'ready': 'готов к командировкам',
+                       'sometimes': 'готов к редким командировкам'},
+    'travel_time': {'any': 'не имеет значения', 'less_than_hour': 'не более часа',
+                    'from_hour_to_one_and_half': 'не более полутора часов'},
+    'employment': {'full': 'полная занятость', 'part': 'частичная занятость', 'project': 'проектная работа',
+                   'volunteer': 'волонтёрство', 'probation': 'стажировка'},
+    'schedule': {'fullDay': 'полный день', 'shift': 'сменный график', 'flexible': 'гибкий график',
+                 'remote': 'удалённая работа', 'flyInFlyOut': 'вахтовый метод'},
+    'formats': {'ON_SITE': 'на месте работодателя', 'REMOTE': 'удалённо', 'HYBRID': 'гибрид', 'FIELD_WORK': 'разъездной'},
+    'education_level': {'secondary': 'среднее', 'special_secondary': 'среднее специальное',
+                        'unfinished_higher': 'неоконченное высшее', 'higher': 'высшее', 'bachelor': 'бакалавр',
+                        'master': 'магистр', 'candidate': 'кандидат наук', 'doctor': 'доктор наук'},
+    'language': {'l1': 'родной', 'a1': 'A1 — начальный', 'a2': 'A2 — элементарный', 'b1': 'B1 — средний',
+                 'b2': 'B2 — средне-продвинутый', 'c1': 'C1 — продвинутый', 'c2': 'C2 — в совершенстве'},
+}
+CURRENCY_SIGNS = {'KZT': '₸', 'RUR': '₽', 'RUB': '₽', 'USD': '$', 'EUR': '€', 'UZS': 'сум', 'KGS': 'сом', 'BYR': 'Br'}
+
+
+def _long_text(value, limit):
+    """Текст с абзацами (письмо, описание работы, «о себе»): переносы строк сохраняются, лишние пустые строки — нет."""
+    if value is None or isinstance(value, (dict, list, bool)):
+        return None
+    text = '\n'.join(line.rstrip() for line in str(value).replace('\r\n', '\n').replace('\r', '\n').split('\n')).strip()
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text[:limit] or None
+
+
+def _label(kind, code):
+    code = _text(code, 60)
+    return RESUME_LABELS[kind].get(code, code) if code else None
+
+
+def _labels(kind, codes):
+    return [label for label in (_label(kind, code) for code in (codes if isinstance(codes, list) else [])[:12]) if label]
+
+
+def _small_int(value, limit):
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= limit else None
+
+
+def _span(years, months):
+    """Стаж {years, months}: месяцы — остаток после лет; пришли общим числом (63) — раскладываются (5 лет 3 мес.)."""
+    years, months = _small_int(years, 100), _small_int(months, 1200)
+    if months is not None and months >= 12:
+        years, months = months // 12, months % 12
+    if not years and not months:
+        return None
+    return {'years': years or 0, 'months': months or 0}
+
+
+def _schools(items, limit):
+    out = []
+    for item in (items if isinstance(items, list) else [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        entry = {'name': _text(item.get('name'), _SHORT), 'organization': _text(item.get('organization'), _SHORT),
+                 'result': _text(item.get('result'), _SHORT), 'year': _small_int(item.get('year'), 2100)}
+        if entry['name'] or entry['organization'] or entry['result']:
+            out.append(entry)
+    return out
+
+
+def clean_resume(raw):
+    """Резюме от моста → то, что видит карточка: подписи вместо кодов hh, длины в потолках, ничего лишнего. Контактов
+    здесь нет и быть не должно — мост их не берёт, а лишние ключи сюда не проходят. None — резюме не пришло."""
+    if not isinstance(raw, dict):
+        return None
+    salary = raw.get('salary') if isinstance(raw.get('salary'), dict) else {}
+    amount = _small_int(salary.get('amount'), 10 ** 10)
+    currency = _text(salary.get('currency'), 8)
+    total = raw.get('experience_total') if isinstance(raw.get('experience_total'), dict) else {}
+    experience = []
+    for item in (raw.get('experience') if isinstance(raw.get('experience'), list) else [])[:30]:
+        if not isinstance(item, dict):
+            continue
+        entry = {'company': _text(item.get('company'), _SHORT), 'area': _text(item.get('area'), _SHORT),
+                 'position': _text(item.get('position'), _SHORT),
+                 'start': _text(item.get('start'), 10), 'end': _text(item.get('end'), 10),
+                 'span': _span(item.get('years'), item.get('months')),
+                 'description': _long_text(item.get('description'), _DESCRIPTION)}
+        if entry['company'] or entry['position']:
+            experience.append(entry)
+    languages = []
+    for item in (raw.get('languages') if isinstance(raw.get('languages'), list) else [])[:10]:
+        if isinstance(item, dict) and _text(item.get('title'), 80):
+            languages.append({'title': _text(item.get('title'), 80), 'level': _label('language', item.get('degree'))})
+    resume = {
+        'title': _text(raw.get('title'), _SHORT),
+        'salary': ({'amount': amount, 'currency': currency, 'sign': CURRENCY_SIGNS.get(currency or '', currency)}
+                   if amount else None),
+        'age': _small_int(raw.get('age'), 120),
+        'gender': _label('gender', raw.get('gender')),
+        'area': _text(raw.get('area'), _SHORT),
+        'metro': _text(raw.get('metro'), _SHORT),
+        'citizenship': [text for text in (_text(item, 80) for item in (raw.get('citizenship') or [])[:5]
+                                          if isinstance(item, str)) if text],
+        'relocation': _label('relocation', raw.get('relocation')),
+        'business_trips': _label('business_trips', raw.get('business_trips')),
+        'travel_time': _label('travel_time', raw.get('travel_time')),
+        'employment': _labels('employment', raw.get('employment')),
+        'schedule': _labels('schedule', raw.get('schedule')),
+        'formats': _labels('formats', raw.get('formats')),
+        'experience_total': _span(total.get('years'), total.get('months')),
+        'experience': experience,
+        'education_level': _label('education_level', raw.get('education_level')),
+        'education': _schools(raw.get('education'), 15),
+        'courses': _schools(raw.get('courses'), 30),
+        'languages': languages,
+        'key_skills': [text for text in (_text(item, 100) for item in (raw.get('key_skills') or [])[:60]
+                                         if isinstance(item, (str, int))) if text],
+        'about': _long_text(raw.get('about'), _ABOUT),
+        'driver_license': [text for text in (_text(item, 10) for item in (raw.get('driver_license') or [])[:12]
+                                             if isinstance(item, str)) if text],
+        'has_vehicle': raw.get('has_vehicle') if isinstance(raw.get('has_vehicle'), bool) else None,
+        'medical_book': raw.get('medical_book') if isinstance(raw.get('medical_book'), bool) else None,
+    }
+    return resume if any(value not in (None, [], False) for value in resume.values()) else None
 
 
 def clean_vacancies(raw):

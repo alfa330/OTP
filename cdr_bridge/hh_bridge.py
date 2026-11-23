@@ -12,7 +12,8 @@
 Как устроено
 ------------
     hh.kz, кабинет работодателя ◄── раз в такт: счётчики откликов каждой вакансии (килобайт)
-                                 └─ счётчик сдвинулся — свежие отклики вакансии (выдача страницы «Отклики»)
+                                 ├─ счётчик сдвинулся — свежие отклики вакансии (выдача страницы «Отклики»)
+                                 └─ новый отклик — его резюме и сопроводительное письмо (страница резюме из отклика)
     мост (VM шлюза) ── POST /api/hiring/hh/agent/push ──► портал: карточки в «Отклики» пула
 
 Паузу до следующего опроса называет портал, и она случайная (владелец 23.11.2026: «добавь случайный тайминг в опросе
@@ -22,13 +23,21 @@
 счётчики сдвинулись. Портал отвечает исходом по каждому отклику и настройками: с какого момента отклики нужны (у
 вакансии, которую включили позже, — свой момент) и какие вакансии выключены (их мост не читает вовсе).
 
+Резюме и письмо
+---------------
+Владелец 23.11.2026: «надо бы сделать так что бы все резюме и письмо человека который обратился отобразились сразу в
+карточке». Полное резюме (опыт, образование, «о себе») и сопроводительное письмо hh отдаёт только на странице резюме,
+открытой из отклика, — и тогда отклик в hh становится «Просмотрен» (кандидат это видит, у рекрутеров в hh пропадает
+отметка «новый»). Владелец выбрал это осознанно («Полное резюме и письмо»), поэтому мост открывает каждый новый отклик
+один раз — один запрос, как рекрутер, открывший отклик. Контакты (email, адрес, дата рождения) из резюме не берутся:
+телефон и так приходит в выдаче.
+
 Что мост НЕ делает
 ------------------
-Ничего не меняет в hh: только GET тех же адресов, что открывает страница рекрутера; отклики остаются неразобранными
-и непросмотренными, как были. Не открывает резюме: телефон и ФИО отдаёт сама выдача откликов (кандидат откликнулся
-сам — его контакты работодателю открыты без списаний). Не ходит в hh чаще одного запроса за раз, между запросами —
-случайная пауза 1,5–3,5 с, больше DAILY_REQUEST_CAP запросов в сутки не делает (предохранитель от ошибки в коде).
-Переменные HTTPS_PROXY и подобные не читаются: наружу только через прокси из настроек, как у моста «Касаний».
+Ничего не меняет в hh: только GET тех же адресов, что открывает страница рекрутера; кроме отметки «Просмотрен» у нового
+отклика отклики остаются как были — неразобранными, на своих этапах. Не ходит в hh чаще одного запроса за раз, между
+запросами — случайная пауза 1,5–3,5 с, больше DAILY_REQUEST_CAP запросов в сутки не делает (предохранитель от ошибки в
+коде). Переменные HTTPS_PROXY и подобные не читаются: наружу только через прокси из настроек, как у моста «Касаний».
 
 Что будет, если что-то лежит
 ----------------------------
@@ -80,7 +89,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'hh/1.2.0'
+VERSION = 'hh/1.3.0'
 log = logging.getLogger('cdr_bridge.hh_bridge')
 
 PUSH_PATH = '/api/hiring/hh/agent/push'
@@ -114,7 +123,12 @@ PAGE_SIZE = 50
 MAX_PAGES = 10
 # Порядок «по дате» у hh почти строгий: страница, где все отклики старше отсечки на сутки, — последняя нужная.
 ORDER_SLACK = timedelta(days=1)
-PUSH_BATCH = 50
+# Отклик с резюме — до десятков килобайт текста: порция поменьше, чтобы доклад порталу оставался коротким.
+PUSH_BATCH = 20
+# Хеш резюме hh — только шестнадцатеричный: из него собирается адрес страницы, чужие символы в путь не попадают.
+RESUME_HASH = re.compile(r'^[0-9a-f]{16,64}$')
+# Потолки текста резюме: hh разрешает описание места работы до 4000 знаков; письмо и «о себе» — длиннее не бывает.
+TEXT_LIMITS = {'description': 4000, 'about': 6000, 'letter': 10000, 'short': 300}
 SEEN_LIMIT = 20000
 # Рекрутер в hh успевает перевести свежий отклик дальше по этапам («Телефонное интервью» у «Оператора call-центра» —
 # 71 из 153 на 23.11.2026) раньше, чем мост его увидит в «Откликах». Поэтому, когда растёт счётчик этапа, мост смотрит
@@ -280,6 +294,112 @@ def items_from_page(payload, vacancy):
     return items
 
 
+def _value(field):
+    """Поле страницы резюме: часть полей обёрнута в {value, type, block, _attributes}, часть — нет."""
+    if isinstance(field, dict) and 'value' in field and 'type' in field:
+        return field['value']
+    return field
+
+
+def _clip(value, limit):
+    """Текст резюме: строки и переносы сохраняются, края и пустые хвосты строк — нет; длиннее limit — обрезается."""
+    if value is None or isinstance(value, (dict, list, bool)):
+        return None
+    text = '\n'.join(line.rstrip() for line in str(value).replace('\r\n', '\n').replace('\r', '\n').split('\n')).strip()
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text[:limit] or None
+
+
+def _strings(value):
+    """[{"string": "full"}, …] или ["full", …] → ["full", …]."""
+    out = []
+    for item in value if isinstance(value, list) else []:
+        text = item.get('string') or item.get('id') if isinstance(item, dict) else item
+        if isinstance(text, (str, int)) and str(text).strip():
+            out.append(str(text).strip()[:TEXT_LIMITS['short']])
+    return out
+
+
+def _education(items):
+    short = TEXT_LIMITS['short']
+    out = []
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict):
+            year = item.get('year')
+            out.append({'name': _clip(item.get('name'), short), 'organization': _clip(item.get('organization'), short),
+                        'result': _clip(item.get('result'), short),
+                        'year': year if isinstance(year, int) and not isinstance(year, bool) else None})
+    return [item for item in out if item['name'] or item['organization'] or item['result']]
+
+
+def resume_from_state(state, resume_hash):
+    """Страница резюме, открытая из отклика → (резюме без контактов, сопроводительное письмо или None). Коды hh
+    (занятость, переезд, уровень языка) уходят как есть — подписи им даёт портал."""
+    resume = (state or {}).get('resume') if isinstance(state, dict) else None
+    if not isinstance(resume, dict):
+        raise SiteTrouble(SITE_ERROR, 'страница резюме без резюме')
+    short = TEXT_LIMITS['short']
+
+    def field(name):
+        return _value(resume.get(name))
+
+    def title_of(name):
+        value = field(name)
+        return _clip(value.get('title') or value.get('trl'), short) if isinstance(value, dict) else None
+
+    salary = field('salary')
+    total = field('totalExperience')
+    experience = []
+    for item in field('experience') or []:
+        if not isinstance(item, dict):
+            continue
+        interval = item.get('interval') if isinstance(item.get('interval'), dict) else {}
+        experience.append({
+            'company': _clip(item.get('companyName'), short), 'area': _clip(item.get('companyAreaTitle'), short),
+            'position': _clip(item.get('position'), short), 'start': _clip(item.get('startDate'), 10),
+            'end': _clip(item.get('endDate'), 10), 'description': _clip(item.get('description'), TEXT_LIMITS['description']),
+            'years': interval.get('years'), 'months': interval.get('months')})
+    languages = [{'title': _clip(item.get('title'), short), 'degree': _clip(item.get('degree'), 20)}
+                 for item in field('language') or [] if isinstance(item, dict) and item.get('title')]
+    skills = _strings(field('keySkills')) or [str(item.get('name')).strip()[:short] for item in field('advancedKeySkills') or []
+                                               if isinstance(item, dict) and item.get('name')]
+    age = field('age')
+    out = {
+        'title': _clip(field('title'), short),
+        'salary': ({'amount': salary.get('amount'), 'currency': _clip(salary.get('currency'), 8)}
+                   if isinstance(salary, dict) and isinstance(salary.get('amount'), int) else None),
+        'age': age if isinstance(age, int) and not isinstance(age, bool) else None,
+        'gender': _clip(field('gender'), 20),
+        'area': title_of('area'),
+        'metro': title_of('metro'),
+        'citizenship': [_clip(item.get('title'), short) for item in field('citizenship') or []
+                        if isinstance(item, dict) and item.get('title')],
+        'relocation': _clip(field('relocation'), 40),
+        'business_trips': _clip(field('businessTripReadiness'), 40),
+        'travel_time': _clip(field('travelTime'), 40),
+        'employment': _strings(field('employment')),
+        'schedule': _strings(field('workSchedule')),
+        'formats': _strings(field('workFormats')),
+        'experience_total': ({'years': total.get('years'), 'months': total.get('months')} if isinstance(total, dict) else None),
+        'experience': experience[:30],
+        'education_level': _clip(field('educationLevel'), 40),
+        'education': _education(field('primaryEducation'))[:15],
+        'courses': (_education(field('additionalEducation')) + _education(field('attestationEducation')))[:30],
+        'languages': languages[:10],
+        'key_skills': skills[:60],
+        'about': _clip(field('skills'), TEXT_LIMITS['about']),
+        'driver_license': _strings(field('driverLicenseTypes')),
+        'has_vehicle': field('hasVehicle') if isinstance(field('hasVehicle'), bool) else None,
+        'medical_book': field('hasMedicalBook') if isinstance(field('hasMedicalBook'), bool) else None,
+    }
+    letters = ((state.get('employerNegotiations') or {}).get('responseLetters') or {}) \
+        if isinstance(state.get('employerNegotiations'), dict) else {}
+    letter = letters.get(resume_hash) if isinstance(letters, dict) else None
+    if letter is None and isinstance(letters, dict) and len(letters) == 1:
+        letter = next(iter(letters.values()))
+    return out, _clip(letter, TEXT_LIMITS['letter'])
+
+
 def parse_moment(value):
     """ISO-время hh или портала → aware datetime (UTC) или None."""
     text = str(value or '').strip()
@@ -415,6 +535,15 @@ class Site:
         if collection:
             params['collection'] = collection
         return items_from_page(self._get('/shards/employer/vacancyresponses/candidates_list', params), vacancy)
+
+    def resume(self, item):
+        """Резюме и письмо отклика — страница резюме, открытая из отклика (в hh он после этого «Просмотрен»)."""
+        resume_hash = str(item.get('resume_hash') or '')
+        if not RESUME_HASH.match(resume_hash):
+            raise SiteTrouble(SITE_ERROR, 'у отклика нет хеша резюме')
+        page = self._get('/resume/%s' % resume_hash, {'vacancyId': item['vacancy_id'], 't': item['topic_id']},
+                         json_body=False)
+        return resume_from_state(initial_state(page), resume_hash)
 
 
 def grown_states(previous, current):
@@ -645,6 +774,7 @@ class HhBridge:
             for collection in collections:
                 for item in self._scan(vacancy, collection):
                     if item['topic_id'] not in queued:
+                        self._attach_resume(item)
                         self.pending.append(item)
                         queued.add(item['topic_id'])
             fingerprints[vacancy['id']] = mark
@@ -652,6 +782,21 @@ class HhBridge:
         for key in [key for key in fingerprints if key not in live]:
             fingerprints.pop(key)
         self.site.save_session()
+
+    def _attach_resume(self, item):
+        """Резюме и письмо нового отклика (владелец 23.11.2026 выбрал «Полное резюме и письмо»). Страница не открылась —
+        отклик всё равно уходит порталу: карточка важнее, резюме остаётся ссылкой на hh. Вход потерян или защита сайта —
+        такт прерывается, как на любом запросе (отклик найдётся снова: счётчики вакансии ещё не записаны)."""
+        try:
+            item['resume'], item['letter'] = self.site.resume(item)
+        except SiteTrouble as exc:
+            if exc.kind != SITE_ERROR:
+                raise
+            log.warning('резюме отклика %s не открылось: %s — отклик уйдёт без него', item['topic_id'], exc)
+        except Exception:  # noqa: BLE001 — hh поменял страницу резюме: перенос откликов из-за этого не встаёт
+            item.pop('resume', None)
+            item.pop('letter', None)
+            log.exception('резюме отклика %s не разобралось — отклик уйдёт без него', item['topic_id'])
 
     def _trouble_pause(self):
         """Свой отступ моста, пока кабинет hh не читается; без беды — None."""

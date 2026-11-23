@@ -1372,6 +1372,35 @@ def test_hh_bridge_intake(world):
         hh_push(world, [hh_item(100 + n, '+7 701 555 10 %02d' % n) for n in range(101)])
 
 
+def test_hh_resume_and_letter_reach_the_card(world):
+    """Резюме и письмо отклика (владелец 23.11.2026: «все резюме и письмо человека который обратился отобразились сразу
+    в карточке») — у карточки; отклик мимо воронки их не хранит; повторный отклик того же человека добавляет своё письмо
+    к той же карточке, новые — сверху."""
+    world['clock'].now = HH_NOW
+    resume = {'title': 'Оператор call-центра', 'experience_total': {'years': 2, 'months': 3},
+              'experience': [{'company': 'ТОО Ромашка', 'position': 'Оператор', 'start': '2021-01-01'}],
+              'email': 'candidate@example.com'}
+    hh_push(world, [hh_item(21, '+7 701 555 02 21', resume=resume, letter='Хочу у вас работать'),
+                    hh_item(22, '+7 701 555 02 22', vacancy=HH_MARKETER, resume=resume, letter='Маркетолог')])
+    reply = hh_push(world, [hh_item(23, '+7 701 555 02 21', vacancy=HH_SUPERVISOR, vacancy_name='Супервайзер КЦ',
+                                    at='2026-11-23T10:45:00+03:00', letter='И на супервайзера')])
+    assert reply['results'][0]['outcome'] == 'repeat'
+    with world['db']._get_cursor() as cur:
+        card = queries.open_card_by_phone(cur, '+77015550221')
+        responses = queries.hh_card_responses(cur, card['id'])
+        cur.execute("SELECT topic_id, letter IS NOT NULL, resume IS NOT NULL FROM hiring_hh_topics "
+                    "WHERE topic_id IN (21, 22, 23) ORDER BY topic_id")
+        stored = cur.fetchall()
+    assert [(r['topic_id'], r['vacancy_name'], r['letter']) for r in responses] == [
+        ('23', 'Супервайзер КЦ', 'И на супервайзера'), ('21', 'Оператор call-центра', 'Хочу у вас работать')]
+    assert responses[0]['resume'] is None and responses[1]['resume']['title'] == 'Оператор call-центра'
+    assert responses[1]['resume']['experience'][0]['company'] == 'ТОО Ромашка'
+    assert responses[1]['resume']['experience_total'] == {'years': 2, 'months': 3}
+    assert 'email' not in responses[1]['resume']
+    assert responses[1]['resume_url'].startswith('https://hh.kz/resume/')
+    assert stored == [(21, True, True), (22, False, False), (23, True, False)]   # маркетолог выключен — ничего не хранится
+
+
 def test_hh_vacancy_settings(world):
     """Руководитель ставит вакансии hh вакансию iCORE или выключает её: отклики выключенной мимо воронки, а мост
     узнаёт об этом из ответа и перестаёт её читать."""

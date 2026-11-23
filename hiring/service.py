@@ -533,7 +533,8 @@ class HiringService:
                 vacancy_id=rule['vacancy_id'] if rule['vacancy_id'] in icore_vacancies else None,
                 vacancy_text=item['vacancy_name'], platform_ref=item['resume_url'] or 'hh:topic:%s' % item['topic_id'],
                 received_at=item['responded_at'])
-        queries.hh_finish_topic(cursor, item['topic_id'], outcome, card_id)
+        # Резюме и письмо — к карточке (вкладка «Резюме»), в том числе к открытой карточке повторного отклика.
+        queries.hh_finish_topic(cursor, item['topic_id'], outcome, card_id, item)
         return outcome
 
     def hh_watchdog(self):

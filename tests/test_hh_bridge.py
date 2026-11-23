@@ -73,6 +73,45 @@ def page(*rows):
                                         'rawEnrichingData': {'resumes': {'resumes': [r for _c, r in rows]}}}}
 
 
+def wrapped(value, kind='string'):
+    """Поле страницы резюме, как его отдаёт hh: часть полей — в обёртке {value, type, block, _attributes}."""
+    return {'value': value, 'type': kind, 'block': None, '_attributes': None}
+
+
+def resume_page(resume_hash, letter='Здравствуйте!\r\nХочу работать у вас.'):
+    """Страница резюме, открытая из отклика: форма — как у живой страницы 23.11.2026 (контакты в ней есть — мост их
+    не берёт)."""
+    state = {
+        'resume': {
+            'hash': resume_hash, 'age': 27, 'title': wrapped('Оператор call-центра'),
+            'salary': wrapped({'amount': 250000, 'currency': 'KZT'}, 'salary'), 'gender': wrapped('female'),
+            'area': wrapped({'id': 160, 'title': 'Алматы'}, 'area'), 'metro': wrapped({'id': 1, 'title': 'Алатау'}, 'metro'),
+            'citizenship': wrapped([{'id': 40, 'title': 'Казахстан'}], 'list'),
+            'relocation': wrapped('no_relocation'), 'businessTripReadiness': wrapped('never'), 'travelTime': wrapped('any'),
+            'employment': wrapped([{'string': 'full'}, {'string': 'part'}], 'list'),
+            'workSchedule': wrapped([{'string': 'shift'}], 'list'), 'workFormats': wrapped([{'string': 'ON_SITE'}], 'list'),
+            'totalExperience': wrapped({'years': 5, 'months': 10}, 'experience'),
+            'experience': wrapped([{'companyName': 'ТОО Ромашка', 'companyAreaTitle': 'Алматы', 'position': 'Оператор',
+                                    'startDate': '2020-01-01', 'endDate': None, 'interval': {'years': 5, 'months': 10},
+                                    'description': 'Входящие звонки\r\n\r\n\r\n\r\nЧаты   '}], 'list'),
+            'educationLevel': wrapped('higher'),
+            'primaryEducation': wrapped([{'name': 'КазНУ', 'organization': 'Филологический', 'result': 'Филолог',
+                                          'year': 2019}], 'list'),
+            'additionalEducation': wrapped([{'name': 'Курсы продаж', 'organization': 'Школа', 'result': None,
+                                             'year': 2021}], 'list'),
+            'language': wrapped([{'title': 'Русский', 'degree': 'l1', 'id': 1}, {'title': 'Английский', 'degree': 'b1'}], 'list'),
+            'keySkills': wrapped([{'string': 'Продажи'}, {'string': 'CRM'}], 'list'),
+            'skills': wrapped('Ответственная, люблю общаться.'),
+            'driverLicenseTypes': wrapped([{'string': 'B'}], 'list'), 'hasMedicalBook': wrapped(True, 'bool'),
+            'email': wrapped('candidate@example.com'), 'phone': wrapped([{'formatted': '+7 701 000 00 00'}], 'list'),
+            'birthday': wrapped('1998-01-01'), 'addressCoordinates': wrapped([{'lat': 43.2, 'lng': 76.9}], 'list'),
+        },
+        'employerNegotiations': {'responseLetters': {resume_hash: letter} if letter else {}},
+    }
+    return '<html><body><template id="HH-Lux-InitialState">%s</template></body></html>' % html_lib.escape(
+        json.dumps(state, ensure_ascii=False))
+
+
 class FakeResponse:
     def __init__(self, status=200, body=None, url='https://almaty.hh.kz/x', headers=None, text=None, set_cookies=None):
         self.status_code = status
@@ -101,6 +140,11 @@ class FakeHttp:
         path = url.split('hh.kz', 1)[1]
         self.calls.append((path, dict(params or {})))
         handler = self.routes.get(path)
+        if handler is None:                     # маршрут-префикс: '/resume/*' — страница любого резюме
+            handler = next((value for key, value in self.routes.items()
+                            if key.endswith('*') and path.startswith(key[:-1])), None)
+            if callable(handler):
+                handler = (lambda inner: lambda params: inner(path, params))(handler)
         result = handler(dict(params or {})) if callable(handler) else handler
         if result is None:
             return FakeResponse(404, {'error': 'нет'})
@@ -170,6 +214,8 @@ class HhBridgeTests(unittest.TestCase):
             '/shards/employer/candidates/counts': lambda params: self.fingerprint,
             '/shards/employer/vacancyresponses/candidates_list': lambda params: (
                 page(*self.folders.get(params.get('collection'), [])) if params['page'] == 0 else page()),
+            '/resume/*': lambda path, params: FakeResponse(200, resume_page(path.rsplit('/', 1)[1]),
+                                                           url='https://almaty.hh.kz' + path),
         })
         os.environ['CDR_AGENT_KEYS'] = PUBLIC_B64
         self.addCleanup(os.environ.pop, 'CDR_AGENT_KEYS', None)
@@ -308,6 +354,73 @@ class HhBridgeTests(unittest.TestCase):
         sent = len(self.portal.payloads)
         fresh.cycle()
         self.assertEqual([[i['topic_id'] for i in p['items']] for p in self.portal.payloads[sent:]], [[], ['5000000007']])
+
+    def test_new_response_brings_resume_and_letter_without_contacts(self):
+        """Владелец 23.11.2026 выбрал «Полное резюме и письмо»: мост открывает каждый новый отклик один раз — страницу
+        резюме из отклика (vacancyId и t) — и отдаёт резюме без контактов и письмо с абзацами."""
+        bridge = self.bridge()
+        bridge.cycle()
+        items = self.portal.payloads[1]['items']
+        first = items[0]
+        resume = first['resume']
+        self.assertEqual(resume['title'], 'Оператор call-центра')
+        self.assertEqual(resume['salary'], {'amount': 250000, 'currency': 'KZT'})
+        self.assertEqual((resume['age'], resume['gender'], resume['area'], resume['metro'], resume['citizenship']),
+                         (27, 'female', 'Алматы', 'Алатау', ['Казахстан']))
+        self.assertEqual((resume['relocation'], resume['business_trips'], resume['travel_time']), ('no_relocation', 'never', 'any'))
+        self.assertEqual((resume['employment'], resume['schedule'], resume['formats']), (['full', 'part'], ['shift'], ['ON_SITE']))
+        self.assertEqual(resume['experience_total'], {'years': 5, 'months': 10})
+        self.assertEqual(resume['experience'], [{'company': 'ТОО Ромашка', 'area': 'Алматы', 'position': 'Оператор',
+                                                 'start': '2020-01-01', 'end': None, 'years': 5, 'months': 10,
+                                                 'description': 'Входящие звонки\n\nЧаты'}])
+        self.assertEqual((resume['education_level'], resume['education'][0]['name'], resume['courses'][0]['name']),
+                         ('higher', 'КазНУ', 'Курсы продаж'))
+        self.assertEqual(resume['languages'], [{'title': 'Русский', 'degree': 'l1'}, {'title': 'Английский', 'degree': 'b1'}])
+        self.assertEqual((resume['key_skills'], resume['about']), (['Продажи', 'CRM'], 'Ответственная, люблю общаться.'))
+        self.assertEqual((resume['driver_license'], resume['medical_book'], resume['has_vehicle']), (['B'], True, None))
+        self.assertEqual(first['letter'], 'Здравствуйте!\nХочу работать у вас.')
+        text = json.dumps(items, ensure_ascii=False)
+        for secret in ('candidate@example.com', '+7 701 000 00 00', '1998-01-01', '43.2'):
+            self.assertNotIn(secret, text)                                   # контактов резюме в докладе нет
+        # Страница — из отклика (vacancyId и t), по одной на новый отклик.
+        resume_calls = [(path, params) for path, params in self.http.calls if path.startswith('/resume/')]
+        self.assertEqual(resume_calls, [('/resume/%038x' % 5000000003, {'vacancyId': OPERATOR, 't': '5000000003'}),
+                                        ('/resume/%038x' % 5000000002, {'vacancyId': OPERATOR, 't': '5000000002'})])
+        # Следующий такт с теми же откликами страниц резюме больше не открывает.
+        self.fingerprint = counts(31, 23)
+        bridge.cycle()
+        self.assertEqual(len([1 for path, _params in self.http.calls if path.startswith('/resume/')]), 2)
+
+    def test_resume_page_failure_still_sends_the_response(self):
+        """Страница резюме не открылась (hh ответил 500) — отклик всё равно уходит: карточка важнее. Вход слетел на
+        странице резюме — такт прерывается, как на любом запросе, и отклик находится снова в следующий."""
+        self.http.routes['/resume/*'] = FakeResponse(500, 'сбой')
+        bridge = self.bridge()
+        bridge.cycle()
+        items = self.portal.payloads[1]['items']
+        self.assertEqual([i['topic_id'] for i in items], ['5000000003', '5000000002'])
+        self.assertTrue(all('resume' not in i and 'letter' not in i for i in items))
+        # hh переделал страницу резюме (поле другого вида) — разбор падает, но отклик всё равно уходит.
+        broken = html_lib.escape(json.dumps({'resume': {'experience': {'value': 'не список', 'type': 'list'},
+                                                        'salary': {'value': [1, 2], 'type': 'salary'},
+                                                        'citizenship': {'value': 'строка', 'type': 'list'}}}))
+        self.http.routes['/resume/*'] = FakeResponse(200, '<template id="HH-Lux-InitialState">%s</template>' % broken,
+                                                     url='https://almaty.hh.kz/resume/x')
+        self.rows.insert(0, response(5000000004 + 4, '2026-11-23T10:50:00+03:00'))
+        self.fingerprint = counts(31, 25)
+        bridge.cycle()
+        self.assertEqual([i['topic_id'] for i in self.portal.payloads[-1]['items']], ['5000000008'])
+        self.http.routes['/resume/*'] = FakeResponse(200, '<html/>', url='https://almaty.hh.kz/account/login')
+        self.rows.insert(0, response(5000000005, '2026-11-23T11:00:00+03:00'))
+        self.fingerprint = counts(32, 25)
+        bridge.cycle()
+        self.assertEqual((self.portal.payloads[-1]['session'], self.portal.payloads[-1]['items']), ('login_required', []))
+        self.http.routes['/resume/*'] = lambda path, params: FakeResponse(200, resume_page(path.rsplit('/', 1)[1], letter=None),
+                                                                         url='https://almaty.hh.kz' + path)
+        bridge.cycle()
+        last = self.portal.payloads[-1]
+        self.assertEqual(([i['topic_id'] for i in last['items']], last['session']), (['5000000005'], 'ok'))
+        self.assertEqual((last['items'][0]['resume']['title'], last['items'][0]['letter']), ('Оператор call-центра', None))
 
     def test_vacancy_tracked_later_brings_only_responses_after_it(self):
         """Вакансию включили в «Настройках» позже общей отсечки — мост отдаёт порталу только её отклики после минуты

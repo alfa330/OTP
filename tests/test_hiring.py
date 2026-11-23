@@ -595,6 +595,48 @@ class HHTests(unittest.TestCase):
         self.assertEqual(item['resume_url'], 'https://hh.kz/resume/9f2c4a1b0d3e5f6a7b8c9d0e1f2a3b4c5d6e7f'
                                              '?vacancyId=139445254&t=5735665687')
 
+    def test_clean_resume(self):
+        """Резюме от моста (владелец 23.11.2026: «все резюме и письмо человека который обратился отобразились сразу в
+        карточке»): подписи вместо кодов hh, длины в потолках, лишних ключей (контактов) нет."""
+        raw = {'title': ' Оператор  call-центра ', 'salary': {'amount': 250000, 'currency': 'KZT'}, 'age': 27,
+               'gender': 'female', 'area': 'Алматы', 'metro': 'Алатау', 'citizenship': ['Казахстан'],
+               'relocation': 'no_relocation', 'business_trips': 'never', 'travel_time': 'any',
+               'employment': ['full', 'part'], 'schedule': ['shift', 'новый_код'], 'formats': ['ON_SITE'],
+               'experience_total': {'years': 0, 'months': 70},
+               'experience': [{'company': 'ТОО Ромашка', 'area': 'Алматы', 'position': 'Оператор', 'start': '2020-01-01',
+                               'end': None, 'years': 5, 'months': 10, 'description': 'Звонки\r\n\r\n\r\nЧаты'},
+                              {'company': None, 'position': None}],
+               'education_level': 'higher', 'education': [{'name': 'КазНУ', 'year': 2019}], 'courses': [{'name': ''}],
+               'languages': [{'title': 'Русский', 'degree': 'l1'}, {'title': 'Английский', 'degree': 'b1'}],
+               'key_skills': ['Продажи', 'CRM'], 'about': 'я' * 7000, 'driver_license': ['B'], 'medical_book': True,
+               'email': 'candidate@example.com', 'phone': '+7 701 000 00 00'}
+        resume = hh.clean_resume(raw)
+        self.assertEqual(resume['title'], 'Оператор call-центра')
+        self.assertEqual(resume['salary'], {'amount': 250000, 'currency': 'KZT', 'sign': '₸'})
+        self.assertEqual((resume['age'], resume['gender'], resume['area'], resume['metro'], resume['citizenship']),
+                         (27, 'женщина', 'Алматы', 'Алатау', ['Казахстан']))
+        self.assertEqual((resume['relocation'], resume['business_trips'], resume['travel_time']),
+                         ('не готов к переезду', 'не готов к командировкам', 'не имеет значения'))
+        self.assertEqual(resume['employment'], ['полная занятость', 'частичная занятость'])
+        self.assertEqual(resume['schedule'], ['сменный график', 'новый_код'])         # незнакомый код hh — как есть
+        self.assertEqual(resume['formats'], ['на месте работодателя'])
+        self.assertEqual(resume['experience_total'], {'years': 5, 'months': 10})        # 70 месяцев — 5 лет 10 мес.
+        self.assertEqual(resume['experience'], [{'company': 'ТОО Ромашка', 'area': 'Алматы', 'position': 'Оператор',
+                                                 'start': '2020-01-01', 'end': None, 'span': {'years': 5, 'months': 10},
+                                                 'description': 'Звонки\n\nЧаты'}])
+        self.assertEqual((resume['education_level'], resume['education'], resume['courses']),
+                         ('высшее', [{'name': 'КазНУ', 'organization': None, 'result': None, 'year': 2019}], []))
+        self.assertEqual(resume['languages'], [{'title': 'Русский', 'level': 'родной'},
+                                               {'title': 'Английский', 'level': 'B1 — средний'}])
+        self.assertEqual((resume['key_skills'], len(resume['about']), resume['driver_license'], resume['medical_book']),
+                         (['Продажи', 'CRM'], 6000, ['B'], True))
+        self.assertFalse({'email', 'phone'} & set(resume))                               # контактов в резюме нет
+        self.assertIsNone(hh.clean_resume(None))
+        self.assertIsNone(hh.clean_resume({'email': 'x@example.com'}))                   # одни контакты — резюме нет
+        item = hh.clean_item(dict(self.RAW, resume=raw, letter='  Здравствуйте!\r\n\r\n\r\nХочу к вам.  '))
+        self.assertEqual((item['letter'], item['resume']['title']), ('Здравствуйте!\n\nХочу к вам.', 'Оператор call-центра'))
+        self.assertEqual((hh.clean_item(self.RAW)['resume'], hh.clean_item(self.RAW)['letter']), (None, None))
+
     def test_clean_item_refuses_what_it_cannot_place(self):
         for broken in ({}, {'topic_id': 'x1', 'vacancy_id': '1', 'responded_at': '2026-11-23T10:00:00+03:00'},
                        dict(self.RAW, vacancy_id=None), dict(self.RAW, responded_at='вчера'), 'тема'):

@@ -10,7 +10,26 @@ import {
     matchesQuery, monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, sourceChoices,
     sourceRequestBody, sourceTone, splitDateTime, stepCapacity, toggleInList, withExpanded, ARCHIVE_STAGE, columnCollapsed,
     HH_NO_ICORE, hhIcoreOptions, hhIcoreValue, hhSettingsBody, hhVacancyMeta,
+    hhMoney, hhPeriod, hhResumeSummary, hhSpan,
 } from '../src/components/hiring/hiringMeta.js';
+
+test('hh.kz resume in the card: money, spans, periods and a one-line summary', () => {
+    // Владелец 23.11.2026: «все резюме и письмо человека который обратился отобразились сразу в карточке».
+    assert.equal(hhMoney({ amount: 250000, currency: 'KZT', sign: '₸' }), '250 000 ₸');
+    assert.equal(hhMoney({ amount: 900, currency: 'USD' }), '900 USD');
+    assert.equal(hhMoney(null), '');
+    assert.equal(hhSpan({ years: 5, months: 3 }), '5 лет 3 мес.');
+    assert.equal(hhSpan({ years: 1, months: 0 }), '1 год');
+    assert.equal(hhSpan({ years: 0, months: 8 }), '8 мес.');
+    assert.equal(hhSpan(null), '');
+    assert.equal(hhPeriod('2020-01-01', null), 'янв 2020 — сейчас');
+    assert.equal(hhPeriod('2018-03-01', '2019-12-01'), 'мар 2018 — дек 2019');
+    assert.equal(hhPeriod(null, '2019-12-01'), '');
+    assert.equal(hhResumeSummary({ title: 'Оператор call-центра', salary: { amount: 250000, sign: '₸' },
+        experience_total: { years: 5, months: 3 } }), 'Оператор call-центра · 250 000 ₸ · опыт 5 лет 3 мес.');
+    assert.equal(hhResumeSummary({ title: 'Стажёр', experience: [] }), 'Стажёр · без опыта');
+    assert.equal(hhResumeSummary(null), '');
+});
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
     // Формат — docs/CLICK-TO-CALL.md телефона: icore-phone:call?number=%2B<2–15 цифр> (плюс обязателен — линия Binotel), без префикса.

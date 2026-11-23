@@ -10,11 +10,12 @@ import { IosHint, IosMenu, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondar
 import {
     ARCHIVE_STAGE, ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, FINAL_STAGES,
     MOTIVATION_LABELS, MOTIVATION_TONES, POOL_STAGES, SOURCE_COLOR_CODES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES,
-    TOUCH_LABELS, TOUCH_RESULT_LABELS, addDays, codeOf, errorOf, fmtDuration, fullDate, groupSeats, groupWhen, joinDateTime, longTime,
-    markGroupFull,
+    TOUCH_LABELS, TOUCH_RESULT_LABELS, addDays, codeOf, errorOf, fmtDuration, fullDate, groupSeats, groupWhen, hhResumeSummary,
+    joinDateTime, longTime, markGroupFull,
     openICorePhoneCall, reasonKindFor, shortTime, sourceChoices, sourceTone, splitDateTime, todayIso,
 } from './hiringMeta';
 import { DATE_TRIGGER, FIELD, ICON_BTN, Label, Loading, Pill, ReasonDialog, SourcePill, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
+import { HhResume } from './HhResume';
 import { WhatsAppThread } from './WhatsAppPanel';
 
 /*
@@ -821,9 +822,15 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
     const whatsappCount = data?.whatsapp?.messages || 0;
     const canContact = Boolean(card?.phone && !POOL_STAGES.includes(card.stage) && isOwnerOrLead && !card.is_closed);
     const chatButton = Boolean(onOpenChat && card?.whatsapp_link && (canContact || whatsappCount));
+    // Резюме и сопроводительное письмо откликов hh (владелец 23.11.2026: «все резюме и письмо… сразу в карточке») —
+    // своей вкладкой, а на главной — сводка одной строкой со ссылкой на неё.
+    const hhResponses = data?.hh || [];
+    const hhSummary = hhResponses.length ? [hhResumeSummary(hhResponses.find((item) => item.resume)?.resume),
+        hhResponses.some((item) => item.letter) ? 'есть письмо' : null].filter(Boolean).join(' · ') || 'с hh' : '';
     // Вкладки карточки (владелец 30.10.2026: карточка перегружена — поделить хотя бы на табы).
     const tabs = card ? [
         { value: 'card', label: 'Карточка' },
+        ...(hhResponses.length ? [{ value: 'resume', label: 'Резюме' }] : []),
         { value: 'touches', label: touchCount ? `Касания · ${touchCount}` : 'Касания' },
         ...(whatsappCount && !onOpenChat ? [{ value: 'whatsapp', label: `WhatsApp · ${whatsappCount}` }] : []),
         ...(showHire ? [{ value: 'hire', label: 'Смены и мотивация' }] : []),
@@ -908,6 +915,13 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                                         {card.campaign && <InfoRow label="Кампания">{card.campaign}</InfoRow>}
                                         {card.referred_by && <InfoRow label="Кто привёл">{card.referred_by}</InfoRow>}
                                         <InfoRow label="Поступил">{longTime(card.received_at)}</InfoRow>
+                                        {hhSummary && (
+                                            <InfoRow label="Резюме">
+                                                <button type="button" onClick={() => setTab('resume')} className="text-right text-blue-700 hover:underline">
+                                                    {hhSummary}
+                                                </button>
+                                            </InfoRow>
+                                        )}
                                         {card.platform_ref && /^https?:/.test(card.platform_ref) && (
                                             <InfoRow label="Площадка">
                                                 <a href={card.platform_ref} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-blue-700 hover:underline">
@@ -1011,6 +1025,7 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                             </div>
                         )}
 
+                        {activeTab === 'resume' && <HhResume responses={hhResponses} />}
                         {activeTab === 'whatsapp' && <WhatsAppThread api={api} cardId={card.id} />}
                         {activeTab === 'history' && <StageHistory stages={data.stages || []} assignments={data.assignments || []} />}
                     </div>

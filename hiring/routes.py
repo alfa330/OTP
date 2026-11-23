@@ -403,6 +403,8 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                 # Переписка с номером WhatsApp найма — счётчик для вкладки, сама лента по запросу.
                 'whatsapp': _json(queries.wa_summary(cursor, [card.get('phone'), card.get('whatsapp')]))
                 if access.sees_phone(ctx, card) else None,
+                # Резюме и сопроводительное письмо откликов hh (владелец 23.11.2026) — без контактов, их мост не берёт.
+                'hh': _json(queries.hh_card_responses(cursor, card_id)),
                 'repeat_of': None,
             }
             if card.get('repeat_of_card_id'):

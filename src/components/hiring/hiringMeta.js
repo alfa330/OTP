@@ -209,6 +209,44 @@ export const hhSettingsBody = (savedRules, id, change) => {
     return { vacancies };
 };
 
+/* Резюме отклика hh во вкладке «Резюме» карточки (владелец 23.11.2026: «все резюме и письмо человека который обратился
+ * отобразились сразу в карточке»). Подписи кодам hh даёт сервер; здесь — деньги, сроки и сводка одной строкой. */
+const HH_MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+
+/** «250 000 ₸» по {amount, sign}. */
+export const hhMoney = (salary) => {
+    if (!salary || !Number.isFinite(Number(salary.amount)) || Number(salary.amount) <= 0) return '';
+    const amount = String(Math.round(Number(salary.amount))).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+    return `${amount} ${salary.sign || salary.currency || ''}`.trim();
+};
+
+/** «5 лет 3 мес.», «1 год», «8 мес.» по {years, months}. */
+export const hhSpan = (span) => {
+    const years = Number(span?.years) || 0;
+    const months = Number(span?.months) || 0;
+    return [years ? `${years} ${plural(years, 'год', 'года', 'лет')}` : '', months ? `${months} мес.` : '']
+        .filter(Boolean).join(' ');
+};
+
+/** «янв 2020 — сейчас» по датам места работы «2020-01-01» / null. */
+export const hhPeriod = (start, end) => {
+    const label = (iso) => {
+        const match = /^(\d{4})-(\d{2})/.exec(String(iso || ''));
+        return match ? `${HH_MONTHS_SHORT[Number(match[2]) - 1] || ''} ${match[1]}`.trim() : '';
+    };
+    const from = label(start);
+    if (!from) return '';
+    return `${from} — ${label(end) || 'сейчас'}`;
+};
+
+/** Сводка резюме для главной вкладки карточки: «Оператор call-центра · 250 000 ₸ · опыт 5 лет 3 мес.». */
+export const hhResumeSummary = (resume) => {
+    if (!resume) return '';
+    const span = hhSpan(resume.experience_total);
+    return [resume.title, hhMoney(resume.salary), span ? `опыт ${span}` : (resume.experience?.length ? null : 'без опыта')]
+        .filter(Boolean).join(' · ');
+};
+
 const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа',
     'сентября', 'октября', 'ноября', 'декабря'];
 const MONTHS_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август',
