@@ -254,9 +254,9 @@ def amo(when, tags='', utm='', campaign=''):
     return {'created_at': when, 'tags': tags, 'utm_source': utm, 'utm_campaign': campaign}
 
 
-def syn(when, tags='', utm='', campaign='', source='facebook'):
+def syn(when, tags='', utm='', campaign='', source='facebook', form=None):
     return amo_leads.syntony_row({'created_at': when, 'tags': tags, 'utm_source': utm,
-                                  'utm_campaign': campaign, 'source': source})
+                                  'utm_campaign': campaign, 'source': source, 'form_name': form})
 
 
 DAY = (at(12, 0), at(13, 0))
@@ -288,6 +288,36 @@ class SyntonyRowTests(unittest.TestCase):
     def test_lead_form_without_a_mark_counts_by_its_source(self):
         self.assertEqual(1, amo_leads.count_by_source([syn(at(12, 10), source='tiktok')])['TikTok'])
         self.assertEqual(1, amo_leads.count_by_source([syn(at(12, 10), source='facebook')])['FB'])
+
+    def test_department_is_left_out_whichever_way_it_is_spelled(self):
+        """Таблица сайтов владельца 23.11: Департамент в Syntony — department_N, в amoCRM было
+        departament_N; правила отсекают его во всех строках — и так же у заявок Syntony."""
+        cases = [
+            syn(at(21, 10), tags='department_1', utm='google', source='website',
+                form='Форма на сайте yandextaxi.kz'),
+            syn(at(21, 10), tags='department_5', utm='chatgpt.com', source='website',
+                form='Форма на сайте taxopark.kz'),
+            syn(at(21, 10), tags='Forma_Департамент_Такси', source='website'),
+            syn(at(21, 10), tags='department_1, call_цр_wb', utm='google', source='website'),
+            # с сайта Департамента, но с тегом формы — узнаётся по форме
+            syn(at(21, 10), tags='forma_taxopark_sait', source='website', form='Форма на сайте taxopark.kz'),
+            syn(at(21, 10), tags='forma_yandextaxi_sait', utm='google', source='website',
+                form='Форма на сайте yandextaxi.kz'),
+        ]
+        for row in cases:
+            self.assertEqual(0, amo_leads.count_by_source([row])['Общее'], row)
+        # как сделка amoCRM того же сайта
+        self.assertEqual(0, amo_leads.count_by_source(
+            [amo(at(21, 10), tags='departament_1', utm='google')])['Общее'])
+
+    def test_neighbour_sites_are_not_taken_for_the_department(self):
+        """yandex-taxi.kz — сайт Адал, не Департамента; qazaq-taksopark.kz — не taxopark.kz."""
+        adal = syn(at(21, 10), tags='forma_adal_sait', utm='youtube', source='website',
+                   form='Форма на сайте адал')
+        self.assertEqual(1, amo_leads.count_by_source([adal])['YouTube'])
+        for form in ('Форма на сайте yandex-taxi.kz', 'Форма на сайте qazaq-taksopark.kz'):
+            row = syn(at(21, 10), tags='forma_adal_sait', utm='google', source='website', form=form)
+            self.assertEqual(1, amo_leads.count_by_source([row])['Google'], form)
 
     def test_site_form_and_call_count_by_the_same_rules_as_in_amocrm(self):
         form = syn(at(18, 9), tags='forma_jana_sait', utm='google', source='website')

@@ -558,6 +558,22 @@ _RENTAL_RE = re.compile(r"аренд|arenda", re.IGNORECASE)
 # Лид-формы рекламных кабинетов: источник однозначен и без utm-метки.
 SYNTONY_AD_SOURCES = ("facebook", "tiktok")
 
+# Департамент. Его лиды отбивка не считает никогда: в amoCRM они несли тег departament_N, и
+# правила («<>*departament*») отсекают их во всех строках. В Syntony тег пишется department_N
+# (таблица сайтов владельца 23.11.2026), и с 20.11 эти лиды попадали в Google и SEO — 88 заявок
+# с тегом Департамента за 15–23.11. Две заявки с его сайтов пришли и с тегом формы
+# (forma_yandextaxi_sait, forma_taxopark_sait), поэтому Департамент узнаётся ещё и по форме:
+# у Syntony она называется «Форма на сайте <адрес>».
+_DEPARTMENT_RE = re.compile(r"department|departament|департамент", re.IGNORECASE)
+DEPARTMENT_SITES = ("yandextaxi.kz", "registraciya-yandex-taxi.kz", "yandex-taxi-rabota.kz",
+                    "yandex-taxi-office.kz", "taxopark.kz")
+
+
+def _is_department(tags, form_name):
+    form = (form_name or "").lower()
+    return (any(_DEPARTMENT_RE.search(tag) for tag in tags)
+            or any(site in form for site in DEPARTMENT_SITES))
+
 
 def _is_call_tag(tag):
     """Тег линии звонка: call_<парк>_<канал> (бывает и с заглавной: Call_Dongelek)."""
@@ -581,9 +597,12 @@ def syntony_row(lead):
         15.11, а сам звонок 19.11 есть ещё и сделкой amoCRM;
       * заявка рекламной кампании аренды без тега аренды получает пометку
         «arenda» — как её сделка в amoCRM, которую правила отсекают;
+      * заявка Департамента (любой его тег — среди ВСЕХ тегов — или форма его сайта)
+        получает пометку «departament», которую правила отсекают во всех строках;
       * лид-форма Facebook/TikTok без utm_source считается по своему источнику.
     """
-    tags = [t.strip() for t in (lead.get("tags") or "").split(",") if t.strip()]
+    all_tags = [t.strip() for t in (lead.get("tags") or "").split(",") if t.strip()]
+    tags = all_tags
     if (lead.get("source") or "") != "phone":
         tags = [t for t in tags if not _is_call_tag(t)]
     first = tags[0] if tags else ""
@@ -591,6 +610,8 @@ def syntony_row(lead):
     marks = [first] if first else []
     if campaign and _RENTAL_RE.search(campaign) and not _RENTAL_RE.search(first):
         marks.append("arenda")
+    if _is_department(all_tags, lead.get("form_name")) and "departament" not in first.lower():
+        marks.append("departament")
     utm_source = (lead.get("utm_source") or "").strip()
     if not utm_source and (lead.get("source") or "") in SYNTONY_AD_SOURCES:
         utm_source = lead["source"]

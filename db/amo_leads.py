@@ -133,13 +133,15 @@ class AmoLeadsMixin:
 
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT created_at, tags, utm_source, utm_campaign, source
+                SELECT created_at, tags, utm_source, utm_campaign, source, form_name
                 FROM syntony_leads
                 WHERE created_at >= %s AND created_at < %s
                   AND (utm_source IS DISTINCT FROM %s OR utm_medium IS DISTINCT FROM %s)
             """, (start, end, SYNTONY_UTM['utm_source'], SYNTONY_UTM['utm_medium']))
+            # form_name — по форме сайта узнаётся Департамент без своего тега (amocrm.leads.syntony_row).
             return [{"created_at": r[0], "tags": r[1], "utm_source": r[2],
-                     "utm_campaign": r[3], "source": r[4]} for r in cursor.fetchall()]
+                     "utm_campaign": r[3], "source": r[4], "form_name": r[5]}
+                    for r in cursor.fetchall()]
 
     def start_syntony_lead_sync(self, mode):
         with self._get_cursor() as cursor:

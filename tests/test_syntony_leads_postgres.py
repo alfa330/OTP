@@ -114,7 +114,7 @@ def test_leads_between_is_half_open_and_carries_what_counting_needs(db):
     assert sorted(r['created_at'] for r in rows) == [start, start + timedelta(hours=12) - timedelta(seconds=1)]
     first = next(r for r in rows if r['created_at'] == start)
     assert first == {'created_at': start, 'tags': 'fb_forma_itaxi_obshchaya', 'utm_source': 'facebook',
-                     'utm_campaign': 'iTaxi/16.09.2026', 'source': 'facebook'}
+                     'utm_campaign': 'iTaxi/16.09.2026', 'source': 'facebook', 'form_name': None}
 
 
 def test_leads_between_leave_out_our_missed_call_requests(db):
