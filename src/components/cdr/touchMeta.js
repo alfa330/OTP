@@ -120,11 +120,16 @@ export const splitCallType = (value) => {
     return matched ? { base: matched[1], note: matched[2] } : { base: text, note: '' };
 };
 
-/** Метка робота пропущенных (задача #291) под результатом звонка — или null.
+/** В какую CRM робот пропущенных передавал звонок: «Syntony» с переадресации (SALES-4),
+ *  иначе «amoCRM» — так и у строк до неё, где сервер CRM не называет. */
+export const missedCrmName = (touch) => (touch?.missed_crm === 'syntony' ? 'Syntony' : 'amoCRM');
+
+/** Метка робота пропущенных (задача #291, SALES-4) под результатом звонка — или null.
  *
- *  Сервер отдаёт у касания `amo_state` (cdr/queries.py:_missed_view):
+ *  Сервер отдаёт у касания `amo_state` и `missed_crm` (cdr/queries.py:_missed_view):
  *    sent     — сделка на перезвон в amoCRM есть: заведена по этому звонку или раньше по
  *               тому же клиенту (перезвонил и снова не дозвонился) — метка-ссылка на неё;
+ *               в Syntony — заявку приняли: метка без ссылки, номера заявки Syntony не отдаёт;
  *    error    — передать не вышло: метка видна, чтобы клиенту перезвонили руками;
  *    answered — клиент дозвонился, передавать было нечего: метки НЕТ, причина уходит
  *               в подсказку плашки результата (amoAnsweredNote) — шум на каждой строке
@@ -132,6 +137,16 @@ export const splitCallType = (value) => {
  *    ''       — робот звонок не разбирал: не пропущенный или ещё идёт минута ожидания. */
 export const amoMark = (touch) => {
     const state = touch?.amo_state || '';
+    const crm = missedCrmName(touch);
+    if (state === 'sent' && crm === 'Syntony') {
+        const lead = 'Заявка на перезвон в Syntony';
+        return {
+            kind: 'sent',
+            label: 'в Syntony',
+            href: '',
+            title: touch.amo_note ? `${lead}. ${touch.amo_note}` : lead,
+        };
+    }
     if (state === 'sent' && touch.amo_url) {
         const lead = touch.amo_lead_id ? `Сделка ${touch.amo_lead_id} в amoCRM` : 'Сделка в amoCRM';
         return {
@@ -144,19 +159,34 @@ export const amoMark = (touch) => {
     if (state === 'error') {
         return {
             kind: 'error',
-            label: 'не передан в amoCRM',
+            label: `не передан в ${crm}`,
             href: '',
-            title: touch.amo_note || 'amoCRM не приняла сделку — перезвоните клиенту вручную',
+            title: touch.amo_note || (crm === 'Syntony'
+                ? 'Syntony не приняла заявку — перезвоните клиенту вручную'
+                : 'amoCRM не приняла сделку — перезвоните клиенту вручную'),
         };
     }
     return null;
 };
 
-/** Почему пропущенный звонок НЕ ушёл в amoCRM — для подсказки плашки результата. */
+/** Почему пропущенный звонок НЕ ушёл в CRM — для подсказки плашки результата. */
 export const amoAnsweredNote = (touch) => (
     touch?.amo_state === 'answered' && touch.amo_note
-        ? `В amoCRM не передан: ${touch.amo_note.charAt(0).toLowerCase()}${touch.amo_note.slice(1)}`
+        ? `В ${missedCrmName(touch)} не передан: ${touch.amo_note.charAt(0).toLowerCase()}${touch.amo_note.slice(1)}`
         : '');
+
+/** Подпись под «Входящих»: сколько не приняли и сколько из них ушло на перезвон в CRM.
+ *  В периоде, захватившем переезд в Syntony (SALES-4), бывают обе CRM — тогда обе. */
+export const missedHint = (summary) => {
+    const parts = [`не приняли ${summary?.incoming_missed || 0}`];
+    if (summary?.syntony_transferred) {
+        parts.push(`в Syntony ${summary.syntony_transferred.toLocaleString('ru-RU')}`);
+    }
+    if (summary?.amo_transferred) {
+        parts.push(`в amoCRM ${summary.amo_transferred.toLocaleString('ru-RU')}`);
+    }
+    return parts.join(' · ');
+};
 
 /** «2026-08-24 09:00:00» → «09:00:00». */
 export const shortTime = (value) => (value ? String(value).slice(11, 19) : '—');

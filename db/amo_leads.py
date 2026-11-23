@@ -123,13 +123,21 @@ class AmoLeadsMixin:
         return len(payload)
 
     def get_syntony_leads_between(self, start, end):
-        """Заявки Syntony, созданные в [start, end) — для подсчёта и склейки."""
+        """Заявки Syntony, созданные в [start, end) — для подсчёта и склейки.
+
+        Без заявок на перезвон, которые заводит наш робот пропущенных входящих (SALES-4,
+        метки cdr.missed_config.SYNTONY_UTM): это не лид из рекламы, а звонок, на который
+        не ответили, — сделки amoCRM с тегом «Пропущенный входящий» отбивка тоже не считала.
+        """
+        from cdr.missed_config import SYNTONY_UTM
+
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT created_at, tags, utm_source, utm_campaign, source
                 FROM syntony_leads
                 WHERE created_at >= %s AND created_at < %s
-            """, (start, end))
+                  AND (utm_source IS DISTINCT FROM %s OR utm_medium IS DISTINCT FROM %s)
+            """, (start, end, SYNTONY_UTM['utm_source'], SYNTONY_UTM['utm_medium']))
             return [{"created_at": r[0], "tags": r[1], "utm_source": r[2],
                      "utm_campaign": r[3], "source": r[4]} for r in cursor.fetchall()]
 

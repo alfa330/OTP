@@ -505,7 +505,7 @@ _FILTER_SQL = """
    AND (%(queue)s     IS NULL OR t.queue LIKE '%%' || %(queue)s || '%%')
    AND (%(phone)s     IS NULL OR t.phone LIKE '%%' || %(phone)s || '%%')
    AND (NOT %(talked_only)s OR t.talk_seconds > 0)
-   AND (NOT %(amo_only)s OR ml.amo_lead_id IS NOT NULL)
+   AND (NOT %(amo_only)s OR ml.amo_lead_id IS NOT NULL OR ml.syntony_sent_at IS NOT NULL)
    AND (NOT %(park_on)s OR CASE
           WHEN t.line_number = ANY(%(park_known)s)
                AND (t.call_type = 'Исходящий' OR t.queue = '')
@@ -522,7 +522,8 @@ _FILTER_SQL = """
 # Журнал робота пропущенных (`cdr_missed_leads`, задача #291) присоединён по ключу
 # касания. Ключ у журнала первичный, поэтому LEFT JOIN строк не множит, и счётчики
 # итогов, операторов и дней остаются ровно теми же, что без него. «Передан в amoCRM» —
-# это amo_lead_id: сделка есть, заведена ли по этому звонку или раньше по тому же клиенту.
+# это amo_lead_id: сделка есть, заведена ли по этому звонку или раньше по тому же клиенту;
+# «передан в Syntony» (SALES-4) — syntony_sent_at: номера заявки Syntony не отдаёт.
 
 
 def _params(day_from, day_to, filters):
@@ -565,8 +566,9 @@ _COLUMNS = ("t.started_at, t.answered_at, t.phone, t.ext, t.call_type, t.result,
 
 # Что робот пропущенных решил по звонку. Отдельным хвостом, а не внутри _COLUMNS: те же
 # восемнадцать колонок читают сверки и тесты, и хвост в них не нужен.
-_MISSED_COLUMNS = ", ml.status, ml.amo_lead_id, ml.reason, ml.error"
+_MISSED_COLUMNS = ", ml.status, ml.amo_lead_id, ml.reason, ml.error, ml.crm, ml.syntony_sent_at"
 _TOUCH_WIDTH = 18
+_MISSED_WIDTH = 6
 
 # Адрес сделки в интерфейсе amoCRM. Домен — тот же, которым ходит клиент amoCRM
 # (amocrm/leads.py, переменная AMO_DOMAIN); здесь без импорта клиента: он тянет requests.
@@ -574,15 +576,18 @@ AMO_LEAD_URL = 'https://%s/leads/detail/%%s' % (
     (os.getenv('AMO_DOMAIN') or 'igroupkz.amocrm.ru').strip())
 
 
-def _missed_view(status, lead_id, reason, error):
-    """Хвост строки → поля касания для метки «в amoCRM».
+def _missed_view(status, lead_id, reason, error, crm=None, syntony_sent_at=None):
+    """Хвост строки → поля касания для метки «в amoCRM» / «в Syntony».
 
-    amo_state: 'sent' — сделка есть (заведена или была); 'error' — повторы кончились, и это
-    видно, чтобы перезвонили руками; 'answered' — клиент дозвонился, передавать было
-    нечего; '' — робот этот звонок не разбирал, ещё идёт минута или робот повторяет
-    передачу (`error` до исчерпания попыток — не повод звать человека: через пару минут
-    сделка может появиться сама)."""
-    if lead_id:
+    amo_state: 'sent' — сделка есть (заведена или была) или заявку приняла Syntony;
+    'error' — повторы кончились, и это видно, чтобы перезвонили руками; 'answered' — клиент
+    дозвонился, передавать было нечего; '' — робот этот звонок не разбирал, ещё идёт минута
+    или робот повторяет передачу (`error` до исчерпания попыток — не повод звать человека:
+    через пару минут сделка может появиться сама).
+
+    missed_crm: 'syntony' | 'amo' — о какой CRM речь. Сделка amoCRM у строки — значит,
+    amoCRM; иначе — куда робот передавал (пусто у строк до переезда — тоже amoCRM)."""
+    if lead_id or syntony_sent_at:
         state = 'sent'
     elif status == 'failed':
         state = 'error'
@@ -590,8 +595,10 @@ def _missed_view(status, lead_id, reason, error):
         state = 'answered'
     else:
         state = ''
+    syntony = not lead_id and (syntony_sent_at is not None or crm == 'syntony')
     return {
         'amo_state': state,
+        'missed_crm': 'syntony' if syntony else 'amo',
         'amo_lead_id': int(lead_id) if lead_id else None,
         'amo_url': (AMO_LEAD_URL % int(lead_id)) if lead_id else '',
         'amo_note': (reason or '') if state != 'error' else (error or reason or ''),
@@ -629,8 +636,8 @@ def _row_to_touch(row):
         # Сколько звонил телефон, когда клиент положил трубку — только у «Клиент сбросил».
         # Строка в семнадцать колонок (сверки, собранные до колонки) звона не знает.
         'ring_ms': None if len(row) < _TOUCH_WIDTH or row[17] is None else int(row[17]),
-    } | (_missed_view(*row[_TOUCH_WIDTH:_TOUCH_WIDTH + 4]) if len(row) >= _TOUCH_WIDTH + 4
-         else _missed_view(None, None, None, None))
+    } | _missed_view(*(tuple(row[_TOUCH_WIDTH:_TOUCH_WIDTH + _MISSED_WIDTH])
+                       + (None,) * _MISSED_WIDTH)[:_MISSED_WIDTH])
 
 
 def count_touches(cursor, day_from, day_to, filters=None):
@@ -688,17 +695,20 @@ def summary(cursor, day_from, day_to, filters=None):
                COUNT(DISTINCT t.phone) FILTER (WHERE t.call_type <> %(before_queue_type)s),
                COUNT(*) FILTER (WHERE t.recording_url IS NOT NULL),
                COUNT(*) FILTER (WHERE t.call_type = %(before_queue_type)s),
-               COUNT(*) FILTER (WHERE ml.amo_lead_id IS NOT NULL)
+               COUNT(*) FILTER (WHERE ml.amo_lead_id IS NOT NULL),
+               COUNT(*) FILTER (WHERE ml.amo_lead_id IS NULL AND ml.syntony_sent_at IS NOT NULL)
     """ + _FILTER_SQL, _params(day_from, day_to, filters))
-    row = tuple(cursor.fetchone() or ()) + (0,) * 11
+    row = tuple(cursor.fetchone() or ()) + (0,) * 12
     return {
         'total': int(row[0]), 'talks': int(row[1]), 'outgoing': int(row[2]),
         'incoming': int(row[3]), 'incoming_missed': int(row[4]),
         'talk_seconds': int(row[5]), 'operators': int(row[6]),
         'phones': int(row[7]), 'with_recording': int(row[8]),
         'before_queue': int(row[9]),
-        # Переданы в amoCRM роботом пропущенных (задача #291) — подпись у «не приняли».
+        # Переданы роботом пропущенных — подпись у «не приняли»: в amoCRM (задача #291) и
+        # в Syntony (SALES-4). В периоде, захватившем переезд, бывают обе.
         'amo_transferred': int(row[10] or 0),
+        'syntony_transferred': int(row[11] or 0),
     }
 
 

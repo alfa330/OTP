@@ -22,6 +22,15 @@
   * amoCRM не пускает при входе — звонок ложится `error` без попытки и уходит, когда вход
     заработает, а за горизонтом становится `failed` и виден в разделе.
 
+Переадресация в Syntony (SALES-4, SyntonyCycleTests):
+  * то же решение — та же отметка `sending` до запроса, затем заявка через форму;
+  * проверки «у клиента уже есть наша сделка» нет: второй звонок того же клиента — второй
+    запрос, открытую заявку Syntony дополняет сама; amoCRM не трогается вовсе;
+  * сбой — `error` и повтор без «поиска потерянной», 400 — сразу `failed`;
+  * не больше SYNTONY_POSTS_PER_CYCLE запросов за цикл, с повторами вместе;
+  * строка amoCRM, упавшая до переезда, повторяется уже в Syntony;
+  * при обоих флагах окружения робот идёт в Syntony, без ключа формы — выключен.
+
 Телефоны учебные (7XX555XXXX).
 """
 
@@ -108,8 +117,9 @@ class FakeStore(object):
 
     # запись
     def insert_decision(self, cursor, touch, status, reason, ended_at=None, next_linkedid=None,
-                        amo_lead_id=None, error=None):
+                        amo_lead_id=None, error=None, crm=None):
         assert status in real_mq.STATUSES
+        assert crm in (None,) + real_mq.CRMS
         key = (touch['linkedid'], touch['phone'])
         if key in self.rows:
             return False
@@ -118,8 +128,12 @@ class FakeStore(object):
                           'amo_lead_id': amo_lead_id, 'started_at': touch['started_at'],
                           'phone': touch['phone'], 'attempts': 1 if status == 'sending' else 0,
                           'sent_epoch': self.clock if status == 'sending' else None,
-                          'error': error}
+                          'error': error, 'crm': crm, 'syntony_sent': False}
         return True
+
+    def mark_sent_syntony(self, cursor, linkedid, phone):
+        self.rows[(linkedid, phone)].update(status='created', crm='syntony', syntony_sent=True,
+                                            error=None)
 
     def mark_created(self, cursor, linkedid, phone, lead_id, contact_id=None, reason=None):
         self.rows[(linkedid, phone)].update(status='created', amo_lead_id=lead_id, error=None)
@@ -132,13 +146,13 @@ class FakeStore(object):
         self.rows[(linkedid, phone)].update(status='repeat', amo_lead_id=lead_id, reason=reason,
                                             error=None)
 
-    def reclaim(self, cursor, linkedid, phone, status, attempts):
+    def reclaim(self, cursor, linkedid, phone, status, attempts, crm=None):
         row = self.rows.get((linkedid, phone))
         if not row or row['status'] != status or row['attempts'] != int(attempts or 0):
             return None
         self.clock += 10
         row.update(status='sending', attempts=row['attempts'] + 1, sent_epoch=self.clock,
-                   stale=False)
+                   stale=False, crm=crm or row.get('crm'))
         return row['attempts']
 
     def pending_rows(self, cursor, phone, since, linkedid, before):
@@ -154,12 +168,16 @@ class FakeStore(object):
         best = max(own, key=lambda r: r['started_at'])
         return best['amo_lead_id'], best['started_at']
 
-    def resolve_chain(self, cursor, phone, before, lead_id=None, answered_reason=None):
+    def resolve_chain(self, cursor, phone, before, lead_id=None, answered_reason=None,
+                      syntony=False):
         for row in self.rows.values():
             if (row['phone'] == phone and row['status'] == 'chained' and not row['amo_lead_id']
+                    and not row.get('syntony_sent')
                     and before - self.CHAIN_LOOKBACK <= row['started_at'] < before):
                 if lead_id:
                     row['amo_lead_id'] = lead_id
+                elif syntony:
+                    row.update(syntony_sent=True, crm='syntony')
                 elif answered_reason:
                     row.update(status='answered', reason=answered_reason)
 
@@ -561,6 +579,264 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.run_cycle(store)['created'], 3)
 
 
+class FakeSyntonyWriter(object):
+    """Двойник SyntonyMissedWriter: запоминает отправки и что лежало в журнале в тот момент."""
+
+    def __init__(self, store):
+        self.store = store
+        self.sent = []
+        self.rows_at_send = []
+        self.fail = None
+
+    def send(self, touch, park=''):
+        self.rows_at_send.append({k: dict(v) for k, v in self.store.rows.items()})
+        if self.fail:
+            raise self.fail
+        self.sent.append((touch['linkedid'], touch['phone'], park))
+
+
+class SyntonyCycleTests(unittest.TestCase):
+    """Тот же цикл с переадресацией в Syntony (SALES-4). Заготовки — общие с CycleTests."""
+
+    since = CycleTests.since
+    row = CycleTests.row
+    seeded_store = CycleTests.seeded_store
+    stuck_store = CycleTests.stuck_store
+
+    def run_syntony(self, store, writer=None, factory=None, now=NOW, queries=None):
+        queries = queries or FakeQueries(live_at=(now - timedelta(seconds=5)).isoformat())
+        self.syntony = writer or getattr(self, 'syntony', None) or FakeSyntonyWriter(store)
+        self.factory_calls = 0
+
+        def default_factory():
+            self.factory_calls += 1
+            return self.syntony
+
+        with mock.patch.object(missed_service, 'mq', store), \
+                mock.patch.object(missed_service, 'queries', queries):
+            return missed_service.run_cycle(_Db(), now=now, writer_factory=factory or default_factory,
+                                            crm=missed_config.SYNTONY)
+
+    def setUp(self):
+        self.syntony = None
+
+    def test_missed_call_goes_to_syntony_with_the_mark_written_first(self):
+        store = FakeStore([missed_touch('1.1', NOW - timedelta(minutes=5))],
+                          enabled_since=self.since())
+        summary = self.run_syntony(store)
+        self.assertEqual(summary['created'], 1)
+        self.assertEqual(self.syntony.sent, [('1.1', PHONE, 'Центр регистрации')])
+        before = self.syntony.rows_at_send[0][('1.1', PHONE)]
+        self.assertEqual((before['status'], before['crm']), ('sending', 'syntony'))
+        row = self.row(store)
+        self.assertEqual((row['status'], row['crm'], row['syntony_sent'], row['amo_lead_id']),
+                         ('created', 'syntony', True, None))
+
+    def test_answered_redial_records_syntony_and_sends_nothing(self):
+        start = NOW - timedelta(minutes=5)
+        store = FakeStore([missed_touch('1.1', start),
+                           talk_touch('1.2', start + timedelta(seconds=70))],
+                          enabled_since=self.since())
+        summary = self.run_syntony(store)
+        self.assertEqual(summary['answered'], 1)
+        self.assertEqual((self.row(store)['status'], self.row(store)['crm']),
+                         ('answered', 'syntony'))
+        self.assertEqual(self.factory_calls, 0)
+
+    def test_chain_gets_the_syntony_mark_of_its_last_call(self):
+        start = NOW - timedelta(minutes=5)
+        store = FakeStore([missed_touch('1.1', start),
+                           missed_touch('1.2', start + timedelta(seconds=80))],
+                          enabled_since=self.since())
+        summary = self.run_syntony(store)
+        self.assertEqual((summary['chained'], summary['created']), (1, 1))
+        self.assertEqual([item[0] for item in self.syntony.sent], ['1.2'])
+        first = self.row(store, '1.1')
+        self.assertEqual((first['status'], first['syntony_sent'], first['crm']),
+                         ('chained', True, 'syntony'))
+
+    def test_second_call_of_the_same_client_is_sent_again_not_held(self):
+        # В amoCRM вторая сделка не заводилась, пока первая в «Новой заявке». Syntony сама
+        # кладёт второе обращение комментарием в открытую заявку — поэтому просто отправляем.
+        store = self.seeded_store()
+        store.rows[('1.1', PHONE)].update(status='created', amo_lead_id=None, crm='syntony',
+                                          syntony_sent=True)
+        summary = self.run_syntony(store)
+        self.assertEqual((summary['created'], summary['repeat'], summary['deferred']), (1, 0, 0))
+        self.assertEqual([item[0] for item in self.syntony.sent], ['1.2'])
+
+    def test_amo_is_never_asked_in_syntony_mode(self):
+        store = FakeStore([missed_touch('1.1', NOW - timedelta(minutes=5))],
+                          enabled_since=self.since())
+        writer = FakeSyntonyWriter(store)
+        with mock.patch.object(missed_service, '_writer',
+                               side_effect=AssertionError('amoCRM не должна заводиться')), \
+                mock.patch.object(missed_service, '_syntony_writer', return_value=writer), \
+                mock.patch.object(missed_service, 'mq', store), \
+                mock.patch.object(missed_service, 'queries',
+                                  FakeQueries(live_at=(NOW - timedelta(seconds=5)).isoformat())):
+            summary = missed_service.run_cycle(_Db(), now=NOW, crm=missed_config.SYNTONY)
+        self.assertEqual(summary['created'], 1)
+        self.assertEqual(len(writer.sent), 1)
+
+    def test_failure_is_retried_without_looking_for_a_lost_lead(self):
+        store = FakeStore([missed_touch('1.1', NOW - timedelta(minutes=5))],
+                          enabled_since=self.since())
+        writer = FakeSyntonyWriter(store)
+        writer.fail = missed_service_syntony_error('больше 30 заявок в минуту (HTTP 429)')
+        summary = self.run_syntony(store, writer=writer)
+        self.assertEqual(summary['errors'], 1)
+        self.assertEqual(self.row(store)['status'], 'error')
+        self.assertIn('429', store.runs[-1])
+
+        writer.fail = None
+        summary = self.run_syntony(store, writer=writer)
+        self.assertEqual(summary['created'], 1)
+        row = self.row(store)
+        self.assertEqual((row['status'], row['attempts'], row['syntony_sent']), ('created', 2, True))
+
+    def test_rejected_request_is_failed_at_once(self):
+        store = FakeStore([missed_touch('1.1', NOW - timedelta(minutes=5))],
+                          enabled_since=self.since())
+        writer = FakeSyntonyWriter(store)
+        writer.fail = missed_service_syntony_error('Syntony отклонила заявку (HTTP 400 '
+                                                   'phone_required)', final=True)
+        summary = self.run_syntony(store, writer=writer)
+        self.assertEqual(summary['failed'], 1)
+        self.assertEqual(self.row(store)['status'], 'failed')
+        # Повторов нет: тот же запрос Syntony отвергнет снова.
+        self.run_syntony(store, writer=writer)
+        self.assertEqual(len(writer.rows_at_send), 1)
+
+    def test_stuck_sending_is_simply_sent_again(self):
+        store = self.stuck_store(crm='syntony')
+        summary = self.run_syntony(store)
+        self.assertEqual(summary['created'], 1)
+        self.assertEqual(self.row(store)['attempts'], 2)
+
+    def test_amo_row_failed_before_the_switch_is_retried_in_syntony(self):
+        store = self.stuck_store(status='error', stale=False, crm=None)
+        summary = self.run_syntony(store)
+        self.assertEqual(summary['created'], 1)
+        row = self.row(store)
+        self.assertEqual((row['crm'], row['syntony_sent']), ('syntony', True))
+
+    def test_amo_row_failing_again_in_syntony_names_syntony(self):
+        # Повтор упал и в Syntony: подпись «не передан в …» обязана назвать Syntony — туда
+        # и уходил последний запрос.
+        store = self.stuck_store(status='error', stale=False, crm='amo')
+        writer = FakeSyntonyWriter(store)
+        writer.fail = missed_service_syntony_error('Syntony: HTTP 503')
+        self.run_syntony(store, writer=writer)
+        self.assertEqual((self.row(store)['status'], self.row(store)['crm']), ('error', 'syntony'))
+
+    def test_attempts_and_horizon_end_in_failed_without_a_request(self):
+        store = self.stuck_store(attempts=missed_service.MAX_ATTEMPTS, crm='syntony')
+        summary = self.run_syntony(store)
+        self.assertEqual(summary['failed'], 1)
+        self.assertEqual(self.syntony.rows_at_send, [])
+        old = self.stuck_store(started_at=NOW - timedelta(hours=missed_service.HORIZON_HOURS,
+                                                          minutes=1), crm='syntony')
+        self.syntony = None
+        self.assertEqual(self.run_syntony(old)['failed'], 1)
+
+    def test_posts_per_cycle_are_capped_with_retries_counted(self):
+        start = NOW - timedelta(minutes=30)
+        calls = [missed_touch('1.%d' % i, start + timedelta(seconds=i), phone='70155500%02d' % i)
+                 for i in range(missed_service.SYNTONY_POSTS_PER_CYCLE + 2)]
+        store = FakeStore(calls, enabled_since=self.since())
+        store.rows[('0.9', '7015559999')] = {
+            'status': 'error', 'amo_lead_id': None, 'reason': '', 'next': None,
+            'started_at': NOW - timedelta(minutes=40), 'phone': '7015559999', 'attempts': 1,
+            'sent_epoch': 1790000100, 'error': 'HTTP 503', 'crm': 'syntony'}
+        writer = FakeSyntonyWriter(store)
+        self.run_syntony(store, writer=writer)
+        self.assertEqual(len(writer.rows_at_send), missed_service.SYNTONY_POSTS_PER_CYCLE)
+        self.assertEqual(writer.sent[0][0], '0.9', 'повтор идёт первым')
+        self.run_syntony(store, writer=writer)
+        self.assertEqual(len(writer.sent), missed_service.SYNTONY_POSTS_PER_CYCLE + 3)
+
+    def test_retries_alone_are_capped_too(self):
+        # После сбоя Syntony повторов может набраться больше, чем форма примет за минуту.
+        store = FakeStore(enabled_since=self.since())
+        count = missed_service.SYNTONY_POSTS_PER_CYCLE + 2
+        for i in range(count):
+            phone = '70155510%02d' % i
+            store.rows[('0.%d' % i, phone)] = {
+                'status': 'error', 'amo_lead_id': None, 'reason': '', 'next': None,
+                'started_at': NOW - timedelta(minutes=40 - i), 'phone': phone, 'attempts': 1,
+                'sent_epoch': 1790000100, 'error': 'HTTP 503', 'crm': 'syntony'}
+        writer = FakeSyntonyWriter(store)
+        self.run_syntony(store, writer=writer)
+        self.assertEqual(len(writer.sent), missed_service.SYNTONY_POSTS_PER_CYCLE)
+        self.run_syntony(store, writer=writer)
+        self.assertEqual(len(writer.sent), count)
+
+    def test_missing_form_key_records_the_call_and_sends_it_later(self):
+        store = FakeStore([missed_touch('1.1', NOW - timedelta(minutes=5))],
+                          enabled_since=self.since())
+
+        def broken():
+            raise missed_service_syntony_error('Syntony: не задан ключ формы SYNTONY_LEADS_FORM_KEY')
+        self.run_syntony(store, factory=broken)
+        row = self.row(store)
+        self.assertEqual((row['status'], row['crm'], row['sent_epoch']), ('error', 'syntony', None))
+        self.assertIn('Syntony недоступна', store.runs[-1])
+        self.assertEqual(self.run_syntony(store)['created'], 1)
+
+
+def missed_service_syntony_error(text, final=False):
+    from cdr.missed_syntony import SyntonyFormError
+    return SyntonyFormError(text, final=final)
+
+
+class TargetTests(unittest.TestCase):
+    """Какую CRM выбирает окружение и когда робот вообще работает."""
+
+    def env(self, **values):
+        import os
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in (missed_config.ENABLED_ENV, missed_config.SYNTONY_ENABLED_ENV,
+                              'SYNTONY_LEADS_FORM_KEY')}
+        clean.update(values)
+        return mock.patch.dict('os.environ', clean, clear=True)
+
+    def test_syntony_wins_over_amo(self):
+        with self.env(CDR_MISSED_AMO_ENABLED='1', CDR_MISSED_SYNTONY_ENABLED='1'):
+            self.assertEqual(missed_config.target(), missed_config.SYNTONY)
+        with self.env(CDR_MISSED_AMO_ENABLED='1'):
+            self.assertEqual(missed_config.target(), missed_config.AMO)
+        with self.env(CDR_MISSED_SYNTONY_ENABLED='0', CDR_MISSED_AMO_ENABLED='1'):
+            self.assertEqual(missed_config.target(), missed_config.AMO)
+
+    def test_syntony_without_a_form_key_is_off_not_amo(self):
+        # Переадресация включена, а ключа нет: молча слать в amoCRM нельзя — это не то, что
+        # велено; робот выключен, и старт пишет это в журнал.
+        with self.env(CDR_MISSED_AMO_ENABLED='1', CDR_MISSED_SYNTONY_ENABLED='1'):
+            with mock.patch('amocrm.leads.is_configured', return_value=True):
+                self.assertFalse(missed_service.is_enabled())
+        with self.env(CDR_MISSED_SYNTONY_ENABLED='1', SYNTONY_LEADS_FORM_KEY='sf_a1b2c3d4e5f6a7b8c9d0e1f2'):
+            self.assertTrue(missed_service.is_enabled())
+        with self.env(CDR_MISSED_SYNTONY_ENABLED='1', SYNTONY_LEADS_FORM_KEY='sf_ кривой\n'):
+            self.assertFalse(missed_service.is_enabled())
+
+    def test_cycle_follows_the_environment(self):
+        store = FakeStore([missed_touch('1.1', NOW - timedelta(minutes=5))],
+                          enabled_since=NOW - timedelta(hours=1))
+        writer = FakeSyntonyWriter(store)
+        queries = FakeQueries(live_at=(NOW - timedelta(seconds=5)).isoformat())
+        with self.env(CDR_MISSED_AMO_ENABLED='1', CDR_MISSED_SYNTONY_ENABLED='1',
+                      SYNTONY_LEADS_FORM_KEY='sf_a1b2c3d4e5f6a7b8c9d0e1f2'), \
+                mock.patch.object(missed_service, 'mq', store), \
+                mock.patch.object(missed_service, 'queries', queries), \
+                mock.patch.object(missed_service, '_syntony_writer', return_value=writer), \
+                mock.patch.object(missed_service, '_writer',
+                                  side_effect=AssertionError('amoCRM не должна заводиться')):
+            summary = missed_service.run_cycle(_Db(), now=NOW)
+        self.assertEqual(summary['created'], 1)
+        self.assertEqual(len(writer.sent), 1)
+
+
 class ReclaimSqlTests(unittest.TestCase):
     def test_reclaim_is_a_compare_and_swap_on_status_and_attempts(self):
         import inspect
@@ -574,7 +850,9 @@ class ConfigTests(unittest.TestCase):
         import os
         with mock.patch.dict('os.environ', {}, clear=False):
             os.environ.pop(missed_config.ENABLED_ENV, None)
+            os.environ.pop(missed_config.SYNTONY_ENABLED_ENV, None)
             self.assertFalse(missed_config.enabled())
+            self.assertIsNone(missed_config.target())
         with mock.patch.dict('os.environ', {missed_config.ENABLED_ENV: '1'}):
             self.assertTrue(missed_config.enabled())
         with mock.patch.dict('os.environ', {missed_config.ENABLED_ENV: 'нет'}):

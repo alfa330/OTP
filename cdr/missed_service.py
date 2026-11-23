@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Робот «пропущенные входящие → amoCRM» (задача #291): один цикл разбора.
+"""Робот «пропущенные входящие → CRM» (задачи #291 и SALES-4): один цикл разбора.
 
 Джоба в монолите зовёт `run_cycle` раз в пятнадцать секунд на своём пуле из одного потока
-(`POOL`). Общий `executor_pool` бота — четыре места на всё приложение, а запрос в amoCRM
+(`POOL`). Общий `executor_pool` бота — четыре места на всё приложение, а запрос в CRM
 может висеть минуту; занять там место значило бы подвешивать чужие разделы.
 
 Что делает цикл
@@ -11,13 +11,18 @@
    старше HORIZON_HOURS).
 2. Для каждого спрашивает `cdr.missed.decide`: ждать, клиент дозвонился, перезвонил и снова
    не дозвонился (решение переносится на последний звонок) — или передавать.
-3. Передача: если у клиента уже есть наша сделка на перезвон, которую ещё не взяли в работу
-   (этап «Новая заявка»), новой не заводим — к той дописываем примечание о повторном
-   звонке. Иначе заводим сделку с тегом «Пропущенный входящий» и примечанием о звонке.
-4. Повторяет упавшие передачи с растущей паузой; зависшие — сначала проверяет по amoCRM.
+3. Передача — в ту CRM, которую выбирает `missed_config.target()`:
+   * amoCRM: если у клиента уже есть наша сделка на перезвон, которую ещё не взяли в работу
+     (этап «Новая заявка»), новой не заводим — к той дописываем примечание о повторном
+     звонке. Иначе заводим сделку с тегом «Пропущенный входящий» и примечанием о звонке;
+   * Syntony (SALES-4): заявка через форму с тем же текстом примечания. Открытую заявку
+     того же номера Syntony находит сама и дописывает наш текст в неё комментарием, поэтому
+     своей проверки «уже есть сделка» здесь нет (см. cdr/missed_syntony.py).
+4. Повторяет упавшие передачи с растущей паузой; зависшие в amoCRM — сначала проверяет по
+   amoCRM, в Syntony — просто повторяет: второй заявки повтор не заведёт.
 
 Порядок записи — «отметка до действия»: строка `sending` в журнале появляется ДО запроса
-в amoCRM. Так перезапуск посреди запроса оставляет след, по которому повтор найдёт уже
+в CRM. Так перезапуск посреди запроса оставляет след, по которому повтор найдёт уже
 заведённую сделку, а не заведёт вторую.
 """
 
@@ -50,14 +55,26 @@ MAX_ATTEMPTS = 5
 # случай, когда после простоя накопилось, — чтобы один цикл не держал поток минутами.
 MAX_TRANSFERS_PER_CYCLE = 10
 
+# Запросов в Syntony за цикл — и новых, и повторов. Форма принимает не больше 30 заявок в
+# минуту, циклов в минуте четыре: пять за цикл — двадцать в минуту, с запасом. Остальное
+# ждёт следующего цикла, а не получает 429.
+SYNTONY_POSTS_PER_CYCLE = 5
+
 _ALMATY = timezone(timedelta(hours=5))
-_writer_state = {'writer': None}
+_writer_state = {'writer': None, 'syntony': None}
 _writer_lock = threading.Lock()
 
 
 def is_enabled():
-    from amocrm import leads as amo_leads
-    return missed_config.enabled() and amo_leads.is_configured()
+    """Включён ли робот и есть ли чем передавать в выбранную CRM."""
+    crm = missed_config.target()
+    if crm == missed_config.SYNTONY:
+        from syntony_leads import form
+        return form.is_configured()
+    if crm == missed_config.AMO:
+        from amocrm import leads as amo_leads
+        return amo_leads.is_configured()
+    return False
 
 
 def _writer():
@@ -69,6 +86,15 @@ def _writer():
             from cdr.missed_amo import MissedCallWriter
             _writer_state['writer'] = MissedCallWriter(amo_leads.AmoClient())
         return _writer_state['writer']
+
+
+def _syntony_writer():
+    """Писатель Syntony на жизнь процесса: ключ формы читается из окружения один раз."""
+    with _writer_lock:
+        if _writer_state['syntony'] is None:
+            from cdr.missed_syntony import SyntonyMissedWriter
+            _writer_state['syntony'] = SyntonyMissedWriter()
+        return _writer_state['syntony']
 
 
 def _local(value):
@@ -104,11 +130,16 @@ def _queue_calls_of(calls, phone):
     return out
 
 
-def run_cycle(db, now=None, writer_factory=None):
+def run_cycle(db, now=None, writer_factory=None, crm=None):
     """Один проход. Возвращает счётчик исходов — джоба пишет его в лог, только когда он
-    не пустой (цикл будит себя 5760 раз в сутки)."""
+    не пустой (цикл будит себя 5760 раз в сутки).
+
+    crm — куда передавать (missed_config.AMO | SYNTONY); по умолчанию — что выбрано
+    окружением, а без него amoCRM, как до переезда."""
     now = now or queries.now_almaty()
-    writer_factory = writer_factory or _writer
+    crm = crm or missed_config.target() or missed_config.AMO
+    writer_factory = writer_factory or (
+        _syntony_writer if crm == missed_config.SYNTONY else _writer)
     summary = Counter()
 
     with db._get_cursor() as cursor:
@@ -123,7 +154,7 @@ def run_cycle(db, now=None, writer_factory=None):
 
     fresh_until = _local(bridge.get('live_at'))
     queue_until = _local(queue_at)
-    context = _Context(db, writer_factory, now, summary)
+    context = _Context(db, writer_factory, now, summary, crm=crm)
 
     # Повторы — первыми: строка «в полёте» держит новые сделки того же клиента (см.
     # transfer), и чем раньше она разобрана, тем раньше они пойдут.
@@ -133,7 +164,7 @@ def run_cycle(db, now=None, writer_factory=None):
         except Exception as exc:  # noqa: BLE001 — одна строка не должна ронять остальные
             summary['errors'] += 1
             context.error = str(exc)
-            log.exception('Пропущенные→amo: повтор %s не удался', row.get('linkedid'))
+            log.exception('Пропущенные→%s: повтор %s не удался', crm, row.get('linkedid'))
 
     for touch in todo:
         decision = missed.decide(
@@ -146,7 +177,7 @@ def run_cycle(db, now=None, writer_factory=None):
         except Exception as exc:  # noqa: BLE001 — один звонок не должен ронять остальные
             summary['errors'] += 1
             context.error = str(exc)
-            log.exception('Пропущенные→amo: звонок %s не разобран', touch.get('linkedid'))
+            log.exception('Пропущенные→%s: звонок %s не разобран', crm, touch.get('linkedid'))
 
     if summary or context.error:
         with db._get_cursor() as cursor:
@@ -166,7 +197,7 @@ FAILED_TEXT = 'передать не удалось — перезвоните �
 class _Context(object):
     """Всё, что нужно одному циклу: база, писатель (заводится при первой передаче) и счётчики."""
 
-    def __init__(self, db, writer_factory, now, summary):
+    def __init__(self, db, writer_factory, now, summary, crm=missed_config.AMO):
         self.db = db
         self._factory = writer_factory
         self._writer = None
@@ -174,15 +205,20 @@ class _Context(object):
         self.now = now
         self.summary = summary
         self.error = None
+        self.crm = crm
+        self.syntony = crm == missed_config.SYNTONY
+        # Запросов в Syntony за этот цикл (SYNTONY_POSTS_PER_CYCLE).
+        self.posts = 0
 
     def writer(self):
         if self._writer is None and not self._writer_failed:
             try:
                 self._writer = self._factory()
-            except Exception as exc:  # noqa: BLE001 — amoCRM недоступна: звонки подождут
+            except Exception as exc:  # noqa: BLE001 — CRM недоступна: звонки подождут
                 self._writer_failed = True
-                self.error = 'amoCRM недоступна: %s' % exc
-                log.warning('Пропущенные→amo: вход в amoCRM не удался: %s', exc)
+                name = missed_config.crm_label(self.crm)
+                self.error = '%s недоступна: %s' % (name, exc)
+                log.warning('Пропущенные→%s: писатель %s не завёлся: %s', self.crm, name, exc)
         return self._writer
 
     def _since_repeat(self):
@@ -191,10 +227,12 @@ class _Context(object):
     # ── решения ──────────────────────────────────────────────────────────────
 
     def apply(self, touch, decision):
+        # crm пишется и в «дозвонился»: раздел говорит «в Syntony не передан: клиент
+        # перезвонил…» о той CRM, куда робот передавал в тот момент.
         if decision.kind == missed.ANSWERED:
             with self.db._get_cursor() as cursor:
                 if mq.insert_decision(cursor, touch, mq.ANSWERED, decision.reason,
-                                      decision.ended_at):
+                                      decision.ended_at, crm=self.crm):
                     mq.resolve_chain(cursor, touch['phone'], touch['started_at'],
                                      answered_reason=decision.reason)
                     self.summary['answered'] += 1
@@ -202,20 +240,26 @@ class _Context(object):
         if decision.kind == missed.CHAINED:
             with self.db._get_cursor() as cursor:
                 if mq.insert_decision(cursor, touch, mq.CHAINED, decision.reason,
-                                      decision.ended_at, next_linkedid=decision.next_linkedid):
+                                      decision.ended_at, next_linkedid=decision.next_linkedid,
+                                      crm=self.crm):
                     self.summary['chained'] += 1
             return
         if decision.kind == missed.TRANSFER:
             if self.summary['created'] + self.summary['repeat'] >= MAX_TRANSFERS_PER_CYCLE:
                 return
+            if self.syntony and self.posts >= SYNTONY_POSTS_PER_CYCLE:
+                return
             if self.writer() is None:
-                # amoCRM не пускает. Звонок всё равно ложится в журнал ошибкой без попытки:
+                # CRM не пускает. Звонок всё равно ложится в журнал ошибкой без попытки:
                 # иначе при долгом сбое он молча выпал бы за горизонт, и перезвонить ему
                 # руками никто бы не узнал. Повтор заберёт его, как только вход заработает.
                 with self.db._get_cursor() as cursor:
                     if mq.insert_decision(cursor, touch, mq.ERROR, decision.reason,
-                                          decision.ended_at, error=self.error):
+                                          decision.ended_at, error=self.error, crm=self.crm):
                         self.summary['errors'] += 1
+                return
+            if self.syntony:
+                self.transfer_syntony(touch, decision)
                 return
             self.transfer(touch, decision)
 
@@ -254,7 +298,7 @@ class _Context(object):
         if own != _NO_OWN:
             with self.db._get_cursor() as cursor:
                 inserted = mq.insert_decision(cursor, touch, mq.REPEAT, REPEAT_REASON,
-                                              decision.ended_at, amo_lead_id=own)
+                                              decision.ended_at, amo_lead_id=own, crm=self.crm)
                 if inserted:
                     mq.resolve_chain(cursor, phone, touch['started_at'], lead_id=own)
             if inserted:
@@ -264,10 +308,44 @@ class _Context(object):
 
         with self.db._get_cursor() as cursor:
             claimed = mq.insert_decision(cursor, touch, mq.SENDING, decision.reason,
-                                         decision.ended_at)
+                                         decision.ended_at, crm=self.crm)
         if not claimed:
             return
         self._create(touch, park)
+
+    def transfer_syntony(self, touch, decision):
+        """Заявка в Syntony: отметка `sending`, потом запрос. Своей проверки «у клиента уже
+        есть заявка» нет — открытую заявку номера Syntony находит сама и дописывает наш
+        текст в неё комментарием."""
+        with self.db._get_cursor() as cursor:
+            claimed = mq.insert_decision(cursor, touch, mq.SENDING, decision.reason,
+                                         decision.ended_at, crm=self.crm)
+        if not claimed:
+            return
+        self._send_syntony(touch, lines_mod.park_of_queue(touch.get('queue')))
+
+    def _send_syntony(self, touch, park):
+        writer = self.writer()
+        linkedid, phone = str(touch['linkedid']), str(touch['phone'])
+        self.posts += 1
+        try:
+            writer.send(touch, park)
+        except Exception as exc:  # noqa: BLE001 — SyntonyFormError, сеть: всё в журнал
+            # final — запрос не годится (нет телефона, 400): повтор того же не поможет, и
+            # строка сразу видна в разделе «не передан — перезвоните вручную».
+            final = bool(getattr(exc, 'final', False))
+            with self.db._get_cursor() as cursor:
+                mq.mark_error(cursor, linkedid, phone, exc, final=final)
+            self.summary['failed' if final else 'errors'] += 1
+            self.error = str(exc)
+            log.warning('Пропущенные→syntony: заявка по %s не принята: %s', linkedid, exc)
+            return
+        with self.db._get_cursor() as cursor:
+            mq.mark_sent_syntony(cursor, linkedid, phone)
+            started = missed._moment(touch.get('started_at'))
+            if started is not None:
+                mq.resolve_chain(cursor, phone, started, syntony=True)
+        self.summary['created'] += 1
 
     def _create(self, touch, park):
         writer = self.writer()
@@ -298,6 +376,9 @@ class _Context(object):
     def retry(self, row):
         """Строка `error` или зависшая `sending`: сначала выяснить, не заведена ли уже сделка,
         потом — нет ли у клиента нашей сделки по другому звонку, и только потом повторять."""
+        if self.syntony:
+            self._retry_syntony(row)
+            return
         linkedid, phone = str(row['linkedid']), str(row['phone'])
         started = missed._moment(row.get('started_at'))
         too_old = started is None or started < self.now - timedelta(hours=HORIZON_HOURS)
@@ -353,7 +434,28 @@ class _Context(object):
             return
 
         with self.db._get_cursor() as cursor:
-            attempt = mq.reclaim(cursor, linkedid, phone, row.get('status'), row.get('attempts'))
+            attempt = mq.reclaim(cursor, linkedid, phone, row.get('status'), row.get('attempts'),
+                                 crm=self.crm)
         if attempt is None:
             return
         self._create(row, park)
+
+    def _retry_syntony(self, row):
+        """Повтор заявки в Syntony. Проверять «не дошёл ли прошлый запрос» нечем (номера
+        заявки Syntony не отдаёт) и незачем: дошедший завёл заявку, и повтор ляжет в неё
+        комментарием, а не второй заявкой. Строку, ушедшую из amoCRM до переезда, повтор
+        тоже отправляет в Syntony — amoCRM робот больше не трогает."""
+        linkedid, phone = str(row['linkedid']), str(row['phone'])
+        started = missed._moment(row.get('started_at'))
+        too_old = started is None or started < self.now - timedelta(hours=HORIZON_HOURS)
+        if too_old or int(row.get('attempts') or 0) >= MAX_ATTEMPTS:
+            self._fail(linkedid, phone)
+            return
+        if self.posts >= SYNTONY_POSTS_PER_CYCLE or self.writer() is None:
+            return
+        with self.db._get_cursor() as cursor:
+            attempt = mq.reclaim(cursor, linkedid, phone, row.get('status'), row.get('attempts'),
+                                 crm=self.crm)
+        if attempt is None:
+            return
+        self._send_syntony(row, lines_mod.park_of_queue(row.get('queue')))

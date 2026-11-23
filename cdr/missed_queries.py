@@ -1,20 +1,25 @@
 # -*- coding: utf-8 -*-
-"""SQL робота «пропущенные входящие → amoCRM» (задача #291).
+"""SQL робота «пропущенные входящие → CRM» (задачи #291 и SALES-4).
 
 Функции принимают ГОТОВЫЙ курсор и транзакцией не управляют — как весь раздел
 (cdr/queries.py). Транзакции у робота короткие и лежат МЕЖДУ сетевыми вызовами, а не
-вокруг них: у запроса в amoCRM таймаут минута, и держать соединение пула всё это время
+вокруг них: у запроса в CRM таймаут минута, и держать соединение пула всё это время
 значило бы отнимать его у остального приложения (тот же урок, что у робота OLX).
 
 Ключ журнала — ключ касания (linkedid, телефон). Порядок записи — «отметка до действия»:
-строка `sending` заводится ДО запроса в amoCRM отдельной транзакцией. Упади процесс между
+строка `sending` заводится ДО запроса в CRM отдельной транзакцией. Упади процесс между
 запросом и отметкой «создано» — строка останется `sending`, и повтор сначала спросит
-amoCRM, не появилась ли сделка (урок 01.09.2026: 172 копии автоответа OLX).
+amoCRM, не появилась ли сделка (урок 01.09.2026: 172 копии автоответа OLX); Syntony
+повтор не двоит — открытую заявку номера она дополняет комментарием.
+
+`crm` у строки — куда робот передавал в момент решения (missed_config.AMO | SYNTONY);
+у строк до переезда (SALES-4) он пустой, и все они — amoCRM. Принятую Syntony заявку
+отмечает `syntony_sent_at`: номера заявки Syntony не отдаёт.
 """
 
 from datetime import timedelta
 
-from cdr import touches as touches_mod
+from cdr import missed_config, touches as touches_mod
 
 SENDING = 'sending'
 CREATED = 'created'
@@ -132,8 +137,19 @@ def _key(touch):
     return str(touch['linkedid'])[:64], str(touch['phone'])[:16]
 
 
+CRMS = (missed_config.AMO, missed_config.SYNTONY)
+
+
+def _crm(value):
+    if value is None:
+        return None
+    if value not in CRMS:
+        raise ValueError('неизвестная CRM журнала пропущенных: %r' % (value,))
+    return value
+
+
 def insert_decision(cursor, touch, status, reason, ended_at=None, next_linkedid=None,
-                    amo_lead_id=None, error=None):
+                    amo_lead_id=None, error=None, crm=None):
     """Завести решение. True — строка заведена; False — решение уже было (гонка двух
     циклов или повтор после перезапуска), и второй раз ничего делать не надо.
 
@@ -145,11 +161,12 @@ def insert_decision(cursor, touch, status, reason, ended_at=None, next_linkedid=
     cursor.execute("""
         INSERT INTO cdr_missed_leads (linkedid, phone, call_day, started_at, ended_at, status,
                                       reason, next_linkedid, amo_lead_id, error, attempts,
-                                      sent_at)
+                                      sent_at, crm)
         VALUES (%(linkedid)s, %(phone)s, %(call_day)s, %(started_at)s, %(ended_at)s, %(status)s,
                 %(reason)s, %(next)s, %(lead)s, %(error)s,
                 CASE WHEN %(status)s = 'sending' THEN 1 ELSE 0 END,
-                CASE WHEN %(status)s = 'sending' THEN NOW() ELSE NULL END)
+                CASE WHEN %(status)s = 'sending' THEN NOW() ELSE NULL END,
+                %(crm)s)
         ON CONFLICT (linkedid, phone) DO NOTHING
         RETURNING linkedid
     """, {'linkedid': linkedid, 'phone': phone, 'call_day': touch['call_day'],
@@ -157,7 +174,8 @@ def insert_decision(cursor, touch, status, reason, ended_at=None, next_linkedid=
           'reason': (str(reason)[:500] if reason else None),
           'next': (str(next_linkedid)[:64] if next_linkedid else None),
           'lead': (int(amo_lead_id) if amo_lead_id else None),
-          'error': (str(error)[:500] if error else None)})
+          'error': (str(error)[:500] if error else None),
+          'crm': _crm(crm)})
     return cursor.fetchone() is not None
 
 
@@ -171,6 +189,15 @@ def mark_created(cursor, linkedid, phone, lead_id, contact_id=None, reason=None)
           (str(reason)[:500] if reason else None), linkedid, phone))
 
 
+def mark_sent_syntony(cursor, linkedid, phone):
+    """Syntony приняла заявку (202). Номера заявки в ответе нет — остаётся время приёма."""
+    cursor.execute("""
+        UPDATE cdr_missed_leads
+           SET status = 'created', crm = 'syntony', syntony_sent_at = NOW(), error = NULL
+         WHERE linkedid = %s AND phone = %s
+    """, (linkedid, phone))
+
+
 def mark_error(cursor, linkedid, phone, error, final=False):
     cursor.execute("""
         UPDATE cdr_missed_leads SET status = %s, error = %s
@@ -178,20 +205,24 @@ def mark_error(cursor, linkedid, phone, error, final=False):
     """, (FAILED if final else ERROR, str(error or '')[:500], linkedid, phone))
 
 
-def reclaim(cursor, linkedid, phone, status, attempts):
+def reclaim(cursor, linkedid, phone, status, attempts, crm=None):
     """Взять упавшую или зависшую строку на повтор. Возвращает номер попытки или None.
 
     Сравнение — с ТЕМИ статусом и числом попыток, что прочитал due_retries: при выкладке
     Render какое-то время держит два процесса, и оба могут взять одну строку. Условие
     «status IN ('error', 'sending')» их не разводит — второй UPDATE дождался бы первого и
     прошёл бы по его же `sending`. Число попыток растёт с каждым взятием, поэтому второй
-    получит ноль строк."""
+    получит ноль строк.
+
+    crm — куда уходит повтор: строка, упавшая в amoCRM до переезда, повторяется уже в
+    Syntony, и подпись в разделе должна сказать, где её искать."""
     cursor.execute("""
         UPDATE cdr_missed_leads
-           SET status = 'sending', attempts = attempts + 1, sent_at = NOW()
+           SET status = 'sending', attempts = attempts + 1, sent_at = NOW(),
+               crm = COALESCE(%s, crm)
          WHERE linkedid = %s AND phone = %s AND status = %s AND attempts = %s
         RETURNING attempts
-    """, (linkedid, phone, str(status), int(attempts or 0)))
+    """, (_crm(crm), linkedid, phone, str(status), int(attempts or 0)))
     row = cursor.fetchone()
     return int(row[0]) if row else None
 
@@ -274,22 +305,32 @@ def latest_own_lead(cursor, phone, since):
 CHAIN_LOOKBACK = timedelta(hours=3)
 
 
-def resolve_chain(cursor, phone, before, lead_id=None, answered_reason=None):
+def resolve_chain(cursor, phone, before, lead_id=None, answered_reason=None, syntony=False):
     """Раздать итог последнего звонка цепочки предыдущим (`chained`) того же номера.
 
     Сделка заведена — у предыдущих звонков появляется та же сделка (метка «в amoCRM» в
-    разделе); клиент дозвонился — предыдущие тоже закрываются как «дозвонился»."""
+    разделе); заявку приняла Syntony — у них та же отметка (метка «в Syntony»); клиент
+    дозвонился — предыдущие тоже закрываются как «дозвонился»."""
     since = before - CHAIN_LOOKBACK
     if lead_id:
         cursor.execute("""
             UPDATE cdr_missed_leads SET amo_lead_id = %s
              WHERE phone = %s AND status = 'chained' AND amo_lead_id IS NULL
+               AND syntony_sent_at IS NULL
                AND started_at < %s AND started_at >= %s
         """, (int(lead_id), str(phone)[:16], before, since))
+    elif syntony:
+        cursor.execute("""
+            UPDATE cdr_missed_leads SET syntony_sent_at = NOW(), crm = 'syntony'
+             WHERE phone = %s AND status = 'chained' AND amo_lead_id IS NULL
+               AND syntony_sent_at IS NULL
+               AND started_at < %s AND started_at >= %s
+        """, (str(phone)[:16], before, since))
     elif answered_reason:
         cursor.execute("""
             UPDATE cdr_missed_leads SET status = 'answered', reason = %s
              WHERE phone = %s AND status = 'chained' AND amo_lead_id IS NULL
+               AND syntony_sent_at IS NULL
                AND started_at < %s AND started_at >= %s
         """, (str(answered_reason)[:500], str(phone)[:16], before, since))
 

@@ -90,9 +90,10 @@ COLUMNS = (
     ('line_park', 'Таксопарк', 18),
     ('has_recording', 'Есть запись', 11),
     ('recording_url', 'Ссылка на запись', 20),
-    # Робот пропущенных (задача #291): номер сделки на перезвон, ссылкой в amoCRM. Пусто —
+    # Робот пропущенных (задача #291): номер сделки на перезвон, ссылкой в amoCRM, а с
+    # переадресации в Syntony (SALES-4) — «Syntony»: номера заявки Syntony не отдаёт. Пусто —
     # звонок не пропущенный, клиент дозвонился или робот его ещё не разбирал.
-    ('amo_lead_id', 'Сделка amoCRM', 14),
+    ('amo_lead_id', 'Сделка в CRM', 14),
     ('linkedid', 'linkedid', 22),
     ('legs', 'Плеч в CDR', 10),
 )
@@ -278,6 +279,8 @@ def _touch_row(sheet, touch):
         if touch.get('amo_url'):
             lead.hyperlink = touch['amo_url']
             lead.font = LINK_FONT
+    elif touch.get('amo_state') == 'sent' and touch.get('missed_crm') == 'syntony':
+        lead = 'Syntony'
     else:
         lead = None
 

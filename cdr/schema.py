@@ -215,22 +215,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_cdr_audio_jobs_imported_call
     ON cdr_audio_jobs(imported_call_id) WHERE imported_call_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_cdr_audio_jobs_status ON cdr_audio_jobs(status);
 
--- ── ПРОПУЩЕННЫЕ ВХОДЯЩИЕ → amoCRM (задача #291) ─────────────────────────────
+-- ── ПРОПУЩЕННЫЕ ВХОДЯЩИЕ → CRM (задачи #291 и SALES-4) ──────────────────────
 -- Журнал решений робота: по строке на непринятый входящий звонок, который он разобрал.
 -- Ключ тот же, что у касания, но внешнего ключа нет намеренно: сутки касаний мост
 -- перезаписывает целиком (DELETE + INSERT), и каскад стёр бы историю передачи.
 --
 -- status:
---   sending   строка заведена ДО запроса в amoCRM — отметка «уже делаю»; зависшая
+--   sending   строка заведена ДО запроса в CRM — отметка «уже делаю»; зависшая
 --             дольше пяти минут проверяется по amoCRM и либо закрывается, либо повторяется
---   created   сделка заведена (amo_lead_id)
+--   created   сделка заведена (amo_lead_id) или заявку приняла Syntony (syntony_sent_at)
 --   repeat    у клиента уже есть наша сделка на перезвон, ещё не взятая в работу, —
 --             новой не заводили, к той дописано примечание (amo_lead_id — она)
 --   chained   клиент перезвонил в течение минуты и снова не дозвонился; решение за
 --             последним звонком цепочки, его сделка проставляется и сюда
 --   answered  клиент дозвонился — передавать нечего (reason — как именно)
---   error     amoCRM не приняла; повтор с растущей паузой
+--   error     CRM не приняла; повтор с растущей паузой
 --   failed    повторы кончились — видно в разделе, чтобы перезвонили руками
+-- crm — куда робот передавал в момент решения: 'amo' | 'syntony'; пусто у строк до
+-- переадресации в Syntony (SALES-4), все они — amoCRM.
 -- CHECK на статус не ставим: список растёт, а расширять CHECK на живой таблице дороже,
 -- чем держать допустимые значения в коде (cdr/missed_queries.py).
 CREATE TABLE IF NOT EXISTS cdr_missed_leads (
@@ -248,6 +250,8 @@ CREATE TABLE IF NOT EXISTS cdr_missed_leads (
     error          TEXT,
     decided_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     sent_at        TIMESTAMPTZ,
+    crm            VARCHAR(16),
+    syntony_sent_at TIMESTAMPTZ,
     PRIMARY KEY (linkedid, phone)
 );
 
@@ -294,6 +298,11 @@ CDR_SCHEMA_MIGRATIONS = (
     # ответил), и робот пропущенных тогда решает по одним касаниям.
     "ALTER TABLE cdr_agent_state ADD COLUMN IF NOT EXISTS queue_calls JSONB",
     "ALTER TABLE cdr_agent_state ADD COLUMN IF NOT EXISTS queue_calls_at TIMESTAMPTZ",
+    # Переадресация пропущенных в Syntony (SALES-4, 23.11.2026): куда передавал робот и когда
+    # Syntony приняла заявку — номера заявки она не отдаёт. Без DEFAULT — колонки добавляются
+    # без переписывания таблицы, у старых строк пусто (это amoCRM).
+    "ALTER TABLE cdr_missed_leads ADD COLUMN IF NOT EXISTS crm VARCHAR(16)",
+    "ALTER TABLE cdr_missed_leads ADD COLUMN IF NOT EXISTS syntony_sent_at TIMESTAMPTZ",
 )
 
 

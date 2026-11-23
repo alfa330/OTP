@@ -117,6 +117,24 @@ def test_leads_between_is_half_open_and_carries_what_counting_needs(db):
                      'utm_campaign': 'iTaxi/16.09.2026', 'source': 'facebook'}
 
 
+def test_leads_between_leave_out_our_missed_call_requests(db):
+    # Заявку на перезвон заводит наш робот пропущенных (SALES-4) — это не лид: отбивка её не
+    # считает, как не считала сделки amoCRM с тегом «Пропущенный входящий». Тег формы
+    # выбирают в Syntony — здесь он нарочно «звонковый», чтобы без исключения попасть в «Звонки».
+    start = datetime(2026, 11, 23, 0, 0, tzinfo=timezone(timedelta(hours=5)))
+    db.upsert_syntony_leads([
+        lead('ours', start, source='website', created_by_channel='web_form',
+             tags='call_цр_missed', utm_source='icore', utm_medium='missed_call', utm_campaign=None),
+        lead('other_medium', start, utm_source='icore', utm_medium='site'),
+        lead('no_marks', start, source='phone', tags='call_jana_wb1', utm_source=None,
+             utm_medium=None, utm_campaign=None),
+        lead('fb', start),
+    ])
+    rows = db.get_syntony_leads_between(start, start + timedelta(hours=1))
+    assert sorted((r['utm_source'] or '', r['tags']) for r in rows) == [
+        ('', 'call_jana_wb1'), ('facebook', ''), ('icore', '')]
+
+
 def test_amo_leads_between_gives_time_and_campaign_for_twins(db, pg):
     t = datetime(2026, 11, 12, 4, 0, tzinfo=UTC)
     with pg.cursor() as cursor:

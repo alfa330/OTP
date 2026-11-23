@@ -37356,33 +37356,37 @@ async def olx_amo_retention_job():
                      removed, olx_amo_service.POLL_RUNS_KEEP_DAYS)
 
 
-# ── Пропущенные входящие → amoCRM (задача #291) ─────────────────────────────
+# ── Пропущенные входящие → CRM (задачи #291 и SALES-4) ──────────────────────
 # Непринятый входящий отдела продаж через минуту после отбоя, если клиент так и не
-# дозвонился, становится сделкой «Новая заявка» с тегом «Пропущенный входящий». Решение
+# дозвонился, становится сделкой «Новая заявка» с тегом «Пропущенный входящий» в amoCRM,
+# а с переадресации (SALES-4, CDR_MISSED_SYNTONY_ENABLED=1) — заявкой в Syntony. Решение
 # и запись — cdr/missed.py и cdr/missed_service.py; здесь только расписание.
 
 async def cdr_missed_amo_job():
     """Разбор пропущенных входящих — каждые 15 секунд.
 
     Свой пул из одного потока (missed_service.POOL), а не общий executor_pool: запрос в
-    amoCRM висит до минуты, а в общем пуле четыре места на всё приложение. Выключенный
-    робот (нет CDR_MISSED_AMO_ENABLED=1) не делает ничего — даже не ходит в базу."""
+    CRM висит до минуты, а в общем пуле четыре места на всё приложение. Выключенный
+    робот (нет CDR_MISSED_SYNTONY_ENABLED=1 и CDR_MISSED_AMO_ENABLED=1) не делает ничего —
+    даже не ходит в базу."""
     try:
+        from cdr import missed_config as cdr_missed_config
         from cdr import missed_service as cdr_missed_service
     except Exception:
-        logging.exception("Пропущенные→amoCRM: модуль не импортировался, цикл пропущен")
+        logging.exception("Пропущенные→CRM: модуль не импортировался, цикл пропущен")
         return
     if not cdr_missed_service.is_enabled():
         return
+    crm = cdr_missed_config.crm_label(cdr_missed_config.target())
     try:
         summary = await asyncio.get_event_loop().run_in_executor(
             cdr_missed_service.POOL, cdr_missed_service.run_cycle, db)
     except Exception as exc:
-        logging.error("Пропущенные→amoCRM: цикл не удался: %s", exc, exc_info=True)
+        logging.error("Пропущенные→%s: цикл не удался: %s", crm, exc, exc_info=True)
         return
     # В лог — только когда что-то решилось: цикл будит себя 5760 раз в сутки.
     if summary:
-        logging.info("Пропущенные→amoCRM: %s",
+        logging.info("Пропущенные→%s: %s", crm,
                      ', '.join('%s %s' % (key, value) for key, value in sorted(summary.items())))
 
 
@@ -60779,12 +60783,13 @@ if __name__ == '__main__':
     except Exception:
         logging.exception("Лиды OLX: планировщик НЕ подключён")
 
-    # ── Пропущенные входящие → amoCRM (задача #291) ─────────────────────────
+    # ── Пропущенные входящие → CRM (задачи #291 и SALES-4) ──────────────────
     # Каждые 15 секунд: ТЗ велит ждать после пропущенного звонка минуту, и решение должно
     # приходить вскоре после неё, а не через полчаса. max_instances=1 и свой пул из одного
     # потока — чтобы два цикла не разобрали один звонок дважды. Джоба заводится всегда и
-    # сама молчит, пока не задан CDR_MISSED_AMO_ENABLED=1.
+    # сама молчит, пока не задан CDR_MISSED_SYNTONY_ENABLED=1 или CDR_MISSED_AMO_ENABLED=1.
     try:
+        from cdr import missed_config as _cdr_missed_config
         from cdr import missed_service as _cdr_missed_service
 
         scheduler.add_job(
@@ -60796,11 +60801,16 @@ if __name__ == '__main__':
             coalesce=True
         )
         if _cdr_missed_service.is_enabled():
-            logging.info("⏰ Пропущенные→amoCRM: разбор каждые 15 секунд")
+            logging.info("⏰ Пропущенные→%s: разбор каждые 15 секунд",
+                         _cdr_missed_config.crm_label(_cdr_missed_config.target()))
+        elif _cdr_missed_config.target() == _cdr_missed_config.SYNTONY:
+            logging.error("⏰ Пропущенные→Syntony: робот включён, но нет ключа формы "
+                          "SYNTONY_LEADS_FORM_KEY — звонки никуда не передаются")
         else:
-            logging.info("⏰ Пропущенные→amoCRM: робот выключен (CDR_MISSED_AMO_ENABLED)")
+            logging.info("⏰ Пропущенные входящие: робот выключен "
+                         "(CDR_MISSED_SYNTONY_ENABLED / CDR_MISSED_AMO_ENABLED)")
     except Exception:
-        logging.exception("Пропущенные→amoCRM: планировщик НЕ подключён")
+        logging.exception("Пропущенные→CRM: планировщик НЕ подключён")
 
     # ── «Воронка ОП»: ночная выгрузка ────────────────────────────────────────
     # 05:20, а не полночь: к этому часу СРМ уже закрыла вчерашние сутки, а до

@@ -404,7 +404,7 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
             'max_period_days': sync.MAX_PERIOD_DAYS,
             'today': queries.today_almaty().isoformat(),
             # Робот пропущенных (задача #291): включён ли — от этого зависит, показывать ли
-            # фильтр «переданные в amoCRM», пока переданных за период ещё нет.
+            # фильтр «переданные в CRM», пока переданных за период ещё нет.
             'missed_amo': {'enabled': missed_config.enabled()},
         })
 

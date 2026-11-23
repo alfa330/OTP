@@ -12,7 +12,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import {
-    amoAnsweredNote, amoMark, hms, hours, lineCaption, percent, prettyPhone, reportParams,
+    amoAnsweredNote, amoMark, hms, hours, lineCaption, missedHint, percent, prettyPhone, reportParams,
     REPORTS, reportState, resultTone, ringSeconds, seconds, shortDay, shortTime, silence,
     splitCallType, TYPE_IN_BEFORE_QUEUE,
 } from './touchMeta';
@@ -91,15 +91,22 @@ const MODES = [
 
 const EMPTY_FILTERS = { result: '', ext: '', queue: '', park: '', talkedOnly: false, amoOnly: false };
 
-/* Метка робота пропущенных (задача #291): «в amoCRM» ссылкой на сделку или «не передан»,
-   если amoCRM её не приняла. Одна на таблицу и карточку телефона — чтобы подписи не
-   разъехались. */
+/* Метка робота пропущенных (задача #291, SALES-4): «в amoCRM» ссылкой на сделку, «в Syntony»
+   текстом (номера заявки Syntony не отдаёт — ссылаться не на что) или «не передан», если CRM
+   её не приняла. Одна на таблицу и карточку телефона — чтобы подписи не разъехались. */
 const AmoMark = ({ touch }) => {
     const mark = amoMark(touch);
     if (!mark) return null;
     if (mark.kind === 'error') {
         return (
             <div className="mt-1 text-[11.5px] font-medium text-rose-600" title={mark.title}>
+                {mark.label}
+            </div>
+        );
+    }
+    if (!mark.href) {
+        return (
+            <div className="mt-1 text-[11.5px] font-medium text-slate-500" title={mark.title}>
                 {mark.label}
             </div>
         );
@@ -329,7 +336,7 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
         filters.ext && { key: 'ext', label: `Номер ${filters.ext}` },
         filters.queue && { key: 'queue', label: `Очередь ${filters.queue}` },
         filters.talkedOnly && { key: 'talkedOnly', label: 'Только разговоры' },
-        filters.amoOnly && { key: 'amoOnly', label: 'Переданы в amoCRM' },
+        filters.amoOnly && { key: 'amoOnly', label: 'Переданы в CRM' },
         phone && { key: 'phone', label: `Телефон …${phone.slice(-4)}` },
     ].filter(Boolean);
 
@@ -361,10 +368,11 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
     const bridge = coverage.bridge || meta?.bridge || null;
     const bridgeDown = bridge && !bridge.connected;
 
-    /* Фильтр «переданные в amoCRM» — только там, где он может что-то найти: робот включён
-       или переданные за период уже есть. Иначе это обещание пустой таблицы. */
+    /* Фильтр «переданные в CRM» — только там, где он может что-то найти: робот включён
+       или переданные за период уже есть. Иначе это обещание пустой таблицы. CRM их две:
+       amoCRM до переадресации в Syntony (SALES-4) и Syntony после — фильтр берёт обе. */
     const amoFilterShown = Boolean(meta?.missed_amo?.enabled || summary.amo_transferred
-        || filters.amoOnly);
+        || summary.syntony_transferred || filters.amoOnly);
 
     return (
         /* Раздел тянется до 1480px: на 1240 таблица из десяти колонок упиралась в край
@@ -498,7 +506,7 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                                        onChange={(event) => applyFilters((prev) => ({
                                            ...prev, amoOnly: event.target.checked,
                                        }))} />
-                                <span className="text-[13px] text-slate-700">Только переданные в amoCRM</span>
+                                <span className="text-[13px] text-slate-700">Только переданные в CRM</span>
                             </label>
                         ) : null}
                     </div>
@@ -556,8 +564,7 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 <Metric label="Время разговоров" value={`${hours(summary.talk_seconds)} ч`} />
                 <Metric label="Исходящих" value={(summary.outgoing || 0).toLocaleString('ru-RU')} />
                 <Metric label="Входящих" value={(summary.incoming || 0).toLocaleString('ru-RU')}
-                        hint={`не приняли ${summary.incoming_missed || 0}${summary.amo_transferred
-                            ? ` · в amoCRM ${summary.amo_transferred.toLocaleString('ru-RU')}` : ''}`} />
+                        hint={missedHint(summary)} />
                 <Metric label="Клиентов" value={(summary.phones || 0).toLocaleString('ru-RU')}
                         hint={`${summary.operators || 0} внутр. номеров`} />
             </section>

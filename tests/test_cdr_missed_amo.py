@@ -142,11 +142,15 @@ class WriterReadTests(unittest.TestCase):
         self.assertEqual(writer.recent_own_lead(PHONE, 1790000000), 12)
 
 
-def touch_row(status=None, lead=None, reason=None, error=None):
-    """Строка выборки: восемнадцать колонок _COLUMNS и хвост журнала робота."""
+def touch_row(status=None, lead=None, reason=None, error=None, crm=None, syntony_at=None):
+    """Строка выборки: восемнадцать колонок _COLUMNS и хвост журнала робота (шесть колонок
+    _MISSED_COLUMNS: статус, сделка amoCRM, причина, ошибка, CRM, приём Syntony)."""
     return (datetime(2026, 9, 28, 10, 0, 0), None, PHONE, '6728', 'Входящий (не приняли)',
             'Занято', 0, 47, '3010', None, '1790571600.1', 1, datetime(2026, 9, 28, 10, 0, 7),
-            40, None, '', '7475550078', None, status, lead, reason, error)
+            40, None, '', '7475550078', None, status, lead, reason, error, crm, syntony_at)
+
+
+SYNTONY_AT = datetime(2026, 11, 23, 10, 1, 30)
 
 
 class TouchMarkTests(unittest.TestCase):
@@ -180,11 +184,51 @@ class TouchMarkTests(unittest.TestCase):
         self.assertEqual((touch['amo_state'], touch['amo_lead_id'], touch['amo_url']),
                          ('', None, ''))
 
+    def test_old_four_column_tail_still_reads_as_amo(self):
+        # Строки до переадресации (SALES-4) и выборки старой формы — хвост из четырёх колонок.
+        touch = queries._row_to_touch(touch_row('created', 57009999, 'За минуту…')[:22])
+        self.assertEqual((touch['amo_state'], touch['missed_crm'], touch['amo_lead_id']),
+                         ('sent', 'amo', 57009999))
+
+    # ── переадресация в Syntony (SALES-4) ─────────────────────────────────────
+
+    def test_syntony_accepted_is_sent_without_a_link(self):
+        touch = queries._row_to_touch(touch_row('created', None, 'За минуту…', None,
+                                                'syntony', SYNTONY_AT))
+        self.assertEqual((touch['amo_state'], touch['missed_crm']), ('sent', 'syntony'))
+        # Номера заявки Syntony не отдаёт — ссылки нет, и чужой ссылки amoCRM тоже.
+        self.assertEqual((touch['amo_lead_id'], touch['amo_url']), (None, ''))
+        self.assertEqual(touch['amo_note'], 'За минуту…')
+
+    def test_chained_call_resolved_in_syntony_is_sent(self):
+        touch = queries._row_to_touch(touch_row('chained', None, 'Клиент перезвонил…', None,
+                                                'syntony', SYNTONY_AT))
+        self.assertEqual((touch['amo_state'], touch['missed_crm']), ('sent', 'syntony'))
+
+    def test_syntony_failure_and_answer_name_syntony(self):
+        failed = queries._row_to_touch(touch_row('failed', None, 'За минуту…',
+                                                 'форма Syntony не найдена', 'syntony'))
+        self.assertEqual((failed['amo_state'], failed['missed_crm'], failed['amo_note']),
+                         ('error', 'syntony', 'форма Syntony не найдена'))
+        answered = queries._row_to_touch(touch_row('answered', None, 'Клиент…', None, 'syntony'))
+        self.assertEqual((answered['amo_state'], answered['missed_crm']), ('answered', 'syntony'))
+
+    def test_syntony_still_sending_shows_nothing(self):
+        touch = queries._row_to_touch(touch_row('sending', None, None, None, 'syntony'))
+        self.assertEqual(touch['amo_state'], '')
+
+    def test_amo_lead_wins_over_the_crm_column(self):
+        # Строка ушла в amoCRM, а повтор потом шёл уже под Syntony: сделка amoCRM есть —
+        # значит, ссылка на неё, а не «в Syntony».
+        touch = queries._row_to_touch(touch_row('created', 57009999, None, None, 'syntony'))
+        self.assertEqual((touch['missed_crm'], touch['amo_lead_id']), ('amo', 57009999))
+
     def test_filter_joins_the_journal_by_its_primary_key(self):
         sql = ' '.join(queries._FILTER_SQL.split())
         self.assertIn('LEFT JOIN cdr_missed_leads ml ON ml.linkedid = t.linkedid '
                       'AND ml.phone = t.phone', sql)
-        self.assertIn('(NOT %(amo_only)s OR ml.amo_lead_id IS NOT NULL)', sql)
+        self.assertIn('(NOT %(amo_only)s OR ml.amo_lead_id IS NOT NULL '
+                      'OR ml.syntony_sent_at IS NOT NULL)', sql)
         self.assertIn('PRIMARY KEY (linkedid, phone)', schema.CDR_SCHEMA_SQL.split(
             'cdr_missed_leads')[1], 'без первичного ключа JOIN размножил бы строки итогов')
 
@@ -198,10 +242,23 @@ class TouchMarkTests(unittest.TestCase):
                 self.sql = sql
 
             def fetchone(self):
-                return (10, 5, 3, 4, 3, 600, 2, 9, 5, 1, 2)
+                return (10, 5, 3, 4, 3, 600, 2, 9, 5, 1, 2, 7)
         cursor = Cursor()
-        self.assertEqual(queries.summary(cursor, None, None)['amo_transferred'], 2)
+        result = queries.summary(cursor, None, None)
+        self.assertEqual((result['amo_transferred'], result['syntony_transferred']), (2, 7))
         self.assertIn('ml.amo_lead_id IS NOT NULL', cursor.sql)
+        # Syntony считается без строк со сделкой amoCRM — одна передача не идёт в оба числа.
+        self.assertIn('ml.amo_lead_id IS NULL AND ml.syntony_sent_at IS NOT NULL', cursor.sql)
+
+    def test_summary_without_a_row_is_zeros(self):
+        class Cursor(object):
+            def execute(self, sql, params=None):
+                pass
+
+            def fetchone(self):
+                return None
+        result = queries.summary(Cursor(), None, None)
+        self.assertEqual((result['amo_transferred'], result['syntony_transferred']), (0, 0))
 
 
 class ExportTests(unittest.TestCase):
@@ -220,6 +277,16 @@ class ExportTests(unittest.TestCase):
         sheet = Workbook(write_only=True).create_sheet('Касания')
         index = [key for key, _t, _w in report.COLUMNS].index('amo_lead_id')
         self.assertIsNone(report._touch_row(sheet, touch)[index])
+
+    def test_syntony_transfer_is_named_in_the_same_column(self):
+        sheet = Workbook(write_only=True).create_sheet('Касания')
+        index = [key for key, _t, _w in report.COLUMNS].index('amo_lead_id')
+        self.assertEqual(report.COLUMNS[index][1], 'Сделка в CRM')
+        sent = queries._row_to_touch(touch_row('created', None, None, None, 'syntony', SYNTONY_AT))
+        self.assertEqual(report._touch_row(sheet, sent)[index], 'Syntony')
+        # Не принятая Syntony — пусто: «Syntony» в клетке значит «заявка там есть».
+        failed = queries._row_to_touch(touch_row('failed', None, None, 'HTTP 404', 'syntony'))
+        self.assertIsNone(report._touch_row(sheet, failed)[index])
 
 
 class StateTests(unittest.TestCase):
