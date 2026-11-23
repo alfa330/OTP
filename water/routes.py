@@ -14,7 +14,7 @@ Blueprint собирается фабрикой и получает зависи
 
 import logging
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import wraps
 
 from flask import Blueprint, jsonify, request, send_file
@@ -69,10 +69,11 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
     def water_route(rule, methods=('GET',), need=None):
         """Каркас роута: preflight, авторизация, контекст, гейты, ошибки.
 
-        need='issue'   — выдача воды (офисники из списка, руководитель, супер-админ);
-        need='manage'  — учёт целиком (руководитель регионов / фронт-офисов,
-                         супер-админ);
-        need='journal' — журнал выдач и его выгрузка (те же, что manage).
+        need='issue'    — выдача воды (офисники из списка, руководитель, супер-админ);
+        need='manage'   — учёт целиком (руководитель регионов / фронт-офисов,
+                          супер-админ);
+        need='journal'  — журнал выдач и его выгрузка (те же, что manage);
+        need='backfill' — приветственный блок задним числом (только супер-админ).
         """
         all_methods = tuple(methods) + ('OPTIONS',)
 
@@ -130,6 +131,11 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         return jsonify({
                             "error": "Журнал выдач видят руководитель и супер-админы",
                             "code": "WATER_JOURNAL_FORBIDDEN",
+                        }), 403
+                    if need == 'backfill' and not access.can_backfill(ctx):
+                        return jsonify({
+                            "error": "Вносить выдачу задним числом могут только супер-админы",
+                            "code": "WATER_BACKFILL_FORBIDDEN",
                         }), 403
                     return handler(*args, ctx=ctx, **kwargs)
                 except Exception as exc:  # noqa: BLE001
@@ -577,6 +583,192 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
                      count, issue['kind'], found['account_id'], office['name'], ctx.get('name'))
         return jsonify({"issue": issue, "office": office, "verdict": verdict_after}), 201
 
+    # ── Выдача задним числом ─────────────────────────────────────────────
+    # Владелец 23.11.2026: супер-админ вносит блок задним числом, «если
+    # офисник забыл нажать кнопку, а водитель уже выполняет заказы» — сперва
+    # приветственный, в тот же день и за активность («да, сделай»). Условия —
+    # rules.backfill_verdict, вписывание в историю офиса — queries.backfill_plan.
+    def _backfill_verdicts(cursor, found, settings, moment, fk_confirmed=None, period=None, before=None):
+        """Решения по обоим видам выдачи и история человека — одним чтением."""
+        history = queries.person_history(cursor, found['account_id'], found.get('iin'))
+        if before is None:
+            before = _backfill_before(cursor, found, moment)
+        verdicts = {kind: rules.backfill_verdict(
+            found, history, settings, kind=kind, moment=moment, prev=before['person'],
+            prev_account=before['account'], fk_confirmed=fk_confirmed, period=period)
+            for kind in schema.ISSUE_KINDS}
+        return verdicts, history
+
+    def _backfill_before(cursor, found, moment):
+        if not moment:
+            return {'person': None, 'account': None}
+        return queries.issues_before(cursor, found['account_id'], found.get('iin'), moment)
+
+    def _backfill_period(found, request):
+        """Заказы за даты из CRM для блока за активность — вне транзакции, как
+        _period у стойки. Отказ CRM — не ошибка ответа: поездки тогда «не меньше»."""
+        if not request:
+            return None
+        try:
+            count = count_orders(found['account_id'], request['date_from'], request['date_to'])
+        except water_driver.DriverLookupError as exc:
+            logging.warning('water: поездки водителя %s за %s–%s (задним числом) не получены: %s',
+                            found['account_id'], request['date_from'], request['date_to'], exc.code)
+            count = None
+        return dict(request, count=count)
+
+    @water_route('/backfill/check', methods=('POST',), need='backfill')
+    def water_backfill_check(ctx):
+        """ID водителя (и, если выбрано, время выдачи) → карточка CRM и можно ли
+        внести ему приветственный блок и блок за активность. Время нужно блоку за
+        активность: от него считаются дни с прошлой выдачи и поездки."""
+        data = _payload()
+        raw_moment = data.get('issued_at')
+        moment = _moment(raw_moment) if raw_moment not in (None, '') else None
+        if raw_moment not in (None, '') and not moment:
+            return _bad('Время выдачи — «ГГГГ-ММ-ДДTЧЧ:ММ»', 'WATER_MOMENT_REQUIRED')
+        found, error = _lookup(data.get('link') or data.get('account_id'))
+        if error:
+            return error
+        with db._get_cursor() as cursor:
+            if not schema.schema_is_ready(cursor):
+                return _not_ready()
+            settings = queries.get_settings(cursor)
+            before = _backfill_before(cursor, found, moment)
+        period = _backfill_period(found, rules.backfill_period_request(
+            found, settings, moment=moment, prev=before['person']))
+        with db._get_cursor() as cursor:
+            verdicts, history = _backfill_verdicts(cursor, found, settings, moment, period=period,
+                                                   before=before)
+        return jsonify({
+            "driver": water_driver.public(found),
+            "verdicts": verdicts,
+            "history": [_history_brief(item) for item in history[:5]],
+        })
+
+    @water_route('/backfill', methods=('POST',), need='backfill')
+    def water_backfill(ctx):
+        """Внести выдачу задним числом — приветственную или за активность.
+
+        Всё проверяется до первой записи (см. «ВАЖНО ПРО КОДЫ ОТВЕТОВ»), замки —
+        в том же порядке, что у выдачи: офис → водитель.
+        """
+        data = _payload()
+        kind = str(data.get('kind') or '').strip()
+        if not kind:
+            return _bad('Выберите вид выдачи', 'WATER_KIND_REQUIRED')
+        if kind not in schema.ISSUE_KINDS:
+            return _bad('Неизвестный вид выдачи', 'WATER_KIND_INVALID')
+        water_office_id = _int(data.get('water_office_id'))
+        if not water_office_id:
+            return _bad('Выберите офис, в котором выдали воду', 'WATER_OFFICE_REQUIRED')
+        moment = _moment(data.get('issued_at'))
+        if not moment:
+            return _bad('Укажите дату и время выдачи', 'WATER_MOMENT_REQUIRED')
+        now = queries.now_almaty()
+        if moment > now:
+            return _bad('Это время ещё не наступило — задним числом вносят только прошедшую выдачу',
+                        'WATER_MOMENT_FUTURE')
+        issuer_id = _int(data.get('issued_by'))
+        if not issuer_id:
+            return _bad('Выберите, кто выдал воду', 'WATER_ISSUER_REQUIRED')
+        requested = data.get('blocks')
+        blocks = _int(requested) if requested not in (None, '') else None
+        if requested not in (None, '') and (blocks is None or blocks < 1):
+            return _bad('Количество блоков — целое число от одного', 'WATER_BLOCKS_INVALID')
+        comment = _clean(data.get('comment'), _MAX_COMMENT)
+        # Отметка «ФК пройден» — только приветственному (как у стойки).
+        fk_confirmed = data.get('fk_confirmed') is True if kind == 'welcome' else None
+
+        found, error = _lookup(data.get('link') or data.get('account_id'))
+        if error:
+            return error
+        today_count, total_count = rules.orders_at(found, moment)
+
+        # Поездки, которые CRM считает только за даты, спрашиваем до
+        # транзакции; под замком прошлая выдача читается заново — успей она
+        # смениться (отмена, соседняя выдача), ответ на прежний запрос не годится.
+        period = None
+        if kind == 'activity':
+            with db._get_cursor() as cursor:
+                if not schema.schema_is_ready(cursor):
+                    return _not_ready()
+                settings = queries.get_settings(cursor)
+                before = _backfill_before(cursor, found, moment)
+            period = _backfill_period(found, rules.backfill_period_request(
+                found, settings, moment=moment, prev=before['person']))
+
+        outbox = []
+        try:
+            with db._get_cursor() as cursor:
+                if not schema.schema_is_ready(cursor) or not queries.access_ready(cursor):
+                    return _not_ready()
+                settings = queries.get_settings(cursor)
+                office = queries.read_office(cursor, water_office_id, settings, for_update=True)
+                if not office or not office['is_active']:
+                    return _bad('Офис не найден в учёте', 'WATER_OFFICE_NOT_FOUND', 404)
+                opened = rules.moment_of(office.get('created_at'))
+                if opened is not None and moment < opened:
+                    return _bad('Офис заведён в учёт %s — выдачу раньше этого не внести'
+                                % opened.strftime('%d.%m.%Y в %H:%M'), 'WATER_MOMENT_BEFORE_OFFICE')
+                issuer = next((person for person in queries.office_issuers(cursor, water_office_id)
+                               if person['id'] == issuer_id), None)
+                if not issuer:
+                    return _bad('Выдавшим можно указать только сотрудника, который выдаёт воду '
+                                'в этом офисе', 'WATER_ISSUER_UNKNOWN')
+                queries.lock_driver(cursor, found['account_id'], found.get('iin'))
+                before = _backfill_before(cursor, found, moment)
+                if kind == 'activity':
+                    request = rules.backfill_period_request(found, settings, moment=moment,
+                                                            prev=before['person'])
+                    if request and not rules.answers(period, request):
+                        return jsonify({"error": "Условия изменились — проверьте водителя ещё раз",
+                                        "code": "WATER_VERDICT_CHANGED"}), 409
+                verdicts, _history = _backfill_verdicts(cursor, found, settings, moment,
+                                                        fk_confirmed=fk_confirmed, period=period,
+                                                        before=before)
+                verdict = verdicts[kind]
+                if not verdict['allowed']:
+                    return jsonify({
+                        "error": 'Внести нельзя: %s' % '; '.join(
+                            _lower_first(reason) for reason in verdict['reasons']),
+                        "code": "WATER_NOT_ELIGIBLE",
+                        "verdict": verdict,
+                    }), 409
+                count = blocks if blocks is not None else verdict['blocks_max']
+                if count > verdict['blocks_max']:
+                    return _bad('За одну выдачу — не больше %s'
+                                % rules.blocks_genitive(verdict['blocks_max']), 'WATER_BLOCKS_TOO_MANY')
+                plan = queries.backfill_plan(cursor, water_office_id, moment, count)
+                shortage = plan['shortage']
+                if shortage:
+                    at = rules.moment_of(shortage['at'])
+                    return _bad('%s в офисе было %s — столько воды тогда не выдать' % (
+                        at.strftime('На %d.%m.%Y %H:%M') if at else 'Тогда',
+                        rules.blocks_word(shortage['stock'])), 'WATER_STOCK_SHORT', 409)
+                # Строки журнала сошлись, а остаток офиса — нет: увести его в
+                # минус не даст и CHECK, но отказ должен быть словами.
+                if not plan['recount'] and int(office['stock']) < count:
+                    return _bad('Сейчас в офисе %s — выдача задним числом увела бы остаток в минус'
+                                % rules.blocks_word(int(office['stock'])), 'WATER_STOCK_SHORT', 409)
+                before = int(office['stock'])
+                queries.apply_backfill_shift(cursor, office, plan, count)
+                info = water_driver.snapshot_at(found, moment, today=today_count,
+                                                total=total_count, entered_at=now)
+                issue = queries.create_backfill_issue(
+                    cursor, office, found, verdict, blocks=count, moment=moment,
+                    stock_after=plan['stock_after'], orders_total=total_count, info=info,
+                    issuer=issuer, actor=_actor(ctx), comment=comment)
+                office = queries.read_office(cursor, water_office_id, settings)
+                _queue_buy_alert(cursor, office, before, office['stock'], settings, outbox)
+        except _UNIQUE_VIOLATION:
+            return _bad('Приветственный блок этому водителю уже выдан', 'WATER_WELCOME_TAKEN', 409)
+        _flush(outbox)
+        logging.info('Вода: задним числом внесено %s (%s) водителю %s в «%s» на %s, '
+                     'выдал(а) %s, внёс(ла) %s', count, kind, found['account_id'], office['name'],
+                     moment.strftime('%d.%m.%Y %H:%M'), issuer.get('name'), ctx.get('name'))
+        return jsonify({"issue": issue, "office": office, "recount": plan['recount']}), 201
+
     @water_route('/issues/<int:issue_id>/cancel', methods=('POST',), need='manage')
     def water_issue_cancel(issue_id, ctx):
         """Отменить ошибочную выдачу (01.10.2026): не тот водитель, не тот офис,
@@ -846,6 +1038,21 @@ def _date(value):
 def _clean(value, limit):
     text = str(value or '').strip()
     return text[:limit] if text else None
+
+
+_MOMENT_RE = re.compile(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?$')
+
+
+def _moment(value):
+    """«ГГГГ-ММ-ДДTЧЧ:ММ» — местное время Алматы, как created_at журнала. До минуты:
+    секунды в форме не выбирают."""
+    text = str(value or '').strip()
+    if not _MOMENT_RE.match(text):
+        return None
+    try:
+        return datetime.fromisoformat(text.replace(' ', 'T')).replace(second=0, microsecond=0)
+    except ValueError:
+        return None
 
 
 def _period_json(date_from, date_to):

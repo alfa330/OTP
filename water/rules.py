@@ -252,22 +252,7 @@ def evaluate(driver, history, settings, *, today, stock=None, fk_confirmed=None,
     if is_new:
         verdict['trips'] = 0
         verdict['trips_basis'] = BASIS_NEW
-        if welcome:
-            reasons.append('Приветственный блок уже выдан %s%s' % (
-                ru_date(welcome.get('created_at')),
-                (' в офисе «%s»' % welcome['office_name']) if welcome.get('office_name') else ''))
-        fk_status = str((driver.get('photo_control') or {}).get('status') or '').strip().lower()
-        if fk_status == 'passed':
-            verdict['fk'] = FK_PASSED
-        elif fk_status:
-            verdict['fk'] = FK_FAILED
-            reasons.append('ФК не пройден — в CRM статус «%s»' % fk_status)
-        elif fk_confirmed:
-            verdict['fk'] = FK_CONFIRMED
-        else:
-            verdict['fk'] = FK_UNKNOWN
-            if fk_confirmed is False:
-                reasons.append('Подтвердите, что водитель прошёл ФК')
+        _check_welcome(driver, welcome, verdict, reasons, fk_confirmed)
     else:
         state = _activity(driver, last, settings, today)
         verdict['next_date'] = state['next_date']
@@ -309,6 +294,275 @@ def evaluate(driver, history, settings, *, today, stock=None, fk_confirmed=None,
     verdict['blocks_max'] = blocks if not reasons else 0
     verdict['allowed'] = not reasons and blocks > 0
     return verdict
+
+
+def _check_welcome(driver, welcome, verdict, reasons, fk_confirmed):
+    """Условия приветственного блока, кроме «ни одного заказа»: блок один на
+    человека, ФК пройден. Общие для выдачи у стойки и выдачи задним числом —
+    второй копии этих условий быть не должно."""
+    if welcome:
+        reasons.append('Приветственный блок уже выдан %s%s' % (
+            ru_date(welcome.get('created_at')),
+            (' в офисе «%s»' % welcome['office_name']) if welcome.get('office_name') else ''))
+    fk_status = str((driver.get('photo_control') or {}).get('status') or '').strip().lower()
+    if fk_status == 'passed':
+        verdict['fk'] = FK_PASSED
+    elif fk_status:
+        verdict['fk'] = FK_FAILED
+        reasons.append('ФК не пройден — в CRM статус «%s»' % fk_status)
+    elif fk_confirmed:
+        verdict['fk'] = FK_CONFIRMED
+    else:
+        verdict['fk'] = FK_UNKNOWN
+        if fk_confirmed is False:
+            reasons.append('Подтвердите, что водитель прошёл ФК')
+
+
+def _orders_list(driver):
+    """Список заказов CRM «7 дней» и с какого момента он полон.
+
+    `start` — начало окна списка (у обрезанного на 500 заказах — самый старый
+    из них): заказы не раньше него в списке все. `complete` — в списке вообще
+    все заказы аккаунта: первый заказ CRM (`first_order_at`) не раньше начала
+    списка, то есть до окна заказов не было (новый водитель). Нет списка
+    (старый ответ CRM) — None: «нет данных», а не «ноль заказов».
+    """
+    times = driver.get('order_times')
+    if times is None:
+        return None
+    orders = driver.get('orders') or {}
+    moments = [item for item in map(moment_of, times) if item is not None]
+    truncated = bool(orders.get('week_truncated'))
+    start = (min(moments) if moments else None) if truncated else moment_of(orders.get('window_from'))
+    first = moment_of(orders.get('first_order_at'))
+    complete = bool(not truncated and start is not None and first is not None and first >= start)
+    return {'moments': moments, 'start': start, 'complete': complete}
+
+
+def _covers(listing, since):
+    """Все ли заказы начиная с `since` есть в списке."""
+    if listing is None:
+        return False
+    return listing['complete'] or (listing['start'] is not None and listing['start'] <= since)
+
+
+def _kind_verdict(kind, driver, settings, reasons):
+    program = [str(code) for code in (settings.get('tariffs') or [])]
+    tariffs = [str(code) for code in (driver.get('tariffs') or [])]
+    matched = [code for code in tariffs if code in program]
+    if not matched:
+        reasons.append('Тариф не входит в программу — выдаётся на тарифах: %s'
+                       % _program_label(settings))
+    return {
+        'kind': kind,
+        'allowed': False,
+        'blocks_max': 0,
+        'reasons': reasons,
+        'matched_tariffs': matched,
+        'trips': None,
+        'trips_basis': None,
+        'fk': None,
+    }
+
+
+def backfill_verdict(driver, history, settings, *, kind='welcome', moment=None, prev=None,
+                     prev_account=None, fk_confirmed=None, period=None):
+    """Выдача задним числом: можно ли её внести.
+
+    Владелец 23.11.2026: супер-админ вносит блок задним числом, «если офисник
+    забыл нажать кнопку, а водитель уже выполняет заказы»; в тот же день —
+    «да, сделай» и для блока за активность. Хватало ли воды в офисе на тот
+    момент, проверяет роут по истории офиса — от неё и считается остаток.
+
+    ПРИВЕТСТВЕННЫЙ. У стойки такого водителя система считает действующим
+    (заказов больше нуля), и приветственный ему не выдать. Здесь это условие
+    снято — и только оно: заказы водитель делал уже после выдачи. Остальное —
+    как у стойки: тариф программы, один блок на человека, ФК. И выдачи на этом
+    же аккаунте раньше момента быть не должно: тогда аккаунт уже не был новым.
+    Выдача на ДРУГОМ аккаунте того же человека не мешает — в новом парке у
+    водителя новый аккаунт без заказов, и приветственный ему у стойки положен.
+
+    ЗА АКТИВНОСТЬ. Те же условия, что у стойки, — на момент выдачи: тариф
+    программы, не меньше `cooldown_days` календарных дней с прошлой выдачи
+    человека до этой и `min_trips` поездок — с прошлой выдачи до этой, а без
+    прошлой — за 7 дней до неё. Поездки — по времени заказов из списка CRM, а
+    чего в списке нет — запросом CRM за даты (backfill_period_request, `period`).
+    Отказ — только доказанный: точное число меньше порога или «не больше N»
+    меньше порога. Где доказать нечем, «нет данных» запретом не считается —
+    экран показывает «не меньше N» (`trips_exact` = False).
+
+    history — живые выдачи человека (по аккаунту или ИИН), новые первыми.
+    moment  — когда выдали; None — время ещё не выбрано (предпросмотр): у
+              блока за активность тогда нет ни дней, ни поездок (`needs_moment`).
+    prev    — последняя живая выдача человека до момента (queries.issues_before);
+    prev_account — она же, но только на этом аккаунте.
+    fk_confirmed — как в evaluate: None — предпросмотр, False на записи — отказ.
+    period  — ответ CRM на backfill_period_request (только блоку за активность).
+    """
+    history = list(history or [])
+    reasons = []
+    verdict = _kind_verdict(kind, driver, settings, reasons)
+    when = moment_of(moment)
+    if kind == 'activity':
+        verdict.update(_backfill_activity(driver, settings, when, prev, reasons, period=period))
+        blocks = int(settings.get('activity_blocks') or 1)
+    else:
+        welcome = next((item for item in history if item.get('kind') == 'welcome'), None)
+        verdict.update(trips=0, trips_basis=BASIS_NEW, welcome_issue=issue_brief(welcome))
+        _check_welcome(driver, welcome, verdict, reasons, fk_confirmed)
+        if when is not None and not welcome and prev_account:
+            reasons.append('На этом аккаунте вода уже выдавалась %s — приветственный блок может '
+                           'быть только раньше первой выдачи' % ru_date(prev_account.get('created_at')))
+        blocks = int(settings.get('welcome_blocks') or 1)
+    ready = when is not None or kind != 'activity'
+    verdict['blocks_max'] = blocks if ready and not reasons else 0
+    verdict['allowed'] = ready and not reasons
+    return verdict
+
+
+def _list_trips(listing, since, frm, when):
+    """Поездки по списку CRM: с прошлой выдачи (since) или с начала недели (frm)
+    до момента. None — списка нет. Точное ли это число, решает _covers."""
+    if listing is None:
+        return None
+    if since is not None:
+        return sum(1 for item in listing['moments'] if since < item < when)
+    return sum(1 for item in listing['moments'] if frm <= item < when)
+
+
+def backfill_period_request(driver, settings, *, moment, prev):
+    """Запрос CRM «заказы за даты» для поездок блока за активность задним
+    числом — или None, если он ничего не даст.
+
+    Блок за активность выдают не чаще раза в `cooldown_days` дней, а список
+    CRM — это последние 7 дней. Поэтому отрезок «с прошлой выдачи до этой»
+    почти никогда не лежит в списке целиком. Его досчитывает CRM за календарные
+    даты, как у стойки (_activity / period_request): со дня прошлой выдачи по
+    день этой, минус заказы дня прошлой ДО неё (`orders.today` её снимка) и
+    заказы дня этой ПОСЛЕ неё (по списку — если он доходит до момента).
+    `bound` — что даст ответ: 'exact' — точное число; 'lower' — не меньше
+    (чего-то из двух вычетов не знаем — день отбрасывается целиком); 'upper' —
+    не больше (без прошлой выдачи: «7 суток до выдачи» по датам не отрезать,
+    первый день идёт целиком).
+
+    В отличие от стойки, точное число спрашивается и тогда, когда порог уже
+    набран по списку: внос задним числом редок, а в колонке «Заказы» журнала
+    должно стоять число, а не «—». Не спрашивается, когда ответ ничего не
+    добавит: список и так точен; «не меньше» по CRM при пороге, уже набранном
+    списком; «не больше» без порога или при пороге, уже набранном списком.
+    """
+    when = moment_of(moment)
+    if when is None:
+        return None
+    need = int(settings.get('min_trips') or 0)
+    listing = _orders_list(driver)
+    since = moment_of(prev.get('created_at')) if prev else None
+    if prev and since is None:
+        return None
+    frm = since if since is not None else when - timedelta(days=7)
+    if _covers(listing, frm):
+        return None
+    lower = _list_trips(listing, since, frm, when)
+    proven = bool(need and lower is not None and lower >= need)
+    after = (sum(1 for item in listing['moments'] if item >= when and item.date() == when.date())
+             if _covers(listing, when) else None)
+    if since is not None:
+        same = (prev.get('driver_account_id') or '') == (driver.get('account_id') or '')
+        before = as_count(prev.get('orders_today')) if same else None
+        first_day = since.date() if before is not None else since.date() + timedelta(days=1)
+        bound = 'exact' if before is not None and after is not None else 'lower'
+        if bound == 'lower' and proven:
+            return None
+    else:
+        # Без прошлой выдачи нужен конец ровно в момент: иначе ни «не больше», ни «не меньше».
+        if after is None or not need or proven:
+            return None
+        before = None
+        first_day = frm.date()
+        bound = 'upper'
+    last_day = when.date() if after is not None else when.date() - timedelta(days=1)
+    if first_day > last_day:
+        return None
+    return {'issue_id': prev.get('id') if prev else None, 'date_from': first_day.isoformat(),
+            'date_to': last_day.isoformat(), 'subtract': (before or 0) + (after or 0), 'bound': bound}
+
+
+def _backfill_activity(driver, settings, when, prev, reasons, period=None):
+    """Блок за активность на момент `when` — дни и поездки (см. backfill_verdict).
+
+    period — ответ CRM на backfill_period_request (тот же словарь плюс `count`,
+    None — CRM не ответила); ответ на другой запрос не годится."""
+    need = int(settings.get('min_trips') or 0)
+    cooldown = int(settings.get('cooldown_days') or 0)
+    state = {'last_issue': issue_brief(prev), 'needs_moment': when is None, 'min_trips': need,
+             'cooldown_days': cooldown, 'trips_exact': None, 'trips_from': None, 'trips_upper': None}
+    if when is None:
+        return state
+    since = moment_of(prev.get('created_at')) if prev else None
+    if since is not None and cooldown:
+        passed = (when.date() - since.date()).days
+        if passed < cooldown:
+            verb = 'прошёл' if plural(passed, 1, 2, 5) == 1 else 'прошло'
+            reasons.append('К этой выдаче с прошлой (%s) %s %s из %d' % (
+                ru_date(since), verb, days_word(max(0, passed)), cooldown))
+    frm = since if since is not None else when - timedelta(days=7)
+    where = 'с прошлой выдачи до этой' if since is not None else 'за 7 дней до этой выдачи'
+    state['trips_basis'] = BASIS_SINCE_LAST if since is not None else BASIS_WEEK
+    listing = _orders_list(driver)
+    trips = _list_trips(listing, since, frm, when)
+    exact = _covers(listing, frm)
+    upper = None
+    request = None if exact else backfill_period_request(
+        driver, settings, moment=when, prev=prev)
+    if request and answers(period, request):
+        count = as_count(period.get('count'))
+        value = count - request['subtract'] if count is not None else None
+        # Заказов за даты меньше, чем вычитаем, — данные CRM противоречат друг
+        # другу: такое число не берём (как у стойки).
+        if value is not None and value >= 0:
+            if request['bound'] == 'exact':
+                trips, exact = value, True
+            elif request['bound'] == 'lower':
+                trips = max(trips or 0, value)
+            else:
+                upper = value
+    state.update(trips=trips, trips_exact=exact, trips_upper=upper)
+    if not exact and listing is not None and listing['start'] is not None:
+        state['trips_from'] = listing['start'].isoformat()
+    if not need:
+        return state
+    if exact and trips is not None and trips < need:
+        reasons.append('Менее %d %s %s — было %d' % (
+            need, plural(need, 'поездки', 'поездок', 'поездок'), where, trips))
+    elif upper is not None and upper < need:
+        reasons.append('Менее %d %s %s — было не больше %d' % (
+            need, plural(need, 'поездки', 'поездок', 'поездок'), where, upper))
+    return state
+
+
+def orders_at(driver, moment):
+    """Заказы водителя на момент выдачи задним числом — из списка CRM «7 дней».
+
+    Выдача хранит снимок CRM, и следующая выдача берёт из него `orders.today`
+    — сколько заказов водитель сделал в день выдачи ДО неё (_activity). У
+    выдачи задним числом снимок снят позже, и его `today` — заказы другого дня.
+    Поэтому день восстанавливается по времени заказов: (`today`, `total`) на
+    тот момент. Где список не покрывает нужного отрезка (выдача раньше окна
+    CRM или список обрезан), число не выдумывается — None, «нет данных»:
+    следующая выдача тогда день прошлой не считает вовсе.
+    """
+    when = moment_of(moment)
+    listing = _orders_list(driver)
+    if when is None or listing is None:
+        return None, None
+    moments = listing['moments']
+    day_start = datetime(when.year, when.month, when.day)
+    today = (sum(1 for item in moments if day_start <= item < when)
+             if _covers(listing, day_start) else None)
+    total = (driver.get('orders') or {}).get('total')
+    total = (max(0, int(total) - sum(1 for item in moments if item >= when))
+             if total is not None and _covers(listing, when) else None)
+    return today, total
 
 
 def period_request(driver, history, settings, *, today):

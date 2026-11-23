@@ -100,6 +100,12 @@ class Store:
         self.access_reads = []
         self.people = [{'id': ISSUER, 'name': 'Сотрудник 424', 'city': 'Алматы'},
                        {'id': 425, 'name': 'Сотрудник 425', 'city': 'Астана'}]
+        # Выдача задним числом: остаток на момент (None — как сейчас в офисе),
+        # пересчёт после момента, вызовы плана и сдвига.
+        self.plan_stock = None
+        self.plan_recount = None
+        self.plan_calls = []
+        self.shifts = []
 
     # офисы
     def add(self, stock=50, active=True, own_low=None, own_buy=None, wiki_id=47):
@@ -215,6 +221,58 @@ class Store:
         self.issues.append(item)
         return dict(item, created_at=NOW.isoformat())
 
+    # выдача задним числом: SQL плана проверяет test_water_backfill_postgres.py,
+    # здесь план — заготовка теста (остаток до, пересчёт, нехватка).
+    def backfill_plan(self, cursor, water_office_id, moment, blocks):
+        self.plan_calls.append((water_office_id, moment, blocks))
+        before = self.offices[water_office_id]['stock'] if self.plan_stock is None else self.plan_stock
+        plan = {'stock_before': before, 'stock_after': before - blocks, 'issue_ids': [],
+                'intake_ids': [], 'recount': self.plan_recount, 'shortage': None}
+        if before - blocks < 0:
+            plan['shortage'] = {'at': moment.isoformat(), 'stock': before}
+        return plan
+
+    def apply_backfill_shift(self, cursor, office, plan, blocks):
+        self.shifts.append((office['id'], blocks, plan['recount']))
+        if not plan['recount']:
+            self.offices[office['id']]['stock'] -= blocks
+
+    def create_backfill_issue(self, cursor, office, driver, verdict, blocks, moment, stock_after,
+                              orders_total, info, issuer, actor, comment):
+        if self.fail_welcome_unique:
+            from psycopg2 import errors
+            raise errors.UniqueViolation('uq_water_welcome_account')
+        item = {
+            'id': len(self.issues) + 1, 'water_office_id': office['id'], 'city': office['city'],
+            'office_name': office['name'], 'kind': verdict['kind'], 'blocks': blocks,
+            'stock_after': stock_after, 'driver_account_id': driver['account_id'],
+            'driver_iin': driver.get('iin'), 'driver_name': driver.get('name'),
+            'orders_total': orders_total,
+            'orders_counted': verdict['trips'] if verdict.get('trips_exact') is not False else None,
+            'orders_basis': verdict['trips_basis'] if verdict.get('trips_exact') is not False else None,
+            'fk_source': verdict.get('fk') if verdict['kind'] == 'welcome' else None,
+            'issued_by': issuer['id'], 'issued_by_name': issuer.get('name'), 'created_at': moment,
+            'backfilled_at': NOW, 'backfilled_by': actor['user_id'],
+            'backfilled_by_name': actor.get('name'), 'backfill_comment': comment, 'driver_info': info,
+        }
+        self.issues.append(item)
+        return dict(item, created_at=moment.isoformat(), backfilled_at=NOW.isoformat())
+
+    def issues_before(self, cursor, account_id, iin, moment):
+        live = [item for item in self.issues if not item.get('canceled_at') and item['created_at'] < moment]
+        person = [item for item in live if item['driver_account_id'] == account_id
+                  or (iin and item.get('driver_iin') == iin)]
+        account = [item for item in live if item['driver_account_id'] == account_id]
+        latest = lambda rows: max(rows, key=lambda item: item['created_at']) if rows else None  # noqa: E731
+        return {'person': latest(person), 'account': latest(account)}
+
+    def office_issuers(self, cursor, water_office_id):
+        known = {person['id']: person for person in self.people}
+        if self.grants is None:
+            return list(self.people)
+        return [known[user] for user, office in sorted(self.grants)
+                if office == water_office_id and user in known]
+
     def list_issues(self, cursor, filters, limit=50, offset=0):
         return list(self.issues), len(self.issues)
 
@@ -315,7 +373,8 @@ class _Base(unittest.TestCase):
                      'issue_for_cancel', 'cancel_issue',
                      'dashboard', 'notify_candidates', 'front_office_head_ids',
                      'notify_recipients', 'access_ready', 'issue_office_ids', 'access_state',
-                     'apply_access_changes'):
+                     'apply_access_changes', 'backfill_plan', 'apply_backfill_shift',
+                     'create_backfill_issue', 'office_issuers', 'issues_before'):
             patches[name] = getattr(store, name)
         patcher = mock.patch.multiple(water_queries, **patches)
         patcher.start()
@@ -1441,6 +1500,278 @@ class OfficeAccessManageTests(_Base):
         self.crm = crm_driver(account='d' * 32, iin='900101300124')
         response = self.issue(water_office_id=self.astana, link=self.crm['account_id'])
         self.assertEqual(response.status_code, 403)
+
+
+def super_admin():
+    return person(role='super_admin', department_code='szov', user_id=1)
+
+
+class BackfillTests(_Base):
+    """Приветственный блок задним числом (владелец 23.11.2026): «супер-админам
+    добавлять такие блоки задним числом, в случае если офисник забыл нажать
+    кнопку, а водитель уже выполняет заказы»."""
+
+    MOMENT = '2026-09-29T12:00'
+
+    def setUp(self):
+        super().setUp()
+        self.viewer = super_admin()
+        self.office = self.store.add(stock=50, wiki_id=49)
+        self.store.offices[self.office]['created_at'] = NOW - timedelta(days=30)
+        self.store.grants = {(425, self.office)}
+        # Водитель уже выполняет заказы: у стойки ему приветственный не выдать.
+        self.crm = crm_driver(total=8, week=8)
+
+    def backfill(self, **body):
+        body.setdefault('kind', 'welcome')
+        body.setdefault('link', ACCOUNT)
+        body.setdefault('water_office_id', self.office)
+        body.setdefault('issued_at', self.MOMENT)
+        body.setdefault('issued_by', 425)
+        body.setdefault('fk_confirmed', True)
+        return self.client.post('/api/water/backfill', json=body)
+
+    def assertNothingWritten(self):
+        self.assertEqual(self.store.issues, [])
+        self.assertEqual(self.store.shifts, [])
+        self.assertEqual(self.store.offices[self.office]['stock'], 50)
+
+    def test_only_super_admins(self):
+        for viewer in (manager(), person(user_id=425), person(department_code='szov')):
+            self.viewer = viewer
+            for response in (self.client.post('/api/water/backfill/check', json={'link': ACCOUNT}),
+                             self.backfill()):
+                self.assertEqual(response.status_code, 403, viewer)
+                self.assertIn(response.get_json()['code'], ('WATER_BACKFILL_FORBIDDEN', 'WATER_SECTION_CLOSED'))
+        self.assertNothingWritten()
+
+    def test_ping_tells_the_screen_who_may_backfill(self):
+        self.assertTrue(self.client.get('/api/water/ping').get_json()['capabilities']['can_backfill'])
+        self.viewer = manager()
+        self.assertFalse(self.client.get('/api/water/ping').get_json()['capabilities']['can_backfill'])
+
+    def test_check_allows_the_welcome_block_to_a_driver_with_orders(self):
+        counter = self.client.post('/api/water/check', json={'link': ACCOUNT}).get_json()
+        self.assertEqual(counter['verdict']['kind'], 'activity')
+        response = self.client.post('/api/water/backfill/check', json={'link': ACCOUNT})
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        welcome = data['verdicts']['welcome']
+        self.assertTrue(welcome['allowed'], welcome)
+        self.assertEqual((welcome['kind'], welcome['fk']), ('welcome', 'unknown'))
+        self.assertNotIn('iin', data['driver'])
+        # Блоку за активность без времени выдачи судить не по чему.
+        self.assertTrue(data['verdicts']['activity']['needs_moment'])
+        self.assertFalse(data['verdicts']['activity']['allowed'])
+
+    def test_block_is_written_at_the_moment_on_the_issuer_by_the_super_admin(self):
+        response = self.backfill(comment='Забыли нажать «Выдать»')
+        self.assertEqual(response.status_code, 201, response.get_json())
+        item = self.store.issues[0]
+        self.assertEqual(item['created_at'], datetime(2026, 9, 29, 12, 0))
+        self.assertEqual((item['kind'], item['blocks'], item['orders_counted'], item['orders_basis']),
+                         ('welcome', 1, 0, 'new'))
+        self.assertEqual((item['issued_by'], item['issued_by_name']), (425, 'Сотрудник 425'))
+        self.assertEqual((item['backfilled_by'], item['backfill_comment']), (1, 'Забыли нажать «Выдать»'))
+        self.assertEqual(item['fk_source'], 'confirmed')
+        self.assertEqual(item['stock_after'], 49)
+        self.assertEqual(self.store.offices[self.office]['stock'], 49)
+        self.assertEqual(response.get_json()['office']['stock'], 49)
+        self.assertIn((ACCOUNT, '900101300123'), self.store.locks)
+        self.assertEqual(self.store.plan_calls, [(self.office, datetime(2026, 9, 29, 12, 0), 1)])
+        self.assertEqual(item['driver_info']['_backfill']['moment'], '2026-09-29 12:00:00')
+
+    def test_fields_are_required(self):
+        for body, code in (({'kind': ''}, 'WATER_KIND_REQUIRED'),
+                           ({'kind': 'gift'}, 'WATER_KIND_INVALID'),
+                           ({'water_office_id': None}, 'WATER_OFFICE_REQUIRED'),
+                           ({'issued_at': ''}, 'WATER_MOMENT_REQUIRED'),
+                           ({'issued_at': '29.09.2026 12:00'}, 'WATER_MOMENT_REQUIRED'),
+                           ({'issued_at': '2026-02-30T12:00'}, 'WATER_MOMENT_REQUIRED'),
+                           ({'issued_by': None}, 'WATER_ISSUER_REQUIRED'),
+                           ({'blocks': 0}, 'WATER_BLOCKS_INVALID')):
+            response = self.backfill(**body)
+            self.assertEqual(response.status_code, 400, body)
+            self.assertEqual(response.get_json()['code'], code, body)
+        self.assertNothingWritten()
+
+    def test_future_is_not_backfill(self):
+        response = self.backfill(issued_at='2026-09-30T12:01')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'WATER_MOMENT_FUTURE')
+        self.assertEqual(self.backfill(issued_at='2026-09-30T12:00').status_code, 201)
+
+    def test_not_before_the_office_was_in_the_program(self):
+        response = self.backfill(issued_at='2026-08-30T11:59')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'WATER_MOMENT_BEFORE_OFFICE')
+        self.assertIn('31.08.2026 в 12:00', response.get_json()['error'])
+        self.assertNothingWritten()
+
+    def test_issuer_is_someone_who_issues_in_that_office(self):
+        response = self.backfill(issued_by=ISSUER)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'WATER_ISSUER_UNKNOWN')
+        self.assertNothingWritten()
+
+    def test_welcome_already_given_is_refused_and_writes_nothing(self):
+        self.store.issues.append({'id': 7, 'water_office_id': self.office, 'kind': 'welcome', 'blocks': 1,
+                                  'driver_account_id': ACCOUNT, 'driver_iin': '900101300123',
+                                  'office_name': 'Офис Астана', 'created_at': NOW - timedelta(days=3)})
+        response = self.backfill()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['code'], 'WATER_NOT_ELIGIBLE')
+        self.assertEqual(response.get_json()['error'],
+                         'Внести нельзя: приветственный блок уже выдан 27.09.2026 в офисе «Офис Астана»')
+        self.assertEqual(len(self.store.issues), 1)
+        self.assertEqual(self.store.shifts, [])
+
+    def test_fk_must_be_confirmed_when_crm_does_not_know_it(self):
+        response = self.backfill(fk_confirmed=None)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('подтвердите, что водитель прошёл ФК', response.get_json()['error'])
+        self.assertNothingWritten()
+
+    def test_no_water_at_that_moment_is_refused(self):
+        self.store.plan_stock = 0
+        response = self.backfill()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['code'], 'WATER_STOCK_SHORT')
+        self.assertEqual(response.get_json()['error'],
+                         'На 29.09.2026 12:00 в офисе было 0 блоков — столько воды тогда не выдать')
+        self.assertNothingWritten()
+
+    def test_later_recount_keeps_the_office_stock(self):
+        """Пересчёт после момента уже насчитал полку без этого блока — остаток
+        офиса не трогаем, разницу принимает пересчёт (SQL — postgres-тест)."""
+        self.store.plan_recount = {'id': 3, 'created_at': '2026-09-30T09:00:00', 'delta': -1, 'stock_after': 50}
+        response = self.backfill()
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(self.store.offices[self.office]['stock'], 50)
+        self.assertEqual(response.get_json()['recount']['id'], 3)
+
+    def test_race_for_the_welcome_block_is_a_clear_refusal(self):
+        self.store.fail_welcome_unique = True
+        response = self.backfill()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['code'], 'WATER_WELCOME_TAKEN')
+        self.assertGreater(self.db.rollbacks, 0)
+
+    def test_crossing_the_buy_threshold_tells_telegram(self):
+        self.store.offices[self.office]['stock'] = 11
+        self.assertEqual(self.backfill().status_code, 201)
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][0], 555)
+
+    def _issue(self, kind, at, account=ACCOUNT):
+        self.store.issues.append({
+            'id': len(self.store.issues) + 1, 'water_office_id': self.office, 'kind': kind, 'blocks': 1,
+            'driver_account_id': account, 'driver_iin': '900101300123', 'office_name': 'Офис Астана',
+            'created_at': at, 'orders_today': None})
+
+    def test_activity_block_is_written_without_fk(self):
+        response = self.backfill(kind='activity', fk_confirmed=None)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        item = self.store.issues[0]
+        self.assertEqual((item['kind'], item['fk_source'], item['created_at']),
+                         ('activity', None, datetime(2026, 9, 29, 12, 0)))
+        # Список заказов у тестовой карточки CRM не отдан — поездки не точные: «—».
+        self.assertEqual((item['orders_counted'], item['orders_basis']), (None, None))
+        self.assertEqual(self.store.offices[self.office]['stock'], 49)
+
+    def test_activity_waits_seven_days_from_the_previous_issue_at_the_moment(self):
+        self._issue('activity', datetime(2026, 9, 26, 10, 0))
+        response = self.backfill(kind='activity')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['error'],
+                         'Внести нельзя: к этой выдаче с прошлой (26.09.2026) прошло 3 дня из 7')
+        self.assertEqual(len(self.store.issues), 1)
+        self.assertEqual(self.store.shifts, [])
+        # Выдача ПОСЛЕ момента дни не съедает: внесённая встаёт перед ней.
+        self.store.issues[0]['created_at'] = datetime(2026, 9, 30, 10, 0)
+        self.assertEqual(self.backfill(kind='activity').status_code, 201)
+
+    def test_check_with_the_moment_judges_the_activity_block(self):
+        self._issue('welcome', datetime(2026, 9, 25, 10, 0))
+        response = self.client.post('/api/water/backfill/check',
+                                    json={'link': ACCOUNT, 'issued_at': '2026-09-29T12:00'})
+        verdicts = response.get_json()['verdicts']
+        self.assertEqual(verdicts['activity']['reasons'], ['К этой выдаче с прошлой (25.09.2026) прошло 4 дня из 7'])
+        self.assertEqual(verdicts['activity']['last_issue']['kind'], 'welcome')
+        self.assertFalse(verdicts['welcome']['allowed'])
+        bad = self.client.post('/api/water/backfill/check', json={'link': ACCOUNT, 'issued_at': 'вчера'})
+        self.assertEqual(bad.status_code, 400)
+
+    def activity_card(self, times, first='2024-01-01 09:00:00'):
+        """Карточка CRM со списком «7 дней» (окно с 23.09 12:00)."""
+        self.crm = crm_driver(total=500, week=len(times))
+        self.crm['order_times'] = [moment.strftime('%Y-%m-%d %H:%M:%S') for moment in times]
+        self.crm['orders'].update(window_from='2026-09-23 12:00:00', week_truncated=False, first_order_at=first)
+
+    def test_activity_trips_older_than_the_list_are_asked_from_crm_outside_the_transaction(self):
+        """Прошлая выдача 19.09 — раньше списка CRM: поездки с неё до 29.09 12:00
+        досчитывает CRM за даты, минус заказы дня прошлой до неё (2 по снимку)
+        и дня этой после неё (1 по списку)."""
+        self._issue('activity', datetime(2026, 9, 19, 12, 0))
+        self.store.issues[0]['orders_today'] = 2
+        self.activity_card([datetime(2026, 9, 24 + n, 10, 0) for n in range(5)] + [datetime(2026, 9, 29, 15, 0)])
+        self.period_count = 3 + 10
+        response = self.backfill(kind='activity')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['error'],
+                         'Внести нельзя: менее 20 поездок с прошлой выдачи до этой — было 10')
+        self.assertEqual(self.period_calls, [(ACCOUNT, '2026-09-19', '2026-09-29', 0)])
+        self.assertEqual(len(self.store.issues), 1)
+
+        self.period_count = 3 + 25
+        response = self.backfill(kind='activity')
+        self.assertEqual(response.status_code, 201, response.get_json())
+        item = self.store.issues[-1]
+        self.assertEqual((item['kind'], item['orders_counted'], item['orders_basis']), ('activity', 25, 'since_last'))
+
+    def test_check_asks_crm_too_and_shows_the_exact_trips(self):
+        self._issue('activity', datetime(2026, 9, 19, 12, 0))
+        self.store.issues[0]['orders_today'] = 2
+        self.activity_card([datetime(2026, 9, 24, 10, 0), datetime(2026, 9, 29, 15, 0)])
+        self.period_count = 3 + 22
+        data = self.client.post('/api/water/backfill/check',
+                                json={'link': ACCOUNT, 'issued_at': '2026-09-29T12:00'}).get_json()
+        activity = data['verdicts']['activity']
+        self.assertTrue(activity['allowed'], activity['reasons'])
+        self.assertEqual((activity['trips'], activity['trips_exact']), (22, True))
+        self.assertEqual(self.period_calls[-1][3], 0)
+
+    def test_history_changed_while_crm_answered_is_not_taken(self):
+        """Пока CRM считала поездки, прошлую выдачу отменили: ответ был на другой
+        вопрос — «проверьте ещё раз», а не запись по устаревшему числу."""
+        self._issue('activity', datetime(2026, 9, 19, 12, 0))
+        self.store.issues[0]['orders_today'] = 2
+        self.activity_card([datetime(2026, 9, 24, 10, 0), datetime(2026, 9, 29, 15, 0)])
+        self.period_count = 3 + 25
+        self.period_hook = lambda: self.store.issues[0].update(canceled_at=NOW)
+        response = self.backfill(kind='activity')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['code'], 'WATER_VERDICT_CHANGED')
+        self.assertEqual(len(self.store.issues), 1)
+        self.assertEqual(self.store.shifts, [])
+
+    def test_crm_failure_leaves_a_lower_bound_not_a_refusal(self):
+        self._issue('activity', datetime(2026, 9, 19, 12, 0))
+        self.store.issues[0]['orders_today'] = 2
+        self.activity_card([datetime(2026, 9, 24, 10, 0), datetime(2026, 9, 29, 15, 0)])
+        self.period_count = water_routes.water_driver.DriverLookupError('CRM', code='crm_unavailable', status=502)
+        response = self.backfill(kind='activity')
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(self.store.issues[-1]['orders_counted'], None)
+
+    def test_welcome_after_an_issue_on_the_same_account_is_refused(self):
+        self._issue('activity', datetime(2026, 9, 20, 10, 0))
+        response = self.backfill()
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('на этом аккаунте вода уже выдавалась 20.09.2026', response.get_json()['error'])
+        # Та же выдача на другом аккаунте человека (новый парк) — не помеха.
+        self.store.issues[0]['driver_account_id'] = 'e' * 32
+        self.assertEqual(self.backfill().status_code, 201)
 
 
 if __name__ == '__main__':

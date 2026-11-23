@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Download, Droplet, Loader2, Search, SlidersHorizontal, Undo2, X } from 'lucide-react';
+import { Download, Droplet, History, Loader2, Search, SlidersHorizontal, Undo2, X } from 'lucide-react';
 import { IosModal, iosCard } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangeCalendar, IosDateRangePicker, rangeLabel } from '../ui/DateRangePicker';
 import { driverAccountUrl, fmtDateTime, fmtPhone, rangeDays, shiftDaysBack, todayISO } from '../parcels/parcelMeta';
+import WaterBackfill from './WaterBackfill';
 import { EXPORT_MAX_DAYS, blocksWord, exportFileName, kindLabel, tariffLabel } from './waterMeta';
 import {
     ModalSubtitle, ModalTitle, T, wBtnDanger, wBtnPrimary, wBtnSecondary, wChip, wIcon, wInput, wLabel, wPill,
@@ -119,6 +120,11 @@ const IssueSheet = ({ item, onClose, apiBaseUrl, headers, onCanceled, showToast 
         ['Выдал', item.issued_by_name],
         ['Телефон', item.driver_phone ? fmtPhone(item.driver_phone) : null],
         ['Парк', item.driver_park],
+        // Выдача, внесённая задним числом: дата в шапке — когда выдали у
+        // стойки, здесь — когда и кто внёс запись.
+        ['Внесено задним числом', item.backfilled_at
+            ? [fmtDateTime(item.backfilled_at), item.backfilled_by_name].filter(Boolean).join(' · ') : null],
+        ['Комментарий', item.backfill_comment],
     ].filter(([, value]) => value);
 
     return (
@@ -172,10 +178,16 @@ const IssueSheet = ({ item, onClose, apiBaseUrl, headers, onCanceled, showToast 
     );
 };
 
-const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onStockChanged, showToast }) => {
+const WaterJournal = ({
+    apiBaseUrl, headers, reloadKey, canManage = false, canBackfill = false, offices = null, settings = null,
+    onStockChanged, showToast,
+}) => {
     // Карточку выдачи открывает только руководитель: у остальных в ней нечего
     // делать, всё видно в самой строке.
     const [opened, setOpened] = useState(null);
+    // Окно «Выдача задним числом» — только у супер-админа (23.11.2026).
+    const [backfillOpen, setBackfillOpen] = useState(false);
+    const [backfillKey, setBackfillKey] = useState(0);
     const [search, setSearch] = useState('');
     const [query, setQuery] = useState('');
     const [filters, setFilters] = useState(EMPTY_FILTERS);
@@ -207,7 +219,7 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                 offices: response.data?.offices || [],
             }))
             .catch(() => {});
-    }, [apiBaseUrl, headers, reloadKey]);
+    }, [apiBaseUrl, headers, reloadKey, backfillKey]);
 
     useEffect(() => {
         if (!exportOpen) return undefined;
@@ -254,10 +266,12 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
         }
     }, [apiBaseUrl, headers, selection]);
 
+    /* Внесённая задним числом выдача встаёт в журнал на своё место по дате
+       выдачи — список перечитывается с начала. */
     useEffect(() => {
         load({ append: false, from: 0 });
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [selection, reloadKey]);
+    }, [selection, reloadKey, backfillKey]);
 
     const download = useCallback((from, to) => {
         setExportOpen(false);
@@ -328,7 +342,7 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                            onChange={(event) => setSearch(event.target.value)}
                            placeholder="Водитель: ФИО, телефон или ID" />
                 </div>
-                <div className="flex items-center gap-2 xl:gap-3 2xl:gap-4">
+                <div className="flex flex-wrap items-center gap-2 xl:gap-3 2xl:gap-4">
                     <button type="button" className={chips.length ? wBtnPrimary : wBtnSecondary}
                             onClick={() => setFiltersOpen((prev) => !prev)}>
                         <SlidersHorizontal size={15} className={wIcon} /> Фильтры{chips.length ? ` · ${chips.length}` : ''}
@@ -366,6 +380,11 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                             </div>
                         )}
                     </div>
+                    {canBackfill && (
+                        <button type="button" className={wBtnSecondary} onClick={() => setBackfillOpen(true)}>
+                            <History size={15} className={wIcon} /> Задним числом
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -501,6 +520,11 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                                     <td className={`whitespace-nowrap ${wTd} align-top tabular-nums ${body}`}>{ordersLabel(item)}</td>
                                     <td className={`whitespace-nowrap ${wTd} align-top ${body}`}>
                                         {off ? <span className={CANCELED_PILL}>Отменена</span> : kindLabel(item.kind)}
+                                        {/* Внесена задним числом — серой строкой под видом: дата
+                                            в строке — когда выдали у стойки, кто внёс — в карточке. */}
+                                        {item.backfilled_at && (
+                                            <div className={`text-[12px] ${wTdSub} ${meta}`}>задним числом</div>
+                                        )}
                                     </td>
                                     <td className={`${wTd} text-right align-top font-semibold tabular-nums ${off ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
                                         {item.blocks}
@@ -540,6 +564,7 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                             </div>
                             <div className="mt-0.5 text-[12px] text-slate-500">
                                 {fmtDateTime(item.created_at)} · {item.issued_by_name}
+                                {item.backfilled_at ? ' · задним числом' : ''}
                             </div>
                         </div>
                     );
@@ -569,6 +594,22 @@ const WaterJournal = ({ apiBaseUrl, headers, reloadKey, canManage = false, onSto
                         // человек терял бы догруженные «Показать ещё» страницы.
                         if (issue) setItems((prev) => prev.map((row) => (row.id === issue.id ? issue : row)));
                         if (office) onStockChanged?.(office);
+                    }}
+                />
+            )}
+
+            {canBackfill && (
+                <WaterBackfill
+                    open={backfillOpen}
+                    onClose={() => setBackfillOpen(false)}
+                    apiBaseUrl={apiBaseUrl}
+                    headers={headers}
+                    offices={offices}
+                    settings={settings}
+                    showToast={showToast}
+                    onDone={(_issue, office) => {
+                        if (office) onStockChanged?.(office);
+                        setBackfillKey((value) => value + 1);
                     }}
                 />
             )}

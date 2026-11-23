@@ -349,6 +349,32 @@ def person_history(cursor, account_id, iin=None, limit=20):
     return rows
 
 
+def issues_before(cursor, account_id, iin, moment):
+    """Последняя живая выдача человека до момента — и последняя на этом аккаунте.
+
+    Для выдачи задним числом: от первой считаются дни и поездки блока за
+    активность, вторая говорит, что аккаунт к тому моменту уже получал воду
+    (приветственный тогда не вносится). Отдельным запросом, а не из
+    person_history: у той окно последних 20 выдач, а момент может быть старше.
+    Возвращает {'person': строка|None, 'account': строка|None}.
+    """
+    params = {'account': str(account_id or ''), 'iin': str(iin or ''), 'moment': moment}
+    found = {}
+    for key, who in (('person', "(driver_account_id = %(account)s "
+                                "OR (%(iin)s <> '' AND driver_iin = %(iin)s))"),
+                     ('account', 'driver_account_id = %(account)s')):
+        cursor.execute(
+            """
+            SELECT %s FROM water_issues
+             WHERE %s AND canceled_at IS NULL AND created_at < %%(moment)s
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1
+            """ % (_HISTORY_SELECT, who), params)
+        row = cursor.fetchone()
+        found[key] = _history_row(row) if row else None
+    return found
+
+
 def create_issue(cursor, office, driver, verdict, *, blocks, actor):
     """Выдача по ЗАПЕРТЫМ офису и водителю. Остаток уменьшается тем же курсором."""
     stock_after = int(office['stock']) - int(blocks)
@@ -382,7 +408,8 @@ _ISSUE_COLUMNS = ('id', 'water_office_id', 'city', 'office_name', 'kind', 'block
                   'stock_after', 'driver_account_id', 'driver_name', 'driver_phone',
                   'driver_park', 'driver_park_id', 'driver_tariffs', 'orders_counted',
                   'orders_basis', 'issued_by', 'issued_by_name', 'created_at',
-                  'canceled_at', 'canceled_by_name', 'cancel_reason')
+                  'canceled_at', 'canceled_by_name', 'cancel_reason',
+                  'backfilled_at', 'backfilled_by_name', 'backfill_comment')
 
 
 def _issue_row(row):
@@ -390,6 +417,7 @@ def _issue_row(row):
     item['driver_tariffs'] = [str(code) for code in _json_list(item['driver_tariffs'])]
     item['created_at'] = _iso(item['created_at'])
     item['canceled_at'] = _iso(item['canceled_at'])
+    item['backfilled_at'] = _iso(item['backfilled_at'])
     return item
 
 
@@ -434,6 +462,146 @@ def cancel_issue(cursor, issue, *, reason, actor):
         "updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') WHERE id = %s",
         (int(issue['blocks']), int(issue['water_office_id'])))
     return read_issue(cursor, issue['id'])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Выдача задним числом
+# ─────────────────────────────────────────────────────────────────────────────
+
+def backfill_plan(cursor, water_office_id, moment, blocks):
+    """Как вписать выдачу задним числом в историю ЗАПЕРТОГО офиса.
+
+    У каждой операции офиса записан «остаток после» — по ним журнал и сверяют.
+    Выдача, вставленная в прошлое, уменьшает остаток с того момента: «остаток
+    после» у всех более поздних выдач и поступлений становится на её блоки
+    меньше — до первого пересчёта. Пересчёт записал, сколько было на ПОЛКЕ, а
+    полка уже была без этого блока: его «остаток после» верен как есть, а
+    разница пересчёта уменьшается на эти блоки (система до него считала на них
+    больше). Пересчёта после момента нет — уменьшается и остаток офиса.
+
+    Остаток на момент — «остаток после» последней операции до него плюс блоки
+    отменённых с тех пор выдач: отмена возвращает блоки на полку, а своей строки
+    с «остатком после» у неё нет.
+
+    Возвращает план: остаток до и после, id строк к сдвигу, пересчёт, который
+    примет разницу, и `shortage` — где остаток ушёл бы в минус (тогда план не
+    применяют: столько воды в офисе тогда не было).
+    """
+    params = {'office': int(water_office_id), 'moment': moment, 'blocks': int(blocks)}
+    cursor.execute(
+        """
+        SELECT created_at, stock_after FROM (
+            SELECT created_at, stock_after, 1 AS src, id FROM water_issues
+             WHERE water_office_id = %(office)s AND created_at <= %(moment)s
+            UNION ALL
+            SELECT created_at, stock_after, 0 AS src, id FROM water_movements
+             WHERE water_office_id = %(office)s AND created_at <= %(moment)s
+        ) e
+        ORDER BY created_at DESC, src DESC, id DESC
+        LIMIT 1
+        """, params)
+    last = cursor.fetchone()
+    stock_before = 0
+    if last:
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(blocks), 0) FROM water_issues
+             WHERE water_office_id = %(office)s
+               AND canceled_at > %(since)s AND canceled_at <= %(moment)s
+            """, dict(params, since=last[0]))
+        stock_before = int(last[1]) + int(cursor.fetchone()[0] or 0)
+    plan = {'stock_before': stock_before, 'stock_after': stock_before - int(blocks),
+            'issue_ids': [], 'intake_ids': [], 'recount': None, 'shortage': None}
+    if plan['stock_after'] < 0:
+        plan['shortage'] = {'at': _iso(moment), 'stock': stock_before}
+        return plan
+    cursor.execute(
+        """
+        SELECT 'issue' AS kind, id, created_at, stock_after, NULL::integer AS delta
+          FROM water_issues
+         WHERE water_office_id = %(office)s AND created_at > %(moment)s
+        UNION ALL
+        SELECT kind, id, created_at, stock_after, delta
+          FROM water_movements
+         WHERE water_office_id = %(office)s AND created_at > %(moment)s
+        ORDER BY created_at, id
+        """, params)
+    for kind, row_id, created_at, stock_after, delta in cursor.fetchall():
+        if kind == 'recount':
+            plan['recount'] = {'id': row_id, 'created_at': _iso(created_at),
+                               'delta': int(delta), 'stock_after': int(stock_after)}
+            break
+        if int(stock_after) - int(blocks) < 0:
+            plan['shortage'] = {'at': _iso(created_at), 'stock': int(stock_after)}
+            break
+        plan['intake_ids' if kind == 'intake' else 'issue_ids'].append(row_id)
+    return plan
+
+
+def apply_backfill_shift(cursor, office, plan, blocks):
+    """Сдвиг по плану backfill_plan — тем же курсором, что и строка выдачи."""
+    blocks = int(blocks)
+    if plan['issue_ids']:
+        cursor.execute('UPDATE water_issues SET stock_after = stock_after - %s WHERE id = ANY(%s)',
+                       (blocks, list(plan['issue_ids'])))
+    if plan['intake_ids']:
+        cursor.execute('UPDATE water_movements SET stock_after = stock_after - %s WHERE id = ANY(%s)',
+                       (blocks, list(plan['intake_ids'])))
+    if plan['recount']:
+        cursor.execute('UPDATE water_movements SET delta = delta + %s WHERE id = %s',
+                       (blocks, plan['recount']['id']))
+    else:
+        cursor.execute(
+            "UPDATE water_offices SET stock = stock - %s, "
+            "updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') WHERE id = %s",
+            (blocks, office['id']))
+
+
+def create_backfill_issue(cursor, office, driver, verdict, *, blocks, moment, stock_after,
+                          orders_total, info, issuer, actor, comment):
+    """Строка выдачи задним числом: created_at — когда выдали у стойки,
+    issued_by — кто выдал, backfilled_* — кто и когда внёс.
+
+    Поездки блока за активность пишутся, только если посчитаны точно: «не
+    меньше N» (заказы старше окна CRM) в колонке «Заказы» журнала читалось бы
+    как точное число — там будет «—», а сам список заказов лежит в снимке."""
+    exact = verdict.get('trips_exact') is not False
+    cursor.execute(
+        """
+        INSERT INTO water_issues (
+            water_office_id, city, office_name, kind, blocks, stock_after,
+            driver_account_id, driver_iin, driver_name, driver_phone, driver_park,
+            driver_park_id, driver_tariffs, orders_total, orders_counted, orders_basis,
+            fk_source, driver_info, issued_by, issued_by_name, created_at,
+            backfilled_at, backfilled_by, backfilled_by_name, backfill_comment)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s,
+                %s, %s::jsonb, %s, %s, %s,
+                (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'), %s, %s, %s)
+        RETURNING id
+        """,
+        (office['id'], office['city'], office['name'], verdict['kind'], int(blocks),
+         int(stock_after), driver['account_id'], driver.get('iin'), driver.get('name'),
+         driver.get('phone'), driver.get('park'), driver.get('park_id'),
+         json.dumps(driver.get('tariffs') or []), orders_total,
+         verdict.get('trips') if exact else None, verdict.get('trips_basis') if exact else None,
+         verdict.get('fk') if verdict.get('kind') == 'welcome' else None,
+         json.dumps(info or {}, ensure_ascii=False, default=str),
+         issuer['id'], issuer.get('name'), moment,
+         actor['user_id'], actor.get('name'), comment))
+    return read_issue(cursor, cursor.fetchone()[0])
+
+
+def office_issuers(cursor, water_office_id):
+    """Кто выдаёт воду в этом офисе: офисники из списка со строкой доступа к
+    нему (доступ по офисам, 23.10.2026). Им и записывают выдачу задним числом
+    — воду у стойки выдаёт офисник."""
+    if not access_ready(cursor):
+        return []
+    people = issuer_candidates(cursor)
+    cursor.execute('SELECT user_id FROM water_issuer_offices WHERE water_office_id = %s',
+                   (int(water_office_id),))
+    granted = {row[0] for row in cursor.fetchall()}
+    return [person for person in people if person['id'] in granted]
 
 
 def _issue_filter(filters, params):

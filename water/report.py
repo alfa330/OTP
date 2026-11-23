@@ -74,6 +74,9 @@ COLUMNS = (
     # Отменённая выдача остаётся в файле (это журнал операций), но с пометкой
     # «когда, кто, почему» — и в итог «Блоков выдано» не входит.
     ('cancel_note', 'Отменена', 40),
+    # Выдача, внесённая задним числом (23.11.2026): «когда внесли, кто,
+    # комментарий». Дата и время в первой колонке — когда выдали у стойки.
+    ('backfill_note', 'Внесено задним числом', 40),
 )
 
 TEXT_COLUMNS = ('driver_phone', 'driver_account_id')
@@ -159,12 +162,24 @@ def cancel_note(item):
     return ' · '.join(part for part in parts if part)
 
 
+def backfill_note(item):
+    """«23.11.2026 11:05 · Кто · комментарий» — у выдачи задним числом, иначе пусто."""
+    if not item.get('backfilled_at'):
+        return None
+    moment = _as_datetime(item.get('backfilled_at'))
+    parts = [moment.strftime('%d.%m.%Y %H:%M') if moment else '',
+             item.get('backfilled_by_name') or '', item.get('backfill_comment') or '']
+    return ' · '.join(part for part in parts if part)
+
+
 def _issue_row(sheet, item):
     row = []
     for key, _title, _width in COLUMNS:
         value = item.get(key)
         if key == 'cancel_note':
             cell = _text(sheet, cancel_note(item))
+        elif key == 'backfill_note':
+            cell = _text(sheet, backfill_note(item))
         elif key == 'created_at':
             cell = WriteOnlyCell(sheet, value=_as_datetime(value))
             cell.number_format = DATETIME_FORMAT

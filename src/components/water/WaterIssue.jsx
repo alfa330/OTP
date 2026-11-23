@@ -56,7 +56,8 @@ const programWeekOrders = (orders, carTariffs, programTariffs) => {
 /* ФИО водителя — главная строка карточки: по ней сверяют человека у стойки. */
 const NAME = 'xl:text-[17px] 2xl:text-[22px] 2xl:tracking-tight';
 
-const DriverCard = ({ driver, programTariffs }) => {
+/* Карточка водителя — та же и в окне «Выдача задним числом» (WaterBackfill). */
+export const DriverCard = ({ driver, programTariffs }) => {
     const account = driverAccountUrl({ driver_account_id: driver.account_id, driver_park_id: driver.park_id });
     const statusNote = driver.fired ? 'Уволен из парка'
         : driver.is_blocked ? CARD_BLOCKED

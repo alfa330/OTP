@@ -456,8 +456,9 @@ class LargeScreenTests(unittest.TestCase):
                     seen[tag_name] = seen.get(tag_name, 0) + 1
                     self.assertRegex(tag, r'\broomy\b', '%s: %s' % (name, tag[:70]))
         # Девятый список — офис в окне «Доступ по офисам», когда офисов в учёте
-        # больше трёх (до трёх там сегменты).
-        self.assertEqual(seen, {'CustomSelect': 9, 'IosDateRangePicker': 2, 'IosDateRangeCalendar': 1})
+        # больше трёх (до трёх там сегменты); десятый и одиннадцатый — офис и
+        # «Кто выдал» в окне «Выдача задним числом» (23.11.2026).
+        self.assertEqual(seen, {'CustomSelect': 11, 'IosDateRangePicker': 2, 'IosDateRangeCalendar': 1})
 
     def test_shared_pickers_are_unchanged_without_the_flag(self):
         select = _read(ROOT / 'src' / 'components' / 'ui' / 'CustomSelect.jsx')
@@ -881,6 +882,58 @@ class DriverCardNoteTests(unittest.TestCase):
         ))
         out = subprocess.run([node, '--input-type=module', '-e', script], capture_output=True, check=True)
         self.assertEqual(json.loads(out.stdout.decode('utf-8')), [expected for _, expected in cases])
+
+
+class BackfillWiringTests(unittest.TestCase):
+    """Выдача задним числом (владелец 23.11.2026): кнопка — только супер-админу,
+    окно ходит в свои ручки, отказы сервера садятся к своим полям."""
+
+    def setUp(self):
+        self.window = _read(WATER / 'WaterBackfill.jsx')
+        self.journal = _read(WATER / 'WaterJournal.jsx')
+        self.panel = _read(PANEL)
+        self.routes = _read(ROOT / 'water' / 'routes.py')
+
+    def test_button_is_given_by_the_capability_of_the_server(self):
+        self.assertIn('canBackfill={Boolean(capabilities.can_backfill)}', self.panel)
+        self.assertIn("{canBackfill && (\n                        <button", self.journal)
+        self.assertIn("'can_backfill': can_backfill(ctx)", _read(ROOT / 'water' / 'access.py'))
+
+    def test_window_talks_to_its_own_routes(self):
+        for url in ('/api/water/backfill/check', '/api/water/backfill', '/api/water/access'):
+            self.assertIn('${apiBaseUrl}%s`' % url, self.window)
+        self.assertIn("@water_route('/backfill/check', methods=('POST',), need='backfill')", self.routes)
+        self.assertIn("@water_route('/backfill', methods=('POST',), need='backfill')", self.routes)
+
+    def test_every_refusal_code_the_window_places_exists_on_the_server(self):
+        block = self.window.split('const SERVER_FIELD = {')[1].split('};')[0]
+        codes = re.findall(r'(WATER_[A-Z_]+):', block)
+        self.assertGreater(len(codes), 5)
+        for code in codes:
+            self.assertRegex(self.routes, r'''['"]%s['"]''' % code, code)
+
+    def test_window_sends_the_fields_the_route_reads(self):
+        for field in ('kind', 'link', 'water_office_id', 'issued_at', 'issued_by', 'fk_confirmed', 'comment',
+                      'blocks'):
+            self.assertRegex(self.window, r'\b%s:' % field, field)
+            self.assertIn("data.get('%s')" % field, self.routes.split('def water_backfill(ctx)')[1], field)
+
+    def test_kind_is_a_choice_of_segments_without_a_default(self):
+        """Вид выдачи — сегментами с «i» (выбор из двух), и не выбран, пока не
+        выбрали: молчаливый вид по умолчанию внёс бы не тот блок."""
+        self.assertIn("const EMPTY = { link: '', kind: null,", self.window)
+        self.assertIn('<IosSegmented value={form.kind} options={BACKFILL_KINDS}', self.window)
+        self.assertIn('<Label text="Вид выдачи" lines={backfillKindHints(settings)} />', self.window)
+        self.assertEqual(set(re.findall(r"value: '(\w+)'", _read(META).split('export const BACKFILL_KINDS = [')[1]
+                                        .split('];')[0])), set(schema.ISSUE_KINDS))
+
+    def test_check_carries_the_moment_for_the_activity_block(self):
+        self.assertIn('{ link: accountId, issued_at: moment || undefined }', self.window)
+        self.assertIn("raw_moment = data.get('issued_at')", self.routes.split('def water_backfill_check(ctx)')[1])
+
+    def test_journal_and_file_say_that_a_row_was_backfilled(self):
+        self.assertIn('задним числом', self.journal)
+        self.assertIn(('backfill_note', 'Внесено задним числом', 40), report.COLUMNS)
 
 
 if __name__ == '__main__':

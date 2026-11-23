@@ -220,8 +220,22 @@ class CapabilitiesTests(unittest.TestCase):
     def test_capabilities_of_an_issuer(self):
         self.assertEqual(access.capabilities(dict(ctx(city='Алматы', user_id=ISSUER), issue_office_ids=[1])), {
             'can_open': True, 'can_issue': True, 'issue_office_ids': [1], 'can_manage': False,
-            'can_view_journal': False, 'requires_qr': True, 'is_global_admin': False, 'default_city': 'Алматы',
+            'can_view_journal': False, 'can_backfill': False, 'requires_qr': True, 'is_global_admin': False,
+            'default_city': 'Алматы',
         })
+
+    def test_only_super_admin_backfills(self):
+        """Владелец 23.11.2026: задним числом вносят «супер-админы». Руководитель
+        фронт-офисов ведёт учёт и отменяет выдачи, но этой кнопки ему не давали."""
+        for boss in (ctx(role='super_admin', department_code='szov'),
+                     ctx(role='super_admin', department_code='front_office', user_id=1)):
+            self.assertTrue(access.can_backfill(boss), boss)
+            self.assertTrue(access.capabilities(boss)['can_backfill'])
+        for person in (manager(), ctx(user_id=ISSUER), ctx(department_code='szov'),
+                       ctx(role='admin', department_code='szov', headed_codes=('szov',)),
+                       ctx(role='admin', department_code='front_office')):
+            self.assertFalse(access.can_backfill(person), person)
+            self.assertFalse(access.capabilities(person)['can_backfill'], person)
 
     def test_offices_of_the_manager_and_the_call_centre(self):
         self.assertIsNone(access.capabilities(manager())['issue_office_ids'])

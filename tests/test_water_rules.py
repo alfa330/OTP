@@ -565,5 +565,315 @@ class WordsTests(unittest.TestCase):
         self.assertEqual(verdict['reasons'], ['Менее 1 поездки за последние 7 дней — сейчас 0'])
 
 
+def backfill(drv, history=(), moment=None, fk_confirmed=None, settings=None, kind='welcome',
+             prev=None, prev_account=None, period=None):
+    return rules.backfill_verdict(drv, list(history), dict(SETTINGS, **(settings or {})), kind=kind,
+                                  moment=moment, prev=prev, prev_account=prev_account,
+                                  fk_confirmed=fk_confirmed, period=period)
+
+
+class BackfillVerdictTests(unittest.TestCase):
+    """Владелец 23.11.2026: супер-админ вносит приветственный блок задним числом,
+    «если офисник забыл нажать кнопку, а водитель уже выполняет заказы». Снято
+    одно условие — «ни одного заказа»; остальные — как у стойки."""
+
+    def test_driver_with_orders_can_get_the_forgotten_welcome_block(self):
+        drv = driver(total=8, week=8, tariffs=('business', 'econom'))
+        self.assertFalse(evaluate(drv)['kind'] == 'welcome')   # у стойки — уже не новый
+        verdict = backfill(drv, moment=NOW, fk_confirmed=True)
+        self.assertTrue(verdict['allowed'], verdict['reasons'])
+        self.assertEqual((verdict['kind'], verdict['blocks_max'], verdict['trips'], verdict['trips_basis']),
+                         ('welcome', 1, 0, rules.BASIS_NEW))
+        self.assertEqual(verdict['fk'], rules.FK_CONFIRMED)
+
+    def test_welcome_is_still_once_per_person(self):
+        verdict = backfill(driver(total=8), [issue('welcome', days_ago=3)], moment=NOW, fk_confirmed=True)
+        self.assertFalse(verdict['allowed'])
+        self.assertEqual(verdict['reasons'], ['Приветственный блок уже выдан 27.09.2026 в офисе «Офис Алматы №1»'])
+
+    def test_still_only_on_program_tariffs(self):
+        verdict = backfill(driver(total=8, tariffs=('econom', 'comfort')), moment=NOW, fk_confirmed=True)
+        self.assertFalse(verdict['allowed'])
+        self.assertIn('Тариф не входит в программу', verdict['reasons'][0])
+
+    def test_fk_rules_are_those_of_the_counter(self):
+        drv = driver(total=8)
+        self.assertTrue(backfill(drv)['allowed'])          # предпросмотр: отметка ещё впереди
+        self.assertEqual(backfill(drv)['fk'], rules.FK_UNKNOWN)
+        self.assertEqual(backfill(drv, moment=NOW, fk_confirmed=False)['reasons'],
+                         ['Подтвердите, что водитель прошёл ФК'])
+        passed = dict(drv, photo_control={'status': 'passed'})
+        self.assertTrue(backfill(passed, moment=NOW, fk_confirmed=False)['allowed'])
+        failed = dict(drv, photo_control={'status': 'rejected'})
+        self.assertEqual(backfill(failed, moment=NOW, fk_confirmed=True)['reasons'],
+                         ['ФК не пройден — в CRM статус «rejected»'])
+
+    def test_no_welcome_after_an_earlier_issue_on_this_account(self):
+        """Этот аккаунт уже получал воду за активность — тогда он был не новым."""
+        earlier = issue('activity', days_ago=5)
+        verdict = backfill(driver(total=50), [earlier], moment=NOW, fk_confirmed=True,
+                           prev=earlier, prev_account=earlier)
+        self.assertEqual(verdict['reasons'], ['На этом аккаунте вода уже выдавалась 25.09.2026 — приветственный '
+                                              'блок может быть только раньше первой выдачи'])
+
+    def test_earlier_issue_on_another_account_does_not_stop_the_welcome(self):
+        """Новый парк — новый аккаунт без заказов: у стойки приветственный ему
+        положен, хотя на старом аккаунте человек получал воду за активность."""
+        other = issue('activity', days_ago=40, account='z' * 32)
+        verdict = backfill(driver(total=5), [other], moment=NOW, fk_confirmed=True, prev=other)
+        self.assertTrue(verdict['allowed'], verdict['reasons'])
+
+    def test_welcome_before_a_later_activity_block_is_fine(self):
+        """Забыли нажать в понедельник, в субботу выдали за активность у стойки —
+        понедельник вносится: вода тогда и правда ушла новому водителю."""
+        history = [issue('activity', days_ago=1)]
+        verdict = backfill(driver(total=50), history, moment=NOW - timedelta(days=5), fk_confirmed=True)
+        self.assertTrue(verdict['allowed'], verdict['reasons'])
+
+    def test_blocks_follow_the_welcome_setting(self):
+        verdict = backfill(driver(total=8), moment=NOW, fk_confirmed=True, settings={'welcome_blocks': 3})
+        self.assertEqual(verdict['blocks_max'], 3)
+
+
+WINDOW = NOW - timedelta(days=7)   # начало списка CRM «7 дней»: 23.09 11:00
+
+
+def in_window(count, start=None, end=datetime(2026, 9, 29, 12, 0)):
+    """count заказов между start и end, но не раньше начала списка CRM: в
+    настоящем ответе более ранних заказов нет."""
+    return orders_between(max(start or WINDOW, WINDOW), end, count)
+
+
+def complete_driver(times, total=None, first=None, **kwargs):
+    """Водитель со списком «7 дней»; first — его первый заказ в CRM. По
+    умолчанию первый заказ — самый ранний в списке: в списке все заказы."""
+    drv = driver(total=len(times) if total is None else total, week=len(times), times=times, **kwargs)
+    drv['orders']['first_order_at'] = _crm_time(first or min(times))
+    return drv
+
+
+class BackfillActivityTests(unittest.TestCase):
+    """«Да, сделай» (23.11.2026) — тот же внос задним числом для блока за
+    активность. Условия стойки — на момент выдачи: тариф, дни с прошлой
+    выдачи, поездки. Запрет — только доказанный: поездок меньше при полном
+    списке заказов."""
+
+    MOMENT = datetime(2026, 9, 29, 12, 0)
+
+    def test_needs_the_moment_first(self):
+        verdict = backfill(driver(total=50), kind='activity')
+        self.assertFalse(verdict['allowed'])
+        self.assertTrue(verdict['needs_moment'])
+        self.assertEqual(verdict['reasons'], [])
+
+    def test_trips_since_the_previous_issue_up_to_the_moment(self):
+        prev = issue('activity', days_ago=8)            # 22.09 12:00 — раньше начала списка
+        times = in_window(22) + orders_between(self.MOMENT, NOW, 30)
+        # Первый заказ позже начала списка — в списке все заказы: число точное.
+        verdict = backfill(complete_driver(times), [prev], moment=self.MOMENT, kind='activity', prev=prev)
+        self.assertTrue(verdict['allowed'], verdict['reasons'])
+        self.assertEqual((verdict['trips'], verdict['trips_basis'], verdict['trips_exact']),
+                         (22, rules.BASIS_SINCE_LAST, True))
+        # Заказы были и раньше окна — то же число уже только «не меньше».
+        older = complete_driver(times, first=datetime(2025, 1, 1, 9, 0))
+        verdict = backfill(older, [prev], moment=self.MOMENT, kind='activity', prev=prev)
+        self.assertTrue(verdict['allowed'], verdict['reasons'])
+        self.assertEqual((verdict['trips'], verdict['trips_exact']), (22, False))
+
+    def test_proven_shortage_of_trips_is_refused(self):
+        prev = issue('activity', days_ago=8)
+        times = in_window(12) + orders_between(self.MOMENT, NOW, 30)
+        verdict = backfill(complete_driver(times), [prev], moment=self.MOMENT, kind='activity', prev=prev)
+        self.assertEqual(verdict['reasons'], ['Менее 20 поездок с прошлой выдачи до этой — было 12'])
+        # Заказы после выдачи не засчитываются ей задним числом.
+        self.assertEqual(verdict['trips'], 12)
+
+    def test_unknown_trips_are_not_a_refusal_but_a_lower_bound(self):
+        """Прошлая выдача старше окна CRM: заказов до начала списка не видно —
+        «не меньше N», а не отказ."""
+        prev = issue('activity', days_ago=12)
+        times = orders_between(NOW - timedelta(days=7), self.MOMENT, 5)
+        drv = driver(total=900, week=5, times=times)
+        verdict = backfill(drv, [prev], moment=self.MOMENT, kind='activity', prev=prev)
+        self.assertTrue(verdict['allowed'], verdict['reasons'])
+        self.assertEqual((verdict['trips'], verdict['trips_exact']), (5, False))
+        self.assertEqual(verdict['trips_from'], '2026-09-23T11:00:00')
+
+    def test_without_a_previous_issue_the_week_before_the_moment_counts(self):
+        verdict = backfill(complete_driver(in_window(25)), moment=self.MOMENT, kind='activity')
+        self.assertTrue(verdict['allowed'], verdict['reasons'])
+        self.assertEqual((verdict['trips'], verdict['trips_basis'], verdict['trips_exact']),
+                         (25, rules.BASIS_WEEK, True))
+        few = complete_driver(in_window(6, start=self.MOMENT - timedelta(days=3)))
+        self.assertEqual(backfill(few, moment=self.MOMENT, kind='activity')['reasons'],
+                         ['Менее 20 поездок за 7 дней до этой выдачи — было 6'])
+        # Заказ ровно за 7 суток до выдачи — ещё в счёт, раньше — уже нет.
+        edge = complete_driver([self.MOMENT - timedelta(days=7), self.MOMENT - timedelta(days=7, seconds=1)],
+                               first=self.MOMENT - timedelta(days=8))
+        edge['orders']['window_from'] = _crm_time(self.MOMENT - timedelta(days=8))
+        self.assertEqual(backfill(edge, moment=self.MOMENT, kind='activity')['trips'], 1)
+
+    def test_days_since_the_previous_issue_are_checked_at_the_moment(self):
+        prev = issue('activity', days_ago=4)             # 26.09 → к 29.09 прошло 3 дня
+        times = in_window(30, start=prev['created_at'])
+        verdict = backfill(complete_driver(times), [prev], moment=self.MOMENT, kind='activity', prev=prev)
+        self.assertIn('К этой выдаче с прошлой (26.09.2026) прошло 3 дня из 7', verdict['reasons'])
+        one = issue('activity', days_ago=2)               # 28.09 → прошёл 1 день
+        verdict = backfill(complete_driver(times), [one], moment=self.MOMENT, kind='activity', prev=one)
+        self.assertIn('К этой выдаче с прошлой (28.09.2026) прошёл 1 день из 7', verdict['reasons'])
+
+    def test_activity_needs_no_fk_and_follows_its_blocks_setting(self):
+        times = in_window(25)
+        verdict = backfill(complete_driver(times), moment=self.MOMENT, kind='activity', fk_confirmed=False,
+                           settings={'activity_blocks': 2})
+        self.assertTrue(verdict['allowed'], verdict['reasons'])
+        self.assertEqual((verdict['fk'], verdict['blocks_max']), (None, 2))
+
+    def test_activity_is_on_program_tariffs_only(self):
+        times = in_window(25)
+        drv = complete_driver(times, tariffs=('econom',))
+        self.assertIn('Тариф не входит в программу', backfill(drv, moment=self.MOMENT, kind='activity')['reasons'][0])
+
+
+class BackfillPeriodTests(unittest.TestCase):
+    """Поездки блока за активность, которых нет в списке CRM «7 дней»: блок
+    выдают не чаще раза в неделю, и отрезок «с прошлой выдачи до этой» почти
+    всегда старше списка. Его досчитывает CRM за даты — как у стойки."""
+
+    MOMENT = datetime(2026, 9, 29, 12, 0)      # окно списка — с 23.09 11:00
+
+    def prev(self, days_ago=10, account=ACCOUNT, orders_today=3):
+        return issue('activity', days_ago=days_ago, account=account, orders_today=orders_today)
+
+    def driver_with_week(self, before_moment=5, after_moment=2, first=datetime(2024, 1, 1)):
+        """Список: before_moment заказов в окне до момента, after_moment — в день
+        момента после него (12:00 → 13:00, 14:00 …)."""
+        times = in_window(before_moment) + [self.MOMENT + timedelta(hours=n + 1) for n in range(after_moment)]
+        return complete_driver(times, first=first)
+
+    def verdict(self, drv, prev, period=None):
+        return backfill(drv, [prev] if prev else [], moment=self.MOMENT, kind='activity', prev=prev,
+                        period=period)
+
+    def test_request_spans_the_two_issue_days_minus_what_is_known_at_both_ends(self):
+        prev = self.prev()                         # 20.09 12:00, в снимке 3 заказа того дня до неё
+        request = rules.backfill_period_request(self.driver_with_week(), SETTINGS, moment=self.MOMENT, prev=prev)
+        self.assertEqual(request, {'issue_id': 1, 'date_from': '2026-09-20', 'date_to': '2026-09-29',
+                                   'subtract': 3 + 2, 'bound': 'exact'})
+
+    def test_exact_answer_decides_both_ways(self):
+        prev = self.prev()
+        drv = self.driver_with_week()
+        request = rules.backfill_period_request(drv, SETTINGS, moment=self.MOMENT, prev=prev)
+        short = self.verdict(drv, prev, dict(request, count=3 + 2 + 14))
+        self.assertEqual(short['reasons'], ['Менее 20 поездок с прошлой выдачи до этой — было 14'])
+        self.assertEqual((short['trips'], short['trips_exact']), (14, True))
+        enough = self.verdict(drv, prev, dict(request, count=3 + 2 + 26))
+        self.assertTrue(enough['allowed'], enough['reasons'])
+        self.assertEqual((enough['trips'], enough['trips_exact']), (26, True))
+
+    def test_without_an_answer_it_is_a_lower_bound_not_a_refusal(self):
+        prev = self.prev()
+        drv = self.driver_with_week()
+        request = rules.backfill_period_request(drv, SETTINGS, moment=self.MOMENT, prev=prev)
+        for period in (None, dict(request, count=None), dict(request, count=4),   # 4 < вычета: CRM противоречит себе
+                       dict(request, date_from='2026-09-21', count=40)):          # ответ на другой запрос
+            verdict = self.verdict(drv, prev, period)
+            self.assertTrue(verdict['allowed'], (period, verdict['reasons']))
+            self.assertEqual((verdict['trips'], verdict['trips_exact']), (5, False))
+
+    def test_other_account_or_no_snapshot_drops_the_previous_issue_day(self):
+        for prev in (self.prev(account='z' * 32), self.prev(orders_today=None)):
+            request = rules.backfill_period_request(self.driver_with_week(), SETTINGS, moment=self.MOMENT, prev=prev)
+            self.assertEqual((request['date_from'], request['subtract'], request['bound']), ('2026-09-21', 2, 'lower'))
+            verdict = self.verdict(self.driver_with_week(), prev, dict(request, count=2 + 12))
+            # «Не меньше 12» — порог не доказан, но и нарушение тоже: не отказ.
+            self.assertTrue(verdict['allowed'], verdict['reasons'])
+            self.assertEqual((verdict['trips'], verdict['trips_exact']), (12, False))
+
+    def test_moment_older_than_the_list_drops_its_own_day(self):
+        prev = self.prev(days_ago=20)
+        old_moment = datetime(2026, 9, 20, 12, 0)
+        request = rules.backfill_period_request(self.driver_with_week(), SETTINGS, moment=old_moment, prev=prev)
+        self.assertEqual((request['date_from'], request['date_to'], request['subtract'], request['bound']),
+                         ('2026-09-10', '2026-09-19', 3, 'lower'))
+
+    def test_without_a_previous_issue_the_dates_give_an_upper_bound(self):
+        """Без прошлой выдачи «7 суток до выдачи» по датам не отрезать: первый
+        день идёт целиком — число «не больше». Меньше порога — доказанный отказ."""
+        drv = self.driver_with_week()
+        request = rules.backfill_period_request(drv, SETTINGS, moment=self.MOMENT, prev=None)
+        self.assertEqual(request, {'issue_id': None, 'date_from': '2026-09-22', 'date_to': '2026-09-29',
+                                   'subtract': 2, 'bound': 'upper'})
+        refused = self.verdict(drv, None, dict(request, count=2 + 11))
+        self.assertEqual(refused['reasons'], ['Менее 20 поездок за 7 дней до этой выдачи — было не больше 11'])
+        unknown = self.verdict(drv, None, dict(request, count=2 + 30))
+        self.assertTrue(unknown['allowed'], unknown['reasons'])
+        self.assertEqual((unknown['trips'], unknown['trips_exact'], unknown['trips_upper']), (5, False, 30))
+
+    def test_exact_number_is_asked_even_when_the_list_already_has_the_threshold(self):
+        """Внос задним числом редок: точное число в колонку «Заказы» журнала
+        дороже одного запроса. А вот «не меньше» или «не больше» при пороге,
+        уже набранном по списку, ничего не добавят — их не спрашиваем."""
+        prev = self.prev()
+        busy = self.driver_with_week(before_moment=21)
+        self.assertEqual(rules.backfill_period_request(busy, SETTINGS, moment=self.MOMENT, prev=prev)['bound'],
+                         'exact')
+        self.assertIsNone(rules.backfill_period_request(busy, SETTINGS, moment=self.MOMENT,
+                                                        prev=self.prev(account='z' * 32)))
+        self.assertIsNone(rules.backfill_period_request(busy, SETTINGS, moment=self.MOMENT, prev=None))
+        # С правилом поездок выключенным — тоже: число нужно журналу, не отказу.
+        self.assertEqual(rules.backfill_period_request(self.driver_with_week(), dict(SETTINGS, min_trips=0),
+                                                       moment=self.MOMENT, prev=prev)['bound'], 'exact')
+        self.assertIsNone(rules.backfill_period_request(self.driver_with_week(), dict(SETTINGS, min_trips=0),
+                                                        moment=self.MOMENT, prev=None))
+
+    def test_no_request_when_the_list_is_exact_or_there_is_no_moment(self):
+        prev = self.prev()
+        # Новый водитель — в списке все заказы.
+        self.assertIsNone(rules.backfill_period_request(self.driver_with_week(first=WINDOW), SETTINGS,
+                                                        moment=self.MOMENT, prev=prev))
+        self.assertIsNone(rules.backfill_period_request(self.driver_with_week(), SETTINGS, moment=None, prev=prev))
+
+
+class OrdersAtTests(unittest.TestCase):
+    """Заказы на момент выдачи задним числом — для снимка, от которого следующая
+    выдача считает «поездки с прошлой»."""
+
+    def test_orders_of_the_issue_day_before_it_and_total_then(self):
+        moment = datetime(2026, 9, 29, 12, 0)
+        times = [datetime(2026, 9, 28, 18, 0), datetime(2026, 9, 29, 10, 3), datetime(2026, 9, 29, 10, 49),
+                 datetime(2026, 9, 29, 12, 0), datetime(2026, 9, 30, 9, 0)]
+        drv = driver(total=40, week=5, times=times)
+        # До 12:00 29.09 — два заказа того дня; ровно в 12:00 — уже не «до».
+        self.assertEqual(rules.orders_at(drv, moment), (2, 38))
+
+    def test_issue_before_the_window_is_no_data(self):
+        drv = driver(total=40, week=5, times=[NOW - timedelta(hours=1)])
+        self.assertEqual(rules.orders_at(drv, NOW - timedelta(days=9)), (None, None))
+
+    def test_day_start_outside_the_window_keeps_total_but_not_today(self):
+        """Окно начинается в 11:00 23.09: выдача 23.09 в 15:00 — заказы того дня
+        до 11:00 в списке не видны, `today` не выдумываем."""
+        drv = driver(total=40, week=1, times=[datetime(2026, 9, 23, 16, 0)])
+        self.assertEqual(rules.orders_at(drv, datetime(2026, 9, 23, 15, 0)), (None, 39))
+
+    def test_old_crm_answer_without_the_list_is_no_data(self):
+        self.assertEqual(rules.orders_at(driver(total=40, week=5), NOW), (None, None))
+
+    def test_new_driver_list_is_complete_even_before_the_window(self):
+        """Первый заказ позже начала окна — до окна заказов не было: день выдачи
+        за границей окна всё равно считается точно."""
+        drv = driver(total=1, week=1, times=[datetime(2026, 9, 23, 16, 0)])
+        drv['orders']['first_order_at'] = '2026-09-23 16:00:00'
+        # До 15:00 заказов не было: ни в тот день, ни всего.
+        self.assertEqual(rules.orders_at(drv, datetime(2026, 9, 23, 15, 0)), (0, 0))
+
+    def test_truncated_list_counts_only_from_its_oldest_order(self):
+        times = [datetime(2026, 9, 29, 9, 0), datetime(2026, 9, 29, 11, 0)]
+        drv = driver(total=900, week=500, times=times, truncated=True)
+        self.assertEqual(rules.orders_at(drv, datetime(2026, 9, 29, 10, 0)), (None, 899))
+
+
 if __name__ == '__main__':
     unittest.main()

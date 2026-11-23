@@ -15,6 +15,16 @@ import {
   accessSegments,
   accessSession,
   accessSummary,
+  BACKFILL_FIELD_ORDER,
+  BACKFILL_KINDS,
+  BACKFILL_NEEDS_MOMENT,
+  backfillBasis,
+  backfillHeadline,
+  backfillKindHints,
+  backfillMoment,
+  backfillNote,
+  backfillProblems,
+  tripsGenitive,
   blocksWord,
   conditionGroups,
   daysWord,
@@ -24,6 +34,8 @@ import {
   forecastLabel,
   isCountDraft,
   issueOffices,
+  localNow,
+  officeIssuers,
   nextIssueLine,
   nextOfficeId,
   officePlace,
@@ -414,4 +426,90 @@ test('closing: stay while saving, ask once with unsaved ticks, then close', () =
   assert.equal(accessCloseStep({ saving: false, dirty: true, confirmClose: false }), 'ask');
   assert.equal(accessCloseStep({ saving: false, dirty: true, confirmClose: true }), 'close');
   assert.equal(accessCloseStep({ saving: false, dirty: false, confirmClose: false }), 'close');
+});
+
+/* Выдача задним числом (владелец 23.11.2026). */
+const FILLED = {
+  driver: true, kind: 'welcome', officeId: 2, day: '2026-11-22', time: '12:00', issuerId: 425,
+  needsFk: false, fkChecked: false, now: { day: '2026-11-23', time: '11:05' },
+};
+
+test('backfill: full form has no problems and gives the moment', () => {
+  assert.deepEqual(backfillProblems(FILLED), {});
+  assert.equal(backfillMoment('2026-11-22', '12:00'), '2026-11-22T12:00');
+  assert.equal(backfillMoment('2026-11-22', ''), '');
+});
+
+test('backfill: every missing field is named at the field', () => {
+  const problems = backfillProblems({ now: FILLED.now });
+  assert.deepEqual(Object.keys(problems).sort(), ['day', 'driver', 'issuer', 'kind', 'office', 'time']);
+  assert.equal(problems.kind, 'Выберите вид выдачи');
+  assert.equal(problems.issuer, 'Сначала выберите офис');
+  assert.equal(backfillProblems({ ...FILLED, issuerId: null }).issuer, 'Выберите, кто выдал');
+  assert.equal(backfillProblems({ ...FILLED, driver: false }).driver,
+    'Этому водителю внести нельзя — причины в карточке ниже');
+  assert.equal(backfillProblems({ ...FILLED, needsFk: true }).fk, 'Подтвердите, что водитель прошёл ФК');
+  assert.deepEqual(backfillProblems({ ...FILLED, needsFk: true, fkChecked: true }), {});
+  // Порядок полей окна покрывает все пункты.
+  assert.deepEqual([...BACKFILL_FIELD_ORDER].sort(), ['day', 'driver', 'fk', 'issuer', 'kind', 'office', 'time']);
+  // Вид выбирается сразу за водителем — раньше ФК, офиса и времени.
+  assert.deepEqual(BACKFILL_FIELD_ORDER.slice(0, 2), ['driver', 'kind']);
+});
+
+test('backfill: the future is not backfill', () => {
+  assert.equal(backfillProblems({ ...FILLED, day: '2026-11-23', time: '11:10' }).time, 'Это время ещё не наступило');
+  assert.deepEqual(backfillProblems({ ...FILLED, day: '2026-11-23', time: '11:05' }), {});
+  assert.equal(localNow(new Date(2026, 10, 3, 9, 7)).day, '2026-11-03');
+  assert.equal(localNow(new Date(2026, 10, 3, 9, 7)).time, '09:07');
+});
+
+test('backfill: issuers of the chosen office, by name', () => {
+  const access = {
+    offices: [{ id: 1, user_ids: [421] }, { id: 2, user_ids: [426, 425] }],
+    people: [{ id: 421, name: 'Максат' }, { id: 425, name: 'Асель' }, { id: 426, name: 'Диана' }],
+  };
+  assert.deepEqual(officeIssuers(access, 2).map((person) => person.name), ['Асель', 'Диана']);
+  assert.deepEqual(officeIssuers(access, 3), []);
+  assert.deepEqual(officeIssuers(null, 2), []);
+});
+
+test('backfill: journal note names when and who', () => {
+  assert.equal(backfillNote({}), '');
+  assert.equal(backfillNote({ backfilled_at: '2026-11-23T11:05:00', backfilled_by_name: 'Суперов Самат' },
+    () => '23.11.2026 11:05'), 'Внесено задним числом 23.11.2026 11:05 · Суперов Самат');
+});
+
+test('backfill: kinds are the journal words, hints use the program numbers', () => {
+  assert.deepEqual(BACKFILL_KINDS.map((item) => item.value), ['welcome', 'activity']);
+  assert.deepEqual(BACKFILL_KINDS.map((item) => item.label), [KIND_LABELS.welcome, KIND_LABELS.activity]);
+  const lines = backfillKindHints({ min_trips: 20, cooldown_days: 7 });
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].startsWith('Приветственная — '));
+  assert.ok(lines[1].startsWith('За активность — блок за 20 поездок с прошлой выдачи, не чаще раза в 7 дней'));
+  assert.ok(backfillKindHints({ min_trips: 21, cooldown_days: 1 })[1].includes('21 поездка'));
+});
+
+test('backfill: the verdict plate says what it can prove', () => {
+  assert.equal(backfillHeadline(null), '');
+  assert.equal(backfillHeadline({ kind: 'activity', needs_moment: true }), '');
+  assert.ok(BACKFILL_NEEDS_MOMENT.startsWith('Выберите дату и время выдачи'));
+  assert.equal(backfillHeadline({ kind: 'welcome', allowed: true }), 'Можно внести приветственный блок');
+  assert.equal(backfillHeadline({ kind: 'activity', allowed: true }), 'Можно внести блок за активность');
+  assert.equal(backfillHeadline({ kind: 'activity', allowed: false }), 'Внести нельзя');
+
+  const exact = { kind: 'activity', allowed: true, trips: 24, trips_exact: true, trips_basis: 'since_last', min_trips: 20 };
+  assert.equal(backfillBasis(exact), '24 поездки с прошлой выдачи до этой');
+  assert.equal(backfillBasis({ ...exact, trips: 21, trips_basis: 'week' }), '21 поездка за 7 дней до этой выдачи');
+  assert.equal(backfillBasis({ ...exact, trips: 25, trips_exact: false }), 'Не меньше 25 поездок с прошлой выдачи до этой');
+  assert.equal(backfillBasis({ ...exact, trips: 12, trips_exact: false }),
+    'Не меньше 12 поездок с прошлой выдачи до этой — точнее CRM не показала');
+  assert.equal(backfillBasis({ ...exact, trips: 1, trips_exact: false }),
+    'Не меньше 1 поездки с прошлой выдачи до этой — точнее CRM не показала');
+  assert.equal(backfillBasis({ ...exact, trips: null, trips_exact: false }),
+    'Сколько было поездок до этой выдачи, CRM не показала');
+  // У приветственного и у отказа строки основания нет.
+  assert.equal(backfillBasis({ kind: 'welcome', allowed: true, trips: 0, trips_exact: null }), '');
+  assert.equal(backfillBasis({ ...exact, allowed: false }), '');
+  assert.equal(tripsGenitive(2), '2 поездок');
+  assert.equal(tripsGenitive(31), '31 поездки');
 });

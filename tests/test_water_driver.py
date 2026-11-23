@@ -251,6 +251,43 @@ class PublicCardTests(unittest.TestCase):
         self.assertNotIn('2026-09-30 11:40:19', repr(card))
 
 
+class BackfillSnapshotTests(unittest.TestCase):
+    """Снимок выдачи задним числом: карточка сегодняшняя, заказы — на момент
+    выдачи. `orders.today` снимка следующая выдача вычитает как «заказы дня
+    выдачи до неё» — сегодняшний today туда попасть не должен."""
+
+    def test_orders_are_cut_to_the_moment_and_todays_counters_are_kept_aside(self):
+        from datetime import datetime
+        data = crm(['business', 'econom'])
+        data['orders']['last_7_days']['items'][0]['booked_at'] = '2026-09-29 10:03:05'
+        data['orders']['last_7_days']['items'][1]['booked_at'] = '2026-09-30 09:00:00'
+        found = water_driver.normalize(data)
+        moment = datetime(2026, 9, 29, 12, 0)
+        info = water_driver.snapshot_at(found, moment, today=1, total=2399,
+                                        entered_at=datetime(2026, 10, 1, 13, 5))
+        orders = info['orders']
+        self.assertEqual((orders['today'], orders['total'], orders['week'], orders['month']), (1, 2399, None, None))
+        self.assertEqual([item['booked_at'] for item in orders['last_7_days']['items']], ['2026-09-29 10:03:05'])
+        self.assertEqual((orders['last_7_days']['count'], orders['last_7_days']['to']), (1, '2026-09-29 12:00:00'))
+        self.assertEqual(orders['last_order_at'], '2026-09-29 10:03:05')
+        self.assertEqual(info['_backfill']['moment'], '2026-09-29 12:00:00')
+        self.assertEqual(info['_backfill']['entered_at'], '2026-10-01 13:05:00')
+        self.assertEqual(info['_backfill']['orders_at_entry']['today'], 2)
+        self.assertEqual(info['_backfill']['orders_at_entry']['total'], 2400)
+        # Карточку CRM не портит: снимок — копия.
+        self.assertEqual(found['info']['orders']['today'], 2)
+        self.assertEqual(len(found['info']['orders']['last_7_days']['items']), 2)
+
+    def test_unknown_numbers_stay_unknown(self):
+        from datetime import datetime
+        found = water_driver.normalize(crm(['business'], last_7_days=False))
+        info = water_driver.snapshot_at(found, datetime(2026, 9, 29, 12, 0), today=None, total=None,
+                                        entered_at=datetime(2026, 10, 1, 13, 5))
+        self.assertIsNone(info['orders']['today'])
+        self.assertIsNone(info['orders']['total'])
+        self.assertNotIn('last_7_days', info['orders'])
+
+
 class RuleIsUnchangedTests(unittest.TestCase):
     """Разбивка недели — для экрана. Правило «20 поездок» считает все тарифы."""
 

@@ -473,3 +473,103 @@ export const accessPeopleGroups = (people, office) => {
                 || Number(a?.id) - Number(b?.id)),
         }));
 };
+
+/* ── Выдача задним числом (владелец 23.11.2026) ───────────────────────────
+   Супер-админ вносит блок, который выдали, но не отметили: «если офисник
+   забыл нажать кнопку, а водитель уже выполняет заказы» — приветственный, а
+   с того же дня и за активность («да, сделай»). */
+
+export const tripsGenitive = (count) => `${count} ${plural(count, 'поездки', 'поездок', 'поездок')}`;
+
+/* Вид выдачи — сегментами, подписи как в журнале. */
+export const BACKFILL_KINDS = [
+    { value: 'welcome', label: KIND_LABELS.welcome },
+    { value: 'activity', label: KIND_LABELS.activity },
+];
+
+/* «i» у выбора вида — по строке «Вид — смысл» на вариант, числа из условий программы. */
+export const backfillKindHints = (settings) => {
+    const trips = Number(settings?.min_trips ?? 20);
+    const days = Number(settings?.cooldown_days ?? 7);
+    return [
+        `${KIND_LABELS.welcome} — первый блок новому водителю, один на человека; нужен пройденный ФК`,
+        `${KIND_LABELS.activity} — блок за ${tripsWord(trips)} с прошлой выдачи, не чаще раза в ${daysWord(days)}; `
+            + 'дни и поездки считаются на момент выдачи',
+    ];
+};
+
+/* Плашка решения в окне: заголовок и строка основания. Пустой заголовок — плашки
+   нет (вид не выбран) или вместо неё подсказка выбрать время (needs_moment). */
+export const backfillHeadline = (verdict) => {
+    if (!verdict || verdict.needs_moment) return '';
+    if (!verdict.allowed) return 'Внести нельзя';
+    return verdict.kind === 'activity' ? 'Можно внести блок за активность' : 'Можно внести приветственный блок';
+};
+
+export const BACKFILL_NEEDS_MOMENT = 'Выберите дату и время выдачи — по ним проверятся дни с прошлой выдачи и поездки';
+
+/* Основание блока за активность: поездки до этой выдачи. Точное число — когда
+   CRM отдала все заказы отрезка (списком «7 дней» или счётом за даты), иначе
+   «не меньше». Пояснение — только когда «не меньше» не дотягивает до порога:
+   иначе экран говорил бы «можно» и «мало» сразу. */
+export const backfillBasis = (verdict) => {
+    if (!verdict || verdict.kind !== 'activity' || !verdict.allowed) return '';
+    const where = verdict.trips_basis === 'since_last' ? 'с прошлой выдачи до этой' : 'за 7 дней до этой выдачи';
+    if (verdict.trips === null || verdict.trips === undefined) {
+        return 'Сколько было поездок до этой выдачи, CRM не показала';
+    }
+    if (verdict.trips_exact) return `${tripsWord(verdict.trips)} ${where}`;
+    const short = Number(verdict.min_trips) > 0 && verdict.trips < Number(verdict.min_trips);
+    return `Не меньше ${tripsGenitive(verdict.trips)} ${where}${short ? ' — точнее CRM не показала' : ''}`;
+};
+
+/* Момент выдачи для сервера: «ГГГГ-ММ-ДДTЧЧ:ММ», местное время. */
+export const backfillMoment = (day, time) => (day && time ? `${day}T${time}` : '');
+
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/* Сейчас по часам компьютера — «ГГГГ-ММ-ДД» и «ЧЧ:ММ». */
+export const localNow = (now = new Date()) => ({
+    day: `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`,
+    time: `${pad2(now.getHours())}:${pad2(now.getMinutes())}`,
+});
+
+/* Чего не хватает в окне — по полю, словами «что сделать». Пустой объект —
+   можно отправлять. driver: null — ещё не найден, false — найден, но внести
+   ему нельзя (причины видны в карточке под полем), true — можно. */
+export const backfillProblems = ({ driver, kind, officeId, day, time, issuerId, needsFk, fkChecked, now }) => {
+    const problems = {};
+    if (driver === null || driver === undefined) problems.driver = 'Вставьте ссылку на водителя или его ID';
+    else if (driver === false) problems.driver = 'Этому водителю внести нельзя — причины в карточке ниже';
+    if (!kind) problems.kind = 'Выберите вид выдачи';
+    if (needsFk && !fkChecked) problems.fk = 'Подтвердите, что водитель прошёл ФК';
+    if (!officeId) problems.office = 'Выберите офис';
+    if (!day) problems.day = 'Выберите дату';
+    if (!time) problems.time = 'Укажите время';
+    else if (day && now && backfillMoment(day, time) > `${now.day}T${now.time}`) {
+        problems.time = 'Это время ещё не наступило';
+    }
+    if (!issuerId) problems.issuer = officeId ? 'Выберите, кто выдал' : 'Сначала выберите офис';
+    return problems;
+};
+
+/* Порядок полей в окне — к первому незаполненному окно и подводит. */
+export const BACKFILL_FIELD_ORDER = ['driver', 'kind', 'fk', 'office', 'day', 'time', 'issuer'];
+
+/* Кто выдаёт воду в офисе — из состояния «Доступа по офисам» (GET /access),
+   по имени. */
+export const officeIssuers = (access, officeId) => {
+    const office = (access?.offices || []).find((item) => item.id === officeId);
+    if (!office) return [];
+    const ids = new Set(office.user_ids || []);
+    return (access?.people || [])
+        .filter((person) => ids.has(person.id))
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ru'));
+};
+
+/* Пометка в журнале: «Внесено задним числом 23.11.2026 11:05 · Кто». */
+export const backfillNote = (item, fmt) => {
+    if (!item?.backfilled_at) return '';
+    const when = fmt ? fmt(item.backfilled_at) : String(item.backfilled_at);
+    return [`Внесено задним числом ${when}`.trim(), item.backfilled_by_name].filter(Boolean).join(' · ');
+};

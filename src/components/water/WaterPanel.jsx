@@ -22,7 +22,8 @@ import { T, wIcon, wTabs } from './waterUi';
  *   Выдача     — вставить ID водителя, увидеть право и выдать
  *   Проверка   — то же без кнопки «Выдать» (колл-центр СЗоВ и ОП)
  *   Остатки    — дашборд по офисам; поступления, пересчёт, пороги — руководителю
- *   Журнал     — история выдач с фильтрами и выгрузкой (руководителю)
+ *   Журнал     — история выдач с фильтрами и выгрузкой (руководителю);
+ *                супер-админ вносит в нём забытую выдачу задним числом
  *   Настройки  — условия программы и доступ по офисам (руководителю);
  *                остальным — «Условия», то же только для чтения
  */
@@ -166,6 +167,9 @@ const WaterPanel = ({ apiBaseUrl, headers, showToast }) => {
                     headers={headers}
                     reloadKey={journalKey}
                     canManage={Boolean(capabilities.can_manage)}
+                    canBackfill={Boolean(capabilities.can_backfill)}
+                    offices={offices}
+                    settings={settings}
                     onStockChanged={putOffice}
                     showToast={showToast}
                 />

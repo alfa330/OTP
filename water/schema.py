@@ -164,7 +164,15 @@ _STATEMENTS = [
         canceled_at        TIMESTAMP,
         canceled_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
         canceled_by_name   VARCHAR(200),
-        cancel_reason      TEXT
+        cancel_reason      TEXT,
+
+        -- Выдача, внесённая задним числом (супер-админ, 23.11.2026): офисник
+        -- выдал воду, но не нажал «Выдать». created_at — когда выдали у
+        -- стойки, issued_by — кто выдал; здесь — кто и когда внёс запись.
+        backfilled_at      TIMESTAMP,
+        backfilled_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        backfilled_by_name VARCHAR(200),
+        backfill_comment   TEXT
     )
     """ % _NOW,
 
@@ -274,6 +282,14 @@ _MIGRATIONS = [
     # «без уникальности» снаружи не видно.
     "DROP INDEX IF EXISTS uq_water_welcome_account",
     "DROP INDEX IF EXISTS uq_water_welcome_iin",
+
+    # Выдача задним числом (23.11.2026). Тоже правки water_issues — до
+    # water_movements, порядок таблиц тот же, что у дашборда (см. ниже).
+    "ALTER TABLE water_issues ADD COLUMN IF NOT EXISTS backfilled_at TIMESTAMP",
+    "ALTER TABLE water_issues ADD COLUMN IF NOT EXISTS backfilled_by INTEGER "
+    "REFERENCES users(id) ON DELETE SET NULL",
+    "ALTER TABLE water_issues ADD COLUMN IF NOT EXISTS backfilled_by_name VARCHAR(200)",
+    "ALTER TABLE water_issues ADD COLUMN IF NOT EXISTS backfill_comment TEXT",
 
     # Пересчёт, учтённый в «Поступило» (05.10.2026). Стоит ПОСЛЕ правок
     # water_issues: дашборд берёт таблицы в том же порядке (выдачи, потом

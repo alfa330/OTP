@@ -37,11 +37,14 @@
 ответе не должен молча выдавать приветственный блок.
 """
 
+import copy
 import logging
 
 import requests
 
 from parcels import drivers as crm
+
+from .rules import moment_of
 
 DriverLookupError = crm.DriverLookupError
 
@@ -159,6 +162,10 @@ def normalize(data):
             'month': _int_or_none(orders.get('month')),
             'total': _int_or_none(orders.get('total')),
             'last_order_at': _text(orders.get('last_order_at'), 32),
+            # Первый заказ: не раньше начала списка «7 дней» — значит, в
+            # списке все заказы водителя (выдача задним числом считает по нему
+            # поездки до выдачи точно, rules._orders_list).
+            'first_order_at': _text(orders.get('first_order_at'), 32),
             # Разбивка недели по тарифам — для экрана: сотрудник видит, сколько
             # заказов на тарифах программы. Само право по-прежнему считается
             # по `week`/`total`, то есть по всем тарифам.
@@ -191,6 +198,39 @@ def lookup(raw, **kwargs):
     # CRM отдаёт account_id в ответе; если вдруг нет — берём то, что спросили.
     driver['account_id'] = driver.get('account_id') or account_id
     return driver
+
+
+def snapshot_at(driver, moment, *, today, total, entered_at):
+    """Снимок CRM для выдачи задним числом — каким он был бы в момент выдачи.
+
+    Карточку берём сегодняшнюю (другой нет), а заказы — на тот момент: из
+    списка «7 дней» остаются только сделанные до выдачи, `today` и `total` —
+    посчитанные по нему (rules.orders_at; None — «нет данных»), недели и
+    месяца на тот момент не восстановить — None. Сегодняшние счётчики не
+    пропадают: они в `_backfill` вместе с моментом выдачи и временем записи.
+    """
+    info = copy.deepcopy(driver.get('info') or {})
+    orders = info.get('orders') if isinstance(info.get('orders'), dict) else {}
+    at_entry = {key: orders.get(key) for key in ('today', 'week', 'month', 'total', 'last_order_at')}
+    stamp = moment.strftime('%Y-%m-%d %H:%M:%S')
+    snapshot = dict(orders, today=today, total=total, week=None, month=None)
+    block = orders.get('last_7_days')
+    if isinstance(block, dict):
+        items = []
+        for item in block.get('items') or []:
+            when = moment_of(item.get('booked_at') or item.get('ended_at')) if isinstance(item, dict) else None
+            if when is not None and when < moment:
+                items.append(item)
+        snapshot['last_7_days'] = dict(block, items=items, count=len(items), to=stamp)
+        snapshot['last_order_at'] = max((str(item.get('booked_at') or item.get('ended_at'))
+                                         for item in items), default=None)
+    info['orders'] = snapshot
+    info['_backfill'] = {
+        'moment': stamp,
+        'entered_at': entered_at.strftime('%Y-%m-%d %H:%M:%S'),
+        'orders_at_entry': at_entry,
+    }
+    return info
 
 
 def public(driver):
