@@ -55210,6 +55210,29 @@ try:
 except Exception:
     logging.exception("Окно Syntony: сторож списка НЕ запущен")
 
+# Дневной лимит расхода Vertex AI (владелец, 23.11.2026: «поставить дневной лимит 5$, чтобы
+# такого больше не происходило вообще» — 18–19.11 вторая машина потратила ≈ 87 $): сторож раз в
+# минуту считает расход дня и на лимите выключает Vertex AI API до нового дня счёта Google
+# (vertex_budget/guard.py). Только там, где бот и планировщик, — один сторож на стенд.
+if ROLE_RUNS_BOT:
+    try:
+        from vertex_budget import guard as vertex_budget_guard  # noqa: E402
+
+        def _vertex_budget_notify(text):
+            if not super_admin_id:
+                logging.warning("Vertex AI, дневной лимит: SUPER_ADMIN_ID не задан — сообщение владельцу не ушло")
+                return
+            response = _send_telegram_text_message(super_admin_id, text, parse_mode=None)
+            if response.status_code != 200:
+                logging.warning("Vertex AI, дневной лимит: Telegram не принял сообщение — %s",
+                                _get_telegram_error_text(response))
+
+        if vertex_budget_guard.start_worker(_vertex_budget_notify):
+            logging.info("Vertex AI: сторож дневного лимита запущен — %.2f $ в день",
+                         vertex_budget_guard.limit_usd())
+    except Exception:
+        logging.exception("Vertex AI: сторож дневного лимита НЕ запущен")
+
 
 def _syntony_flags_for(user_id):
     """Что человеку открыто в окне Syntony — те же правила, что у его ручек
