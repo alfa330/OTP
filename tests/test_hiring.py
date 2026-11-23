@@ -72,6 +72,16 @@ class StageTests(unittest.TestCase):
         # «Отработал 7 дней» руками тоже не ставится — только система по сменам.
         self.assertNotIn('hired', [dst for (_src, dst) in rules.TRANSITIONS])
 
+    def test_whatsapp_repeat_only_after_72_hours(self):
+        # Владелец 23.11.2026: новая карточка «повторно» по сообщению WhatsApp — только через 72 часа после закрытия.
+        from datetime import datetime as dt, timedelta as td
+        closed = dt(2026, 11, 20, 12, 35)
+        self.assertEqual(rules.WA_REPEAT_AFTER_HOURS, 72)
+        self.assertFalse(rules.wa_repeat_allowed(closed, closed + td(hours=2)))
+        self.assertFalse(rules.wa_repeat_allowed(closed, closed + td(hours=72) - td(seconds=1)))
+        self.assertTrue(rules.wa_repeat_allowed(closed, closed + td(hours=72)))
+        self.assertTrue(rules.wa_repeat_allowed(None, closed))           # закрытия не было — как раньше
+
     def test_shift_credits_one_decision_for_seven_and_ten(self):
         """Логика SZOV-10 буквально: 7 смен — «7 дней»; 10 — обе; 8 — рекрутеру 7, тренеру ничего; недобор до 10 не
         отклоняет «7 дней»; раз засчитанное не повторяется."""

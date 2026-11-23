@@ -1509,6 +1509,16 @@ class HiringService:
             if card and not card['is_closed']:
                 self._wa_candidate_answered(cursor, card['id'], message, now)
                 return 'stored'
+        # Пишет кандидат, чью карточку недавно закрыли (владелец 23.11.2026: «чтобы не было повтора, если даже будет —
+        # только если кандидат обратно напишет через 72 ч»): раньше 72 часов после закрытия новой карточки «повторно» нет,
+        # сообщение остаётся в чате закрытой — там его видно («Ждут ответа») и оттуда отвечают. Открытая карточка номера
+        # (пришла с другой площадки) — как раньше: сообщение — повторный отклик в неё (_intake_one).
+        if not queries.open_card_by_phone(cursor, message['phone']):
+            closed = self._wa_recently_closed(cursor, chat, message['phone'], message['at'] or now)
+            if closed:
+                if chat.get('card_id') != closed['id']:
+                    queries.wa_set_chat_card(cursor, key, closed['id'], now)
+                return 'closed_recent'
         intake_source = target if target and target['is_active'] and whatsapp.from_ads(message['ad']) else source
         outcome, card_id = self._intake_one(
             cursor, phone=message['phone'], kind=rules.KIND_RESPONSE, source=intake_source, now=now, by_name='WhatsApp',
@@ -1520,6 +1530,18 @@ class HiringService:
         if outcome == 'repeat':
             self._wa_candidate_answered(cursor, card_id, message, now)
         return outcome
+
+    @staticmethod
+    def _wa_recently_closed(cursor, chat, phone, at):
+        """Закрытая карточка номера, после закрытия которой не прошло 72 часа к моменту сообщения, — иначе None.
+        Последняя закрытая: карточка чата или последняя закрытая по номеру — что закрыто позже."""
+        cards = [queries.get_card(cursor, chat['card_id']) if chat.get('card_id') else None,
+                 queries.last_closed_card_by_phone(cursor, phone)]
+        closed = [card for card in cards if card and card['is_closed'] and card.get('closed_at')]
+        if not closed:
+            return None
+        card = max(closed, key=lambda item: item['closed_at'])
+        return None if rules.wa_repeat_allowed(card['closed_at'], at) else card
 
     def _wa_candidate_answered(self, cursor, card_id, message, now):
         """Кандидат написал на номер найма — «Недозвон / не ответил» к нему больше не относится (владелец

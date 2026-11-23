@@ -2480,9 +2480,20 @@ def test_whatsapp_repeat_closed_and_employee(world):
         cur.execute("SELECT COUNT(*) FROM hiring_notifications WHERE kind = 'repeat_response' AND user_id = %s", (REC1,))
         assert cur.fetchone()[0] == 1
         assert queries.wa_get_chat(cur, '+77055553344')['card_id'] == card['id']
-        # Карточку закрыли — следующее обращение в WhatsApp заводит новую с пометкой «повторное».
-        cur.execute("UPDATE hiring_cards SET is_closed = TRUE, closed_at = %s WHERE id = %s", (NOW, card['id']))
-    assert service.wa_events({'events': [wa_event('r3', phone='77055553344')]})['outcomes'] == {'created': 1}
+        # Карточку закрыли (отказ). Кандидат пишет снова в течение 72 часов — новой карточки «повторно» нет (владелец
+        # 23.11.2026: «чтобы не было повтора… только если кандидат обратно напишет через 72 ч»): сообщение — в чате
+        # закрытой карточки и ждёт ответа.
+        cur.execute("UPDATE hiring_cards SET stage = 'refused', is_closed = TRUE, closed_at = %s WHERE id = %s", (NOW, card['id']))
+    assert service.wa_events({'events': [wa_event('r3', phone='77055553344', ts=WA_TS + 120)]})['outcomes'] == {'closed_recent': 1}
+    assert service.wa_events({'events': [wa_event('r4', phone='77055553344', ts=WA_TS + 72 * 3600 - 1)]})['outcomes'] == {'closed_recent': 1}
+    with world['db']._get_cursor() as cur:
+        assert queries.open_card_by_phone(cur, '+77055553344') is None
+        chat = queries.wa_get_chat(cur, '+77055553344')
+        assert chat['card_id'] == card['id'] and chat['waiting'] == 4      # r1–r4: ответа ещё не было
+        cur.execute("SELECT COUNT(*) FROM hiring_cards WHERE phone = '+77055553344'")
+        assert cur.fetchone()[0] == 1
+    # Через 72 часа после закрытия и позже — новая карточка с пометкой «повторное», чат переходит к ней.
+    assert service.wa_events({'events': [wa_event('r5', phone='77055553344', ts=WA_TS + 72 * 3600)]})['outcomes'] == {'created': 1}
     with world['db']._get_cursor() as cur:
         fresh = queries.open_card_by_phone(cur, '+77055553344')
         assert fresh['repeat_of_card_id'] == card['id'] and queries.wa_get_chat(cur, '+77055553344')['card_id'] == fresh['id']
@@ -2491,6 +2502,33 @@ def test_whatsapp_repeat_closed_and_employee(world):
     with world['db']._get_cursor() as cur:
         assert queries.open_card_by_phone(cur, '+77779998877') is None
         assert queries.wa_get_chat(cur, '+77779998877')['card_id'] is None
+
+
+def test_whatsapp_within_72h_of_closing_no_repeat_card(world):
+    """Карточка пришла не из WhatsApp (руками, hh) и закрыта отказом; кандидат впервые пишет на номер найма через час —
+    чат привязывается к закрытой карточке, новой нет. Открытая карточка номера с другой площадки — сообщение идёт в неё
+    повторным откликом, как раньше. Повторный отклик с площадки (не WhatsApp) после отказа правило не трогает."""
+    service = world['service']
+    me = ctx_of(world, REC1)
+    card = take_and_touch(world, REC1, '8 705 555 71 72', full_name='Сидоров')
+    with world['db']._get_cursor() as cur:
+        reason = queries.reason_by_name(cur, 'refusal_candidate', 'Нашел другую работу')
+    service.move(me, card['id'], 'refused', {'initiator': 'candidate', 'reason_id': reason['id']})
+    hour_later = WA_TS + 3600
+    assert service.wa_events({'events': [wa_event('s1', phone='77055557172', ts=hour_later, text='Почему отказ?')]})['outcomes'] \
+        == {'closed_recent': 1}
+    with world['db']._get_cursor() as cur:
+        chat = queries.wa_get_chat(cur, '+77055557172')
+        assert chat['card_id'] == card['id'] and chat['waiting'] == 1 and queries.open_card_by_phone(cur, '+77055557172') is None
+    listed = service.wa_chats(me, {'stages': 'refused'})
+    assert [item['card_id'] for item in listed['items']] == [card['id']] and listed['items'][0]['waiting'] == 1
+    # Тот же номер снова пришёл откликом руками — открытая карточка «повторно» (площадки правило не трогает),
+    # и сообщение WhatsApp теперь идёт в неё, а не в закрытую.
+    outcome, fresh = add_response(world, REC1, '8 705 555 71 72')
+    assert outcome == 'created' and fresh['repeat_of_card_id'] == card['id']
+    assert service.wa_events({'events': [wa_event('s2', phone='77055557172', ts=hour_later + 60)]})['outcomes'] == {'repeat': 1}
+    with world['db']._get_cursor() as cur:
+        assert queries.wa_get_chat(cur, '+77055557172')['card_id'] == fresh['id']
 
 
 def test_whatsapp_hidden_and_foreign_numbers(world):
