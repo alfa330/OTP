@@ -58,7 +58,7 @@ const Num = ({ value, onOpen, strong = false }) => {
     if (!onOpen) return <span className={`px-1 ${value ? 'text-slate-900' : 'text-slate-300'} ${strong ? 'font-semibold' : ''}`}>{text}</span>;
     return (
         <button type="button" onClick={onOpen}
-                className={`rounded-md px-1 tabular-nums text-slate-900 underline-offset-2 transition hover:bg-slate-100 hover:underline ${strong ? 'font-semibold' : ''}`}>
+                className={`rounded-md px-1 tabular-nums text-slate-900 underline-offset-2 transition hover:bg-slate-50 hover:underline ${strong ? 'font-semibold' : ''}`}>
             {text}
         </button>
     );
@@ -244,7 +244,8 @@ const NoteEditor = ({ api, toast, day, initial, name, autoFocus = false, onSaved
 
     const counter = noteCounter(text);
     return (
-        <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 transition hover:bg-slate-100/80 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/70">
+        <div className="cursor-text rounded-xl bg-slate-50 px-3.5 py-2.5 transition focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/70"
+             onClick={() => areaRef.current?.focus()}>
             {(name || status || counter) && (
                 <div className="flex items-baseline justify-between gap-3">
                     <span className="text-[12px] font-medium text-slate-500">{name}</span>
