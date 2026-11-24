@@ -773,6 +773,15 @@ TEZ_DEFAULT_SETTINGS = {
 # пачки состояли из повторов целиком, 23.11 оператор 204 раза получил назад водителя, с которым сам говорил.
 REPEAT_SHARE_OFF = 100
 REPEAT_SHARE_DEFAULTS = {PROFILE_REMOTE_CC: 20, PROFILE_TEZ: REPEAT_SHARE_OFF}
+# Строка без обработки возвращается в общий список (владелец, 24.11.2026: «сделай так, чтобы если водитель в течение
+# 8 часов лежит у кого-то в списке без обработки, возвращались в список»). Без обработки — строка выдана больше
+# IDLE_ROW_RELEASE_HOURS назад и за это время по ней не было ни одного звонка, а руководитель не возвращал водителя в
+# список. 24.11 так 715 водителей, которым ни разу не звонили, неделю лежали у 13 сотрудников, не звонящих им
+# (менеджеры фронт-офиса в режиме «Телефон»), и другим операторам не доставались. Только удалённый КЦ (у Тез
+# свои сроки перезвона оператора). Проверка — из состояния телефона не чаще IDLE_ROW_SWEEP_SEC на отдел и перед
+# каждым «Ещё».
+IDLE_ROW_RELEASE_HOURS = 8
+IDLE_ROW_SWEEP_SEC = 300
 # Итог с датой (dial_list_outcomes.due_kind): 'callback' — «Перезвонить» (дата и время перезвона),
 # 'online' — «Согласен выйти на линию» (когда выйдет); '' — без даты. Итог с датой всегда
 # «перезвонить» (requeue): водитель ждёт своего срока, а не уходит в «обработанные».
@@ -1956,6 +1965,9 @@ class DialListService:
         # целиком — и по звонкам обзвона, и по остальным звонкам компании; ошибка наблюдателя
         # вебхук не роняет. Вешает bot_schedule2 после подключения обоих разделов.
         self.call_observers = []
+        # Строки без обработки — в общий список (24.11.2026, release_idle_rows): когда отдел проверяли последний раз.
+        self._idle_sweep_at = {}
+        self._idle_sweep_lock = threading.Lock()
 
     # ------------------------------------------------------------ доступ и отделы
     _DEPARTMENTS_SQL = """
@@ -5636,6 +5648,8 @@ class DialListService:
         звонок (direct_dial): номер водителя в строках пачки и у идущего звонка (phone)."""
         ctx = self.operator_context(user_id)
         self.reconcile(ctx)
+        # Строки без обработки 8 ч — в общий список (24.11.2026); не чаще раза в IDLE_ROW_SWEEP_SEC на отдел.
+        self._release_idle_rows_for(ctx)
         settings = ctx["settings"]
         today = _today()
         guarded = phone_guards_speech(phone_version)
@@ -6323,6 +6337,10 @@ class DialListService:
                 # Строку закрыл руководитель («Исключить») или сервер, увидев подпись
                 # документов (sign_check, звонок подписавшему), а не АТС: это не недозвон.
                 continue
+            if tab == WORKED_NO_ANSWER and r[4] == "other" and r[10] is None:
+                # Строку закрыли без единого звонка: вернули в общий список (8 ч без обработки, 24.11.2026) или
+                # отдали другому оператору (закрепление) — это не недозвон, на вкладках её нет.
+                continue
             if tab != WORKED_NO_ANSWER and tab not in tabs:
                 # Итог выключили уже после звонка — вкладка живёт, пока по ней кто-то есть.
                 extra.setdefault(tab, {"key": tab, "name": r[11] or "Итог", "color": r[12] or WORKED_NO_ANSWER_COLOR,
@@ -6503,6 +6521,8 @@ class DialListService:
         settings = ctx["settings"]
         with self.db._get_cursor() as cur:
             self._refuse_next_portion(cur, ctx)
+        # Строки без обработки 8 ч — в общий список сейчас же (24.11.2026): их водители достанутся этой пачке.
+        self._release_idle_rows_for(ctx, force=True)
         try:
             # Автообзвон Тез (15.10.2026): у его лидов нет ИИН и Sapar, цель — выход на линию:
             # вместо подписания перед выдачей сверяются поездки в TEZ APP.
@@ -6575,6 +6595,88 @@ class DialListService:
                  "" if repeats is None else f", повторов {repeats} (доля не больше {self._repeat_share(ctx)} %)",
                  f", из прошлой выдачи переехало {len(carried)} — ждут исхода от АТС" if carried else "")
         return self.get_state(user_id, phone_version=phone_version)
+
+    # ------------------------------------------------------------ строка без обработки (24.11.2026)
+    # Строки выдачи отдела, которые лежат у оператора без обработки дольше %(hours)s: выданы раньше, звонков по ним
+    # за это время не было, руководитель водителя в список не возвращал (requeue/restore — «Вернуть в список»
+    # переоткрывает старую строку, её created_at давний). Под замком строки, занятые — мимо (SKIP LOCKED): звонок,
+    # который как раз начинается (start_call держит строку FOR UPDATE), не прерывается, а начатый после — получит
+    # «Эта строка уже обработана». Отдел и база месяца — водителя: только обзваниваемая база (строки прошлых баз
+    # телефон и так не показывает — _dial_base). tried — звонили ли по строке вообще.
+    _IDLE_ROWS_SQL = """
+        SELECT a.id, a.portion_id, a.operator_id,
+               EXISTS (SELECT 1 FROM dial_list_attempts tt WHERE tt.assignment_id = a.id) AS tried
+        FROM dial_list_assignments a
+        JOIN dial_list_leads l ON l.id = a.lead_id
+        WHERE a.state = 'issued' AND l.department_id = %(department_id)s AND l.period = %(period)s
+          AND a.created_at < CURRENT_TIMESTAMP - make_interval(hours => %(hours)s)
+          AND NOT EXISTS (SELECT 1 FROM dial_list_attempts t
+                          WHERE t.assignment_id = a.id
+                            AND t.requested_at > CURRENT_TIMESTAMP - make_interval(hours => %(hours)s))
+          AND NOT EXISTS (SELECT 1 FROM dial_list_lead_events e
+                          WHERE e.lead_id = a.lead_id AND e.kind IN ('requeue', 'restore')
+                            AND e.created_at > CURRENT_TIMESTAMP - make_interval(hours => %(hours)s))
+        FOR UPDATE OF a SKIP LOCKED
+    """
+
+    def release_idle_rows(self, department_id, period=None, hours=IDLE_ROW_RELEASE_HOURS):
+        """Строки обзваниваемой базы (period; не передан — база отдела, department_settings), которые лежат у
+        оператора без обработки дольше hours (_IDLE_ROWS_SQL), — водитель снова в общем списке:
+          * строка, по которой не звонили вовсе, удаляется — как будто её не выдавали: ни в «Моём прогрессе»
+            («выдано», «обработано»), ни на вкладках итогов её нет, а история водителя строится по звонкам;
+          * строка, по которой звонили давно (отказ АТС, отбой до ответа, отказ сети — строка осталась в работе),
+            закрывается без результата, как «Исключить» (_close_row: 'done', 'other'): звонки остаются в истории.
+        Выдача закрывается, если обрабатывать в ней больше нечего. Возвращает, сколько строк вернули."""
+        if period is None:
+            period = self.department_settings(department_id)["_period"]
+        with self.db._get_cursor() as cur:
+            cur.execute(self._IDLE_ROWS_SQL, {"department_id": int(department_id), "period": period,
+                                              "hours": int(hours)})
+            rows = cur.fetchall()
+            if not rows:
+                return 0
+            cur.execute("""
+                DELETE FROM dial_list_assignments a
+                WHERE a.id = ANY(%s::uuid[]) AND a.state = 'issued'
+                  AND NOT EXISTS (SELECT 1 FROM dial_list_attempts t WHERE t.assignment_id = a.id)
+            """, ([str(r[0]) for r in rows if not r[3]],))
+            released = cur.rowcount
+            cur.execute("""
+                UPDATE dial_list_assignments SET state = 'done', result = 'other', done_at = CURRENT_TIMESTAMP
+                WHERE id = ANY(%s::uuid[]) AND state = 'issued'
+            """, ([str(r[0]) for r in rows if r[3]],))
+            released += cur.rowcount
+            cur.execute("""
+                UPDATE dial_list_portions p SET closed_at = CURRENT_TIMESTAMP
+                WHERE p.id = ANY(%s::uuid[]) AND p.closed_at IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM dial_list_assignments a WHERE a.portion_id = p.id AND a.state = 'issued')
+            """, (sorted({str(r[1]) for r in rows}),))
+        by_operator = {}
+        for r in rows:
+            by_operator[int(r[2])] = by_operator.get(int(r[2]), 0) + 1
+        log.info("dial_list: отдел %s — %d строк без обработки дольше %d ч вернулись в общий список (операторы: %s)",
+                 department_id, released, hours, ", ".join(f"{op}: {n}" for op, n in sorted(by_operator.items())))
+        return released
+
+    def _release_idle_rows_for(self, ctx, force=False):
+        """Строки без обработки — в общий список (release_idle_rows) для отдела этого оператора: только удалённый КЦ,
+        не чаще IDLE_ROW_SWEEP_SEC на отдел (состояние телефона спрашивают каждые несколько секунд), force — сейчас
+        же («Ещё»). Сбой не мешает тому, ради чего вызвали: в журнал и дальше."""
+        settings = ctx.get("settings") or {}
+        if str(settings.get("profile") or "").strip().lower() != PROFILE_REMOTE_CC:
+            return 0
+        department_id = int(ctx["department_id"])
+        now = time.monotonic()
+        with self._idle_sweep_lock:
+            last = self._idle_sweep_at.get(department_id)
+            if not force and last is not None and now - last < IDLE_ROW_SWEEP_SEC:
+                return 0
+            self._idle_sweep_at[department_id] = now
+        try:
+            return self.release_idle_rows(department_id, period=settings.get("_period"))
+        except Exception:
+            log.exception("dial_list: строки без обработки отдела %s не вернулись в список", department_id)
+            return 0
 
     # ------------------------------------------------------------ доля повторов в пачке (24.11.2026)
     @staticmethod
