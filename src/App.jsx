@@ -146,7 +146,7 @@ import IosDatePicker from './components/ui/DatePicker';
 import CustomSelect from './components/ui/CustomSelect';
 import MonthPicker from './components/trainings/MonthPicker';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId, headedDepartmentsOf } from './utils/roles';
-import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeDirection, departmentHidesEmployeeInternship, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesEmployeeTaxiproId, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole, managesEmployeeAccounting, personalViewsAllow, rankAndFileTasksAllowed } from './utils/departmentViews';
+import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeDirection, departmentHidesEmployeeInternship, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesEmployeeTaxiproId, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentsOutsideEmployeeAccounting, departmentUsesSimpleEmployeeAccounting, EMPLOYEE_ACCOUNTING_LISTS_SCOPE, firstAllowedView, hasEmployeeAccountingUserGrant, hasFullEmployeeAccounting, isBackOfficeEmployeeRole, keepOutsideEmployeeAccounting, managesEmployeeAccounting, outsideEmployeeAccountingDepartmentIds, personalViewsAllow, rankAndFileTasksAllowed } from './utils/departmentViews';
 // Отдельной строкой: общий импорт выше тесты держат дословно.
 import { departmentHasSupervisorHours, headsSupervisorHoursDepartment } from './utils/departmentViews';
 import SupervisorDayMarksModal from './components/hours/SupervisorDayMarksModal';
@@ -44991,8 +44991,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const canUseAdminEmployeeAccounting = isAdminLikeRole || isDepartmentHeadUser;
             /* Отдел кадров: «Учет сотрудников» по всей компании, с правкой.
                Флаг взводится и у ГЛАВЫ отдела кадров — с 22.09.2026 их права
-               по людям совпадают. */
-            const isEmployeeAccountingManager = managesEmployeeAccounting(user);
+               по людям совпадают. И у того, кому раздел выдан поимённо
+               (EMPLOYEE_ACCOUNTING_USER_GRANTS, 24.11.2026): в разделе он
+               кадровик. */
+            const isEmployeeAccountingManager = hasFullEmployeeAccounting(user);
+            /* Член отдела кадров — то, что сверх раздела: графики любого отдела
+               (владелец 09.11.2026). Поимённому допуску этого не выдавали. */
+            const isHrDepartmentMember = managesEmployeeAccounting(user);
+            /* Поимённый допуск: общие справочники раздел просит у сервера по всей
+               компании (?scope=…), а остальным разделам отдаётся срез главы —
+               см. usersOutsideEmployeeAccounting ниже. */
+            const employeeAccountingUserGrant = hasEmployeeAccountingUserGrant(user);
+            const employeeAccountingListsParams = employeeAccountingUserGrant
+                ? { params: { scope: EMPLOYEE_ACCOUNTING_LISTS_SCOPE } }
+                : {};
             /* Кто из ответа /api/admin/users попадает в списки «Учета сотрудников» —
                одно правило на fetchUsers и на страницы с сервера (useEmployeesPage).
                Пояснение, почему набор именно такой, — у fetchUsers. */
@@ -45295,7 +45307,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     /* Кадровику раздел — не свои смены, а графики всех отделов
                        (владелец 09.11.2026): кнопка «Графики» ниже, ежедневная. */
                     myShifts: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
-                        && !isEmployeeAccountingManager
+                        && !isHrDepartmentMember
                         && departmentAllowsView(user, 'work_schedules'),
                     myShiftAuction: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
                         && departmentAllowsView(user, 'shift_auction'),
@@ -45327,7 +45339,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             ), [
                 user, wikiSectionEnabled, eventsSectionShown, canAccessLmsSection, canAccessGroupLateBotSection,
                 isAdminLikeRole, isDepartmentManager, isPlainTrainer, currentUserRole,
-                isScopedDepartmentHead, isEmployeeAccountingManager, eventsUnreadCount, tasksActionRequiredCount,
+                isScopedDepartmentHead, isHrDepartmentMember, eventsUnreadCount, tasksActionRequiredCount,
                 pendingSurveysBadgeCount, canAccessDressCodeSection,
             ]);
             /* «Обращения». Бейдж — непрочитанные ответы из Telegram-групп.
@@ -45508,6 +45520,33 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const [adminUsers, setAdminUsers] = useState([]);
             const [systemAdmins, setSystemAdmins] = useState([]);
             const [trainerUsers, setTrainerUsers] = useState([]);
+            /* Поимённый допуск к «Учету сотрудников» (EMPLOYEE_ACCOUNTING_USER_GRANTS):
+               общие справочники выше пришли по всей компании — их просит раздел
+               (employeeAccountingListsParams). Остальным разделам — графикам,
+               опросам, конкурсам, тех. сбоям, аукциону смен, часам СВ, ИИ-оценке —
+               отдаём срез главы отдела, ровно тот, что сервер вернул бы без ?scope
+               (departmentViews.js: outsideEmployeeAccountingDepartmentIds). У всех
+               остальных срез — тот же массив, без копии. */
+            const outsideEmployeeAccountingIds = useMemo(
+                () => outsideEmployeeAccountingDepartmentIds(user),
+                [user],
+            );
+            const usersOutsideEmployeeAccounting = useMemo(
+                () => keepOutsideEmployeeAccounting(users, outsideEmployeeAccountingIds),
+                [users, outsideEmployeeAccountingIds],
+            );
+            const svListOutsideEmployeeAccounting = useMemo(
+                () => keepOutsideEmployeeAccounting(svList, outsideEmployeeAccountingIds),
+                [svList, outsideEmployeeAccountingIds],
+            );
+            const directionsOutsideEmployeeAccounting = useMemo(
+                () => keepOutsideEmployeeAccounting(directions, outsideEmployeeAccountingIds),
+                [directions, outsideEmployeeAccountingIds],
+            );
+            const departmentsOutsideEmployeeAccountingList = useMemo(
+                () => departmentsOutsideEmployeeAccounting(departments, user),
+                [departments, user],
+            );
             const [adminSessionPeople, setAdminSessionPeople] = useState([]);
             const [adminSessionsSummary, setAdminSessionsSummary] = useState({
                 total_people: 0,
@@ -49616,7 +49655,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const supervisorFilterOptions = useMemo(() => {
                 const rows = Array.isArray(svData?.operators) ? svData.operators : [];
                 const map = new Map();
-                const activeSupervisors = (Array.isArray(svList) ? svList : []).filter(
+                // Раздел «Операторы» — не «Учет сотрудников»: поимённому допуску к
+                // нему здесь СВ своего отдела, а не компании.
+                const activeSupervisors = (Array.isArray(svListOutsideEmployeeAccounting) ? svListOutsideEmployeeAccounting : []).filter(
                     (sv) => sv?.status === 'working' || sv?.status === 'unpaid_leave' || !sv?.status
                 );
                 const activeSupervisorIds = new Set(
@@ -49643,7 +49684,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 return Array.from(map.entries())
                     .map(([id, name]) => ({ id, name }))
                     .sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }));
-            }, [svData?.operators, svList]);
+            }, [svData?.operators, svListOutsideEmployeeAccounting]);
 
             const directionFilterOptions = useMemo(() => {
                 const rows = Array.isArray(svData?.operators) ? svData.operators : [];
@@ -50782,7 +50823,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         setIsLoading(true);
                         try {
                             const response = await axios.get(`${API_BASE_URL}/api/admin/directions`, {
-                                headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                                headers: withAccessTokenHeader({ 'X-User-Id': user.id }),
+                                ...employeeAccountingListsParams,
                             });
                             const data = response.data;
                             if (data.status === 'success' && isMounted.current) {
@@ -50803,7 +50845,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     if (!user || !user.id) return;
                     try {
                         const response = await axios.get(`${API_BASE_URL}/api/admin/departments`, {
-                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id }),
+                            ...employeeAccountingListsParams,
                         });
                         const data = response.data;
                         if (data?.status === 'success' && Array.isArray(data.departments) && isMounted.current) {
@@ -50849,7 +50892,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     if (!user || !user.id) return;
                     const requestGroups = (departmentId = null) => axios.get(`${API_BASE_URL}/api/groups`, {
                         headers: withAccessTokenHeader({ 'X-User-Id': user.id }),
-                        ...(departmentId != null ? { params: { department_id: departmentId } } : {}),
+                        // Карточке — группы всей компании и поимённому допуску к разделу.
+                        ...(departmentId != null ? { params: { department_id: departmentId } } : employeeAccountingListsParams),
                     });
                     try {
                         const response = await requestGroups();
@@ -50937,7 +50981,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                     try {
                         const response = await axios.get(`${API_BASE_URL}/api/admin/users`, {
-                            headers: { 'X-User-Id': user.id }
+                            headers: { 'X-User-Id': user.id },
+                            ...employeeAccountingListsParams,
                         });
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
@@ -51235,13 +51280,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
             }, [user?.id, refreshAdminSessions]);
 
+            /* Отдел в выгрузке выбирает тот, кому сервер выгружает всю компанию:
+               глобальный админ и «Учет сотрудников» целиком (кадровик, поимённый
+               допуск) — get_users_report принимает у них department_id. Им же
+               не годится подпись «только сотрудники вашего отдела». */
+            const usersReportPicksDepartment = isAdminLikeRole || isEmployeeAccountingManager;
             const openUsersReportModal = () => {
                     if (isLoading) return;
                     setUsersReportOptions((prev) => ({
                         ...prev,
-                        departmentId: isAdminLikeRole ? (manageUsersDeptFilter || '') : ''
+                        departmentId: usersReportPicksDepartment ? (manageUsersDeptFilter || '') : ''
                     }));
-                    if (isAdminLikeRole && departments.length === 0) {
+                    if (usersReportPicksDepartment && departments.length === 0) {
                         fetchDepartments();
                     }
                     setShowUsersReportModal(true);
@@ -51262,7 +51312,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         if (exportOptions.periodMonth) {
                             params.set('period_month', exportOptions.periodMonth);
                         }
-                        if (isAdminLikeRole && exportOptions.departmentId) {
+                        if (usersReportPicksDepartment && exportOptions.departmentId) {
                             params.set('department_id', exportOptions.departmentId);
                         }
                         const response = await axios.get(`${API_BASE_URL}/api/admin/users_report?${params.toString()}`, {
@@ -51640,8 +51690,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             });
                         }
                     }
-                    // Department reassignment (только админы; бэкенд тоже это проверяет)
-                    if (isAdminLikeRole) {
+                    // Перевод в другой отдел: глобальный админ и тот, у кого «Учет
+                    // сотрудников» целиком, — кадровик и поимённый допуск. Сервер
+                    // пускает их же (admin_update_user, personnel_manager); без них в
+                    // условии открытое в карточке поле «Отдел» молча не сохранялось.
+                    if (isAdminLikeRole || isEmployeeAccountingManager) {
                         const nextDept = editedUser.department_id ? Number(editedUser.department_id) : null;
                         const prevDept = userToEdit?.department_id ? Number(userToEdit.department_id) : null;
                         if (nextDept !== null && nextDept !== prevDept) {
@@ -53029,7 +53082,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     await fetchUsers();
                     try {
                         const svResponse = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
-                            headers: withAccessTokenHeader({ })
+                            headers: withAccessTokenHeader({ }),
+                            // Тот же список, что у fetchSvList: разделу — по всей компании.
+                            ...employeeAccountingListsParams,
                         });
                         const svDataPayload = svResponse?.data || {};
                         if (svDataPayload.status === 'success' && isMounted.current) {
@@ -53113,7 +53168,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     await fetchUsers();
                     try {
                         const svResponse = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
-                            headers: withAccessTokenHeader({ })
+                            headers: withAccessTokenHeader({ }),
+                            // Тот же список, что у fetchSvList: разделу — по всей компании.
+                            ...employeeAccountingListsParams,
                         });
                         const svDataPayload = svResponse?.data || {};
                         if (svDataPayload.status === 'success' && isMounted.current) {
@@ -53363,7 +53420,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                     try {
                         const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
-                            headers: { }
+                            headers: { },
+                            ...employeeAccountingListsParams,
                         });
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
@@ -57708,7 +57766,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
                                                     {/* Кадровик ведёт графики любого отдела (владелец 09.11.2026):
                                                         у него это не свои смены, а раздел целиком. */}
-                                                    <FaIcon className="fas fa-calendar-alt"></FaIcon> <span className="sidebar-text">{isEmployeeAccountingManager ? 'Графики работы' : 'Мои смены'}</span>
+                                                    <FaIcon className="fas fa-calendar-alt"></FaIcon> <span className="sidebar-text">{isHrDepartmentMember ? 'Графики работы' : 'Мои смены'}</span>
                                                 </button>
                                             </li>
                                             )}
@@ -59154,7 +59212,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
-                                    directions={directions}
+                                    directions={directionsOutsideEmployeeAccounting}
                                 />
                             </Suspense>
                         )}
@@ -59492,7 +59550,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <ShiftAuctionView
                                     user={user}
-                                    operators={users}
+                                    operators={usersOutsideEmployeeAccounting}
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
@@ -60844,14 +60902,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     )}
                                 </div>
                                 )}
-                                {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
+                                {( view === "contests" && (<ContestsApp user={user} operators={usersOutsideEmployeeAccounting} directions={directionsOutsideEmployeeAccounting} />))}
                                 {( view === "monitoring_scale" && (
                                     <MonitoringScaleView
                                         user={user}
-                                        directions={directions}
+                                        directions={directionsOutsideEmployeeAccounting}
                                         onSave={saveDirections}
                                         onRefresh={fetchDirections}
-                                        departments={departments}
+                                        departments={departmentsOutsideEmployeeAccountingList}
                                         showToast={showToast}
                                         canEdit={isAdminLikeRole}
                                     />
@@ -60863,11 +60921,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             showToast={showToast}
-                                            departments={departments}
+                                            departments={departmentsOutsideEmployeeAccountingList}
                                         />
                                     </Suspense>
                                 ))}
-                                {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
+                                {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={usersOutsideEmployeeAccounting} directions={directionsOutsideEmployeeAccounting} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "tasks" && (
                                     <TasksView
                                         user={user}
@@ -60884,12 +60942,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         onOpenProduction={canAccessProductionSection ? openProductionFromTasks : null}
                                     />
                                 ))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={usersOutsideEmployeeAccounting} directions={directionsOutsideEmployeeAccounting} departments={departmentsOutsideEmployeeAccountingList} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "events" && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <EventsView
                                             user={user}
-                                            departments={departments}
+                                            departments={departmentsOutsideEmployeeAccountingList}
                                             showToast={showToast}
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
@@ -60906,7 +60964,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         withAccessTokenHeader={withAccessTokenHeader}
                                     />
                                 ))}
-                                {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
+                                {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svListOutsideEmployeeAccounting} showToast={showToast} />))}
                                 {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <ResourceFteView
@@ -60930,7 +60988,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     </Suspense>
                                 ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments} shiftRequestFocus={shiftRequestFocus}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={usersOutsideEmployeeAccounting} user={user} departments={departmentsOutsideEmployeeAccountingList} shiftRequestFocus={shiftRequestFocus}/>))}
                                 {( view === "departments" && isAdminLikeRole && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <DepartmentsView
@@ -61168,10 +61226,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         {( view === "monitoring_scale" && !isAdminLikeRole && isDepartmentManager && isDepartmentHeadUser && (
                             <MonitoringScaleView
                                 user={user}
-                                directions={directions}
+                                directions={directionsOutsideEmployeeAccounting}
                                 onSave={saveDirections}
                                 onRefresh={fetchDirections}
-                                departments={departments}
+                                departments={departmentsOutsideEmployeeAccountingList}
                                 showToast={showToast}
                                 canEdit={isDepartmentHeadUser}
                             />
@@ -61958,12 +62016,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             showToast={showToast}
-                                            departments={departments}
+                                            departments={departmentsOutsideEmployeeAccountingList}
                                         />
                                     </Suspense>
                                 ))}
-                                {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
-                                {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
+                                {( view === "contests" && (<ContestsApp user={user} operators={usersOutsideEmployeeAccounting} directions={directionsOutsideEmployeeAccounting} />))}
+                                {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={usersOutsideEmployeeAccounting} directions={directionsOutsideEmployeeAccounting} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "tasks" && (
                                     <TasksView
                                         user={user}
@@ -61980,12 +62038,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         onOpenProduction={canAccessProductionSection ? openProductionFromTasks : null}
                                     />
                                 ))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={usersOutsideEmployeeAccounting} directions={directionsOutsideEmployeeAccounting} departments={departmentsOutsideEmployeeAccountingList} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "events" && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <EventsView
                                             user={user}
-                                            departments={departments}
+                                            departments={departmentsOutsideEmployeeAccountingList}
                                             showToast={showToast}
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
@@ -61994,7 +62052,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         />
                                     </Suspense>
                                 ))}
-                                {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
+                                {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svListOutsideEmployeeAccounting} showToast={showToast} />))}
                                 {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <ResourceFteView
@@ -62016,7 +62074,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     </Suspense>
                                 ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments} shiftRequestFocus={shiftRequestFocus}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={usersOutsideEmployeeAccounting} user={user} departments={departmentsOutsideEmployeeAccountingList} shiftRequestFocus={shiftRequestFocus}/>))}
                             </>
                         )}
                         {isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
@@ -62042,13 +62100,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         onOpenProduction={canAccessProductionSection ? openProductionFromTasks : null}
                                     />
                                 ))}
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments} shiftRequestFocus={shiftRequestFocus}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={usersOutsideEmployeeAccounting} user={user} departments={departmentsOutsideEmployeeAccountingList} shiftRequestFocus={shiftRequestFocus}/>))}
                                 {/* Временный просмотр всех графиков (WORK_SCHEDULE_VIEW_ONLY_USER_IDS): сетка
                                     руководителя без правки. key — свой экземпляр, не «Мои смены» того же человека. */}
                                 {( view === WORK_SCHEDULES_VIEW_ONLY_VIEW && workSchedulesViewOnly && (
-                                    <ShiftPlannerViewWithCalendar key={WORK_SCHEDULES_VIEW_ONLY_VIEW} viewOnlyAll initialOperators={users} user={user} departments={departments}/>
+                                    <ShiftPlannerViewWithCalendar key={WORK_SCHEDULES_VIEW_ONLY_VIEW} viewOnlyAll initialOperators={usersOutsideEmployeeAccounting} user={user} departments={departmentsOutsideEmployeeAccountingList}/>
                                 ))}
-                                {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {( view === "surveys" && (<SurveysView user={user} operators={usersOutsideEmployeeAccounting} directions={directionsOutsideEmployeeAccounting} departments={departmentsOutsideEmployeeAccountingList} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {/* «Деление звонков»: пункт меню у рядового есть (ветка выше), а
                                     экран до сих пор был объявлен только в блоках админа и
                                     руководителя. Без этой строки раздел открывался бы в пустую
@@ -62058,7 +62116,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <EventsView
                                             user={user}
-                                            departments={departments}
+                                            departments={departmentsOutsideEmployeeAccountingList}
                                             showToast={showToast}
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
@@ -62159,7 +62217,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             showToast={showToast}
-                                            departments={departments}
+                                            departments={departmentsOutsideEmployeeAccountingList}
                                         />
                                     </Suspense>
                                 ))}
@@ -62185,7 +62243,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 {view === 'ai_feedback' && (
                                   <MonthlyFeedbackPage user={user} />
                                 )}
-                                {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
+                                {( view === "contests" && (<ContestsApp user={user} operators={usersOutsideEmployeeAccounting} directions={directionsOutsideEmployeeAccounting} />))}
                                 
                                 {view === 'hours' && (
                                     /* На телефоне раздел — список настроек телефона, как «Мои смены»
@@ -64974,7 +65032,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     )}
 
                                     <div className="space-y-6 px-6 py-6">
-                                        {isAdminLikeRole ? (
+                                        {usersReportPicksDepartment ? (
                                             <label className="block rounded-xl border border-slate-200 bg-white p-4">
                                                 <span className="mb-1.5 block text-sm font-semibold text-slate-900">Отдел</span>
                                                 <span className="mb-3 block text-xs text-slate-500">

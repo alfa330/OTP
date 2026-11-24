@@ -495,6 +495,9 @@ def _add_user(payload, requester):
         'jsonify': lambda body: body,
         '_get_authenticated_requester': lambda: (requester['id'], _requester_row(requester), None),
         '_is_employee_accounting_manager': lambda _requester_id: False,
+        '_has_full_employee_accounting': lambda _requester_id: False,
+        '_sees_employee_accounting_lists': lambda _requester_id: False,
+        '_has_employee_accounting_user_grant': lambda *_a, **_k: False,
         '_headed_department_id': lambda _requester_id: requester.get('headed'),
         '_headed_department_ids': lambda _requester_id: frozenset(requester.get('headed_ids') or ()),
     }
@@ -757,6 +760,9 @@ class GroupsOfTheChosenDepartmentTests(unittest.TestCase):
             '_headed_department_id': lambda _requester_id: requester.get('headed'),
             '_headed_department_ids': lambda _requester_id: frozenset(requester.get('headed_ids') or ()),
             '_is_employee_accounting_manager': lambda _requester_id: False,
+            '_has_full_employee_accounting': lambda _requester_id: False,
+            '_sees_employee_accounting_lists': lambda _requester_id: False,
+            '_has_employee_accounting_user_grant': lambda *_a, **_k: False,
             '_is_marketing_observer': lambda _requester_id, _role: False,
             '_is_supervisor_role': lambda role: str(role) == 'sv',
         }
@@ -820,6 +826,9 @@ class GroupsOfTheChosenDepartmentTests(unittest.TestCase):
             '_headed_department_id': lambda _requester_id: requester.get('headed'),
             '_headed_department_ids': lambda _requester_id: frozenset(requester.get('headed_ids') or ()),
             '_is_employee_accounting_manager': lambda _requester_id: False,
+            '_has_full_employee_accounting': lambda _requester_id: False,
+            '_sees_employee_accounting_lists': lambda _requester_id: False,
+            '_has_employee_accounting_user_grant': lambda *_a, **_k: False,
         }
         exec(_real(*_ROLE_HELPERS, '_ensure_group_in_requester_scope'), namespace)
         return namespace['_ensure_group_in_requester_scope'](group_id, requester['id'], requester['role'])
@@ -879,6 +888,9 @@ class BulkGroupMoveKeepsDepartmentsApartTests(unittest.TestCase):
             '_headed_department_id': lambda _requester_id: requester.get('headed'),
             '_headed_department_ids': lambda _requester_id: frozenset(requester.get('headed_ids') or ()),
             '_is_employee_accounting_manager': lambda _requester_id: personnel_manager,
+            '_has_full_employee_accounting': lambda _requester_id: personnel_manager,
+            '_sees_employee_accounting_lists': lambda _requester_id: personnel_manager,
+            '_has_employee_accounting_user_grant': lambda *_a, **_k: False,
             '_is_supervisor_role': lambda role: str(role) == 'sv',
             '_department_scope_id_for_requester': lambda _requester_id: requester.get('headed')
             or requester.get('department'),
@@ -1298,7 +1310,9 @@ class EmployeeCardWiringTests(unittest.TestCase):
             "                            .filter((departmentId) => departmentId !== Number(scopedDepartmentId))\n"
             "                        : [];", fetch)
         self.assertIn("const responses = await Promise.all(otherDepartmentIds.map(requestGroups));", fetch)
-        self.assertIn("...(departmentId != null ? { params: { department_id: departmentId } } : {}),", fetch)
+        # Без отдела — пометка раздела «Учет сотрудников» (группы всей компании
+        # поимённому допуску, EMPLOYEE_ACCOUNTING_USER_GRANTS); у остальных она пустая.
+        self.assertIn("...(departmentId != null ? { params: { department_id: departmentId } } : employeeAccountingListsParams),", fetch)
         # Не глава нескольких отделов — второго запроса нет, а чужой список чистится.
         self.assertIn("if (!otherDepartmentIds.length) {\n"
                       "                        // Следующему вошедшему в этом же окне чужие группы не достаются.\n"

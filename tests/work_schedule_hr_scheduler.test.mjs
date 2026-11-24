@@ -169,10 +169,12 @@ test('пункты руководителя линии стоят под усл�
 });
 
 test('в меню у кадровика пункт называется «Графики работы», в нижнем баре — «Графики»', () => {
-    assert.ok(appSource.includes("<span className=\"sidebar-text\">{isEmployeeAccountingManager ? 'Графики работы' : 'Мои смены'}</span>"));
+    // Графики любого отдела — членству в отделе кадров, не поимённому допуску к
+    // «Учету сотрудников» (isHrDepartmentMember, а не isEmployeeAccountingManager).
+    assert.ok(appSource.includes("<span className=\"sidebar-text\">{isHrDepartmentMember ? 'Графики работы' : 'Мои смены'}</span>"));
     assert.ok(appSource.includes(
         "myShifts: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead\n"
-        + '                        && !isEmployeeAccountingManager\n'
+        + '                        && !isHrDepartmentMember\n'
         + "                        && departmentAllowsView(user, 'work_schedules'),",
     ));
 });

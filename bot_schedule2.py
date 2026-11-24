@@ -1995,6 +1995,103 @@ def _is_employee_accounting_manager(requester_id):
     return verdict
 
 
+# «Учет сотрудников» ЦЕЛИКОМ — поимённо, людям вне отдела кадров. Решение
+# владельца 24.11.2026: «выдать им полный доступ для раздела учет сотрудников».
+# Ключ — код отдела, внутри users.id; ФИО в публичный репозиторий не кладём.
+#   accounting 467 — глава «Бухгалтерии»;
+#   analytik   229 — глава «Отдела аналитики».
+# В самом разделе права ровно кадровика: четыре списка по всей компании, правка
+# карточек и статусов, логины и пароли, заведение и переводы. Остальное, что
+# даёт членство в отделе кадров, — графики любого отдела, «Прием», «Табель»,
+# «АВР», тренинги и планы операторов — допуск НЕ открывает: там спрашивают
+# только отдел (_is_employee_accounting_manager), и у этих людей всё остаётся
+# как у главы своего отдела. Переведут в другой отдел — допуск снимется сам.
+# Зеркало на фронте — EMPLOYEE_ACCOUNTING_USER_GRANTS в
+# src/utils/departmentViews.js; совпадение держит
+# tests/test_employee_accounting_user_grants.py.
+EMPLOYEE_ACCOUNTING_USER_GRANTS = {
+    'accounting': frozenset({467}),
+    'analytik': frozenset({229}),
+}
+
+# Значение ?scope= у общих справочников (/api/admin/users, /api/admin/sv_list,
+# /api/admin/departments, /api/admin/directions, /api/groups), которым раздел
+# «Учет сотрудников» просит их по всей компании. Те же ручки читают «Графики
+# работы», «Опросы», «Группы», «Журнал оценок» и другие разделы — там у
+# человека с поимённым допуском справочники остаются про его отдел.
+EMPLOYEE_ACCOUNTING_LISTS_SCOPE = 'employee_accounting'
+
+
+def _has_employee_accounting_user_grant(requester_id):
+    """Выдан ли «Учет сотрудников» человеку поимённо (EMPLOYEE_ACCOUNTING_USER_GRANTS).
+
+    Отдел читается из базы только у тех, чей id есть в наборе, — остальным
+    ответ без запроса. Ответ запоминается на время запроса (flask.g).
+    """
+    try:
+        key = int(requester_id)
+    except (TypeError, ValueError):
+        return False
+    if not any(key in user_ids for user_ids in EMPLOYEE_ACCOUNTING_USER_GRANTS.values()):
+        return False
+
+    try:
+        cached = getattr(g, '_employee_accounting_user_grant_cache', None)
+    except Exception:
+        cached = None
+    if isinstance(cached, dict) and key in cached:
+        return cached[key]
+
+    try:
+        _, department_code = db.get_user_department(key)
+    except Exception:
+        department_code = None
+    code = str(department_code or '').strip().lower()
+    verdict = key in EMPLOYEE_ACCOUNTING_USER_GRANTS.get(code, ())
+
+    try:
+        if not isinstance(cached, dict):
+            cached = {}
+            g._employee_accounting_user_grant_cache = cached
+        cached[key] = verdict
+    except Exception:
+        pass
+    return verdict
+
+
+def _has_full_employee_accounting(requester_id):
+    """«Учет сотрудников» целиком, как у кадровика: отдел кадров или поимённый допуск.
+
+    Стоит в ручках самого раздела — списки, карточка, заведение, переводы,
+    повышение и понижение, логины и пароли, фото, история, выгрузка. Вопросы
+    вне раздела (графики, «Кадры», тренинги) задаёт _is_employee_accounting_manager:
+    их поимённый допуск не открывает.
+    """
+    return bool(
+        _is_employee_accounting_manager(requester_id)
+        or _has_employee_accounting_user_grant(requester_id)
+    )
+
+
+def _sees_employee_accounting_lists(requester_id):
+    """Общие справочники людей и структуры — по всей компании.
+
+    Кадровику — всегда, как с 22.09.2026. Поимённому допуску — только когда
+    справочник просит сам раздел (?scope=EMPLOYEE_ACCOUNTING_LISTS_SCOPE): по
+    этим же ручкам строят свои списки другие разделы, и у главы отдела они там
+    про её отдел. Расширенный ответ — те же люди и отделы, что раздел и так
+    показывает этому человеку, ничего сверх.
+    """
+    if _is_employee_accounting_manager(requester_id):
+        return True
+    try:
+        requested = (str(request.args.get('scope') or '').strip().lower()
+                     == EMPLOYEE_ACCOUNTING_LISTS_SCOPE)
+    except RuntimeError:
+        requested = False
+    return requested and _has_employee_accounting_user_grant(requester_id)
+
+
 def _is_super_admin_role(role) -> bool:
     return _normalize_user_role(role) == 'super_admin'
 
@@ -2437,7 +2534,8 @@ def _requester_can_access_target_user(
     *,
     allow_self=False,
     supervisor_target_roles=('operator', 'trainee'),
-    include_employee_accounting=True
+    include_employee_accounting=True,
+    employee_accounting_section=False
 ):
     requester_role = _normalize_user_role(requester[3])
     target_role = _normalize_user_role(target_user[3])
@@ -2459,6 +2557,15 @@ def _requester_can_access_target_user(
     # снять ЧС, перерывы, агрегация): кадровику его не выдавали, и граница
     # считается по его роли, как у любого другого.
     if include_employee_accounting and _is_employee_accounting_manager(requester_id):
+        return True
+    # Поимённый допуск к «Учету сотрудников» (EMPLOYEE_ACCOUNTING_USER_GRANTS) —
+    # та же граница, что у кадровика, но только в ручках самого раздела:
+    # employee_accounting_section=True ставят они, и только они. Через эту же
+    # функцию ходят графики, планы, тренинги и отчёты по часам — там у человека
+    # с допуском остаётся граница главы своего отдела. Стоит тоже ДО ветки
+    # главы: оба человека из набора — главы отделов.
+    if (include_employee_accounting and employee_accounting_section
+            and _has_employee_accounting_user_grant(requester_id)):
         return True
 
     headed_dept_ids = _headed_department_ids(requester_id)
@@ -2556,7 +2663,8 @@ def _load_target_user_with_scope(
     supervisor_target_roles=('operator', 'trainee'),
     not_found_message="User not found",
     forbidden_message="Forbidden",
-    include_employee_accounting=True
+    include_employee_accounting=True,
+    employee_accounting_section=False
 ):
     try:
         target_user_id_int = int(target_user_id)
@@ -2573,7 +2681,8 @@ def _load_target_user_with_scope(
         target_user,
         allow_self=allow_self,
         supervisor_target_roles=supervisor_target_roles,
-        include_employee_accounting=include_employee_accounting
+        include_employee_accounting=include_employee_accounting,
+        employee_accounting_section=employee_accounting_section
     ):
         return None, (forbidden_message, 403)
     return target_user, None
@@ -2910,7 +3019,8 @@ def _resolve_work_schedule_editor():
 
 
 def _resolve_scoped_operator_for_requester(
-    requester, requester_id, operator_id, *, allow_grant=True, allow_employee_accounting=True
+    requester, requester_id, operator_id, *, allow_grant=True, allow_employee_accounting=True,
+    employee_accounting_section=False
 ):
     """Чей график requester правит в «Графиках работы».
 
@@ -2918,6 +3028,11 @@ def _resolve_scoped_operator_for_requester(
     поимённый допуск их не открывает.
     allow_employee_accounting=False — для действий руководителя линии (штраф,
     снять ЧС, перерывы, агрегация): отдел кадров ведёт графики, но не их.
+    employee_accounting_section=True — ручка, которой пишет и карточка
+    «Учета сотрудников» (статус сотрудника, снять ЧС): человеку с поимённым
+    допуском к разделу (EMPLOYEE_ACCOUNTING_USER_GRANTS) цель — любой, как
+    кадровику. Сетку графиков допуск не расширяет — её строки считает
+    _filter_operators_for_requester_scope.
     """
     target_user, scope_error = _load_target_user_with_scope(
         requester,
@@ -2927,7 +3042,8 @@ def _resolve_scoped_operator_for_requester(
         supervisor_target_roles=('operator',),
         not_found_message="Operator not found",
         forbidden_message="Forbidden for this operator",
-        include_employee_accounting=allow_employee_accounting
+        include_employee_accounting=allow_employee_accounting,
+        employee_accounting_section=employee_accounting_section
     )
     if scope_error and scope_error[1] == 403 and allow_grant:
         granted_target = _work_schedule_granted_target(requester_id, operator_id, ('operator',))
@@ -13576,7 +13692,7 @@ app.register_blueprint(build_user_profile_blueprint(
         _headed_department_id=_headed_department_id,
         _is_admin_role=_is_admin_role,
         _is_allowed_origin=_is_allowed_origin,
-        _is_employee_accounting_manager=_is_employee_accounting_manager,
+        _has_full_employee_accounting=_has_full_employee_accounting,
         _is_super_admin_role=_is_super_admin_role,
         _is_supervisor_role=_is_supervisor_role,
         _load_target_user_with_scope=_load_target_user_with_scope,
@@ -14047,7 +14163,8 @@ def get_manager_candidates():
     Отдельно от /api/admin/users: тот супер-админов не отдаёт никому, а руководитель —
     часто именно супер-админ (учредитель, директор по развитию). Только тем, кто это
     поле правит (_manager_assignment_error и правка в admin_update_user): глобальному
-    админу и кадровику. Только имя, роль и отдел — без контактов и прочего профиля."""
+    админу и кадровику — и тому, кому раздел выдан поимённо. Только имя, роль и
+    отдел — без контактов и прочего профиля."""
     try:
         requester_id, requester, auth_error = _get_authenticated_requester()
         if auth_error:
@@ -14055,7 +14172,7 @@ def get_manager_candidates():
             return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3])
         if (not _is_global_admin_requester(requester_role, requester_id)
-                and not _is_employee_accounting_manager(requester_id)):
+                and not _has_full_employee_accounting(requester_id)):
             return jsonify({"error": "Forbidden"}), 403
         with db._get_cursor() as cursor:
             cursor.execute("""
@@ -14091,7 +14208,10 @@ def get_admin_users():
         # 22.09.2026). Проверка стоит ДО операторской ветки ниже: человека с
         # ролью 'operator', переведённого в отдел кадров, та ветка увела бы на
         # урезанную проекцию из семи полей — без телефонов, статусов и отдела.
-        employee_accounting_manager = _is_employee_accounting_manager(requester_id)
+        # Поимённый допуск к разделу — так же, но только по запросу самого
+        # раздела (?scope=employee_accounting): этот список читают и другие
+        # разделы, там он у главы про её отдел (_sees_employee_accounting_lists).
+        employee_accounting_manager = _sees_employee_accounting_lists(requester_id)
 
         if requester_role == 'operator' and not headed_dept_ids and not employee_accounting_manager:
             # Operator can only read a limited user projection.
@@ -14503,8 +14623,9 @@ def admin_update_user():
         requester_role = _normalize_user_role(requester[3]) if requester else ''
         headed_dept_id = _headed_department_id(requester_id)
         # Кадровик ведёт учёт по всей компании и правит любого — включая админа
-        # и включая перевод между отделами (решение владельца 22.09.2026).
-        personnel_manager = _is_employee_accounting_manager(requester_id)
+        # и включая перевод между отделами (решение владельца 22.09.2026). Так же —
+        # тот, кому раздел выдан поимённо (EMPLOYEE_ACCOUNTING_USER_GRANTS).
+        personnel_manager = _has_full_employee_accounting(requester_id)
         if (requester_role not in ('super_admin', 'admin', 'sv')
                 and headed_dept_id is None and not personnel_manager):
             return jsonify({"error": "Only admins can update users"}), 403
@@ -14532,7 +14653,8 @@ def admin_update_user():
             requester_id,
             target_user,
             allow_self=False,
-            supervisor_target_roles=scoped_target_roles
+            supervisor_target_roles=scoped_target_roles,
+            employee_accounting_section=True
         ):
             return jsonify({"error": "Forbidden for this user"}), 403
         # Проверка «направление и супервайзер из отдела сотрудника» — про
@@ -14635,7 +14757,8 @@ def admin_bulk_update_users():
 
         requester_role = _normalize_user_role(requester[3]) if requester else ''
         headed_dept_id = _headed_department_id(requester_id)
-        personnel_manager = _is_employee_accounting_manager(requester_id)
+        # Кадровик и поимённый допуск к разделу — как в точечной правке.
+        personnel_manager = _has_full_employee_accounting(requester_id)
         if (requester_role not in ('super_admin', 'admin', 'sv')
                 and headed_dept_id is None and not personnel_manager):
             return jsonify({"error": "Only admins can update users"}), 403
@@ -14732,7 +14855,8 @@ def admin_bulk_update_users():
                     requester_id,
                     target_user,
                     allow_self=False,
-                    supervisor_target_roles=scoped_target_roles
+                    supervisor_target_roles=scoped_target_roles,
+                    employee_accounting_section=True
                 ):
                     failed_user_ids.append(target_user_id)
                     continue
@@ -14831,7 +14955,7 @@ def admin_promote_to_supervisor():
 
         requester = db.get_user(id=requester_id)
         if not requester or not (_is_admin_role(requester[3])
-                                 or _is_employee_accounting_manager(requester_id)):
+                                 or _has_full_employee_accounting(requester_id)):
             return jsonify({"error": "Only admins can promote users"}), 403
 
         promoted_user = db.promote_operator_to_supervisor(target_user_id, changed_by=requester_id)
@@ -14918,7 +15042,7 @@ def admin_demote_to_operator():
             return jsonify({"error": message}), status_code
 
         requester_role = _normalize_user_role(requester[3]) if requester else ''
-        if not (_is_admin_role(requester_role) or _is_employee_accounting_manager(requester_id)):
+        if not (_is_admin_role(requester_role) or _has_full_employee_accounting(requester_id)):
             return jsonify({"error": "Понижать сотрудников может только администратор"}), 403
 
         target_user = db.get_user(id=target_user_id)
@@ -14930,6 +15054,7 @@ def admin_demote_to_operator():
             if not _requester_can_access_target_user(
                 requester, requester_id, target_user,
                 allow_self=False, supervisor_target_roles=('operator', 'trainee', 'trainer', 'sv'),
+                employee_accounting_section=True,
             ):
                 return jsonify({"error": "Этот сотрудник не в вашем отделе"}), 403
 
@@ -15007,8 +15132,10 @@ def api_admin_departments():
             # глава отдела кадров смотрит всю компанию, и отдав ему один свой
             # отдел, мы бы оставили фильтр с единственным пунктом над списком из
             # всех отделов. Справочник — это имена отделов, данных сотрудников
-            # в нём нет.
-            if _is_employee_accounting_manager(requester_id):
+            # в нём нет. Поимённому допуску к разделу — по запросу раздела
+            # (_sees_employee_accounting_lists): в остальных разделах у главы
+            # справочник по-прежнему из её отделов.
+            if _sees_employee_accounting_lists(requester_id):
                 return jsonify({"status": "success", "departments": db.get_departments()}), 200
             if headed_dept_ids and not _is_super_admin_role(requester_role):
                 departments = [
@@ -15808,7 +15935,8 @@ def get_sv_list():
         # выбрать, чьи оценки смотреть. Ручка только на чтение.
         # Кадровик: «Супервайзеры» — один из четырёх его списков, и карточку он
         # там правит наравне с админом, поэтому профиль ему нужен полный.
-        employee_accounting_manager = _is_employee_accounting_manager(requester_id)
+        # Поимённый допуск к разделу — так же, по запросу самого раздела.
+        employee_accounting_manager = _sees_employee_accounting_lists(requester_id)
         if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)
                 or headed_dept_ids or employee_accounting_manager
                 or _is_marketing_observer(requester_id, requester_role)):
@@ -17706,8 +17834,9 @@ def add_user():
         requester_headed_dept = db.headed_department_id_for_user(requester_id)
         # Кадровик заводит людей по всей компании: приём на работу — его работа.
         # Создание АДМИНА ему всё равно закрыто ниже — владелец такой кнопки не
-        # называл, а «без исключений» относилось к правке уже заведённых.
-        personnel_manager = _is_employee_accounting_manager(requester_id)
+        # называл, а «без исключений» относилось к правке уже заведённых. Так же —
+        # поимённый допуск к разделу (EMPLOYEE_ACCOUNTING_USER_GRANTS).
+        personnel_manager = _has_full_employee_accounting(requester_id)
         if (requester_role not in ('super_admin', 'admin', 'sv')
                 and requester_headed_dept is None and not personnel_manager):
             return jsonify({"error": "Only admins can add users"}), 403
@@ -18237,7 +18366,8 @@ def get_directions():
         # Кадровик — отдельной проверкой и с 22.09.2026: он правит направление
         # оператора ЛЮБОГО отдела, поэтому ему нужен весь справочник, а не свой
         # (своих направлений у отдела кадров нет вовсе — вышел бы пустой селект).
-        employee_accounting_manager = _is_employee_accounting_manager(requester_id)
+        # Поимённый допуск к разделу — так же, по запросу самого раздела.
+        employee_accounting_manager = _sees_employee_accounting_lists(requester_id)
         if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator'
                 or headed_dept_ids or employee_accounting_manager
                 or _is_marketing_observer(requester_id, role)):
@@ -18374,7 +18504,7 @@ def _ensure_group_operator_manager():
     role = _normalize_user_role(requester[3])
     headed_dept = _headed_department_id(requester_id)
     if not (_is_admin_role(role) or headed_dept is not None or _is_supervisor_role(role)
-            or _is_employee_accounting_manager(requester_id)):
+            or _has_full_employee_accounting(requester_id)):
         return None, None, None, (
             jsonify({"error": "Only admins, department heads or supervisors can move operators between groups"}),
             403,
@@ -18402,14 +18532,21 @@ def _ensure_group_in_supervisor_scope(group_id, requester_id):
     return None
 
 
-def _ensure_group_in_requester_scope(group_id, requester_id, role):
+def _ensure_group_in_requester_scope(group_id, requester_id, role, *, employee_accounting_section=False):
     """Изоляция отделов: глава отдела управляет только группами своего отдела
     (глава нескольких отделов — группами любого из своих).
     Глобальный админ/супер-админ — любыми группами. Возвращает (resp, code) при
-    отказе, иначе None."""
+    отказе, иначе None.
+
+    employee_accounting_section=True — перевод сотрудника в группу из карточки
+    «Учета сотрудников»: поимённому допуску к разделу группа любого отдела, как
+    кадровику. Остальное с группами (архив, имя, модель, состав СВ) допуск не
+    открывает — там у главы по-прежнему её отделы."""
     # Кадровик — наравне с глобальным админом: он зачисляет людей в группы
     # любого отдела, своих групп у отдела кадров нет.
     if _is_global_admin_requester(role, requester_id) or _is_employee_accounting_manager(requester_id):
+        return None
+    if employee_accounting_section and _has_employee_accounting_user_grant(requester_id):
         return None
     headed_dept = db.headed_department_id_for_user(requester_id)
     grp = db.get_group(group_id)
@@ -18429,16 +18566,23 @@ def _scoped_groups_for_requester(
     headed_dept_id,
     include_archived=False,
     department_id_arg=None,
+    employee_accounting_lists=False,
 ):
     """Группы, доступные запрашивающему. Единый источник правил для /api/groups и
     режима группы в /api/sv/data — иначе доступ в двух местах разъедется.
+
+    employee_accounting_lists=True — список просит карточка «Учета сотрудников»
+    (/api/groups?scope=employee_accounting): поимённому допуску к разделу группы
+    всей компании, как кадровику. /api/sv/data флаг не передаёт — часы чужих
+    групп допуск не открывает.
 
     Возвращает (groups, error): error — уже готовый (response, code) для 403.
     """
     # Кадровик переводит операторов между группами по всей компании: ветка стоит
     # ПЕРВОЙ, иначе глава отдела кадров получил бы группы своего отдела, которых
     # у отдела без линии не бывает, — пустой селект в карточке.
-    if _is_employee_accounting_manager(requester_id):
+    if _is_employee_accounting_manager(requester_id) or (
+            employee_accounting_lists and _has_employee_accounting_user_grant(requester_id)):
         department_id = (
             int(department_id_arg)
             if department_id_arg and str(department_id_arg).isdigit()
@@ -18498,6 +18642,7 @@ def list_groups_endpoint():
             headed_dept_id,
             include_archived=include_archived,
             department_id_arg=request.args.get('department_id'),
+            employee_accounting_lists=_sees_employee_accounting_lists(requester_id),
         )
         if scope_error:
             resp, code = scope_error
@@ -18771,21 +18916,26 @@ def add_group_operator_endpoint(group_id):
         if guard_err:
             resp, code = guard_err
             return resp, code
+        data = request.get_json() or {}
+        remove = bool(data.get('remove'))
+        # Перевод из карточки «Учета сотрудников» — зачислить без даты: поимённому
+        # допуску к разделу (EMPLOYEE_ACCOUNTING_USER_GRANTS) группа любого отдела.
+        # Убрать из группы и зачислить задним числом — работа «Групп», там у
+        # человека с допуском граница главы своего отдела.
+        card_move = not remove and not data.get('start_date')
         # СВ переводит операторов своего отдела — по своему скоупу, а не по
         # правилам главы отдела (у него нет headed_department_id).
         is_supervisor_move = _is_plain_supervisor_requester(rid, _role)
         if is_supervisor_move:
             scope_err = _ensure_group_in_supervisor_scope(group_id, rid)
         else:
-            scope_err = _ensure_group_in_requester_scope(group_id, rid, _role)
+            scope_err = _ensure_group_in_requester_scope(group_id, rid, _role, employee_accounting_section=card_move)
         if scope_err:
             resp, code = scope_err
             return resp, code
-        data = request.get_json() or {}
         operator_id = data.get('operator_id')
         if not operator_id:
             return jsonify({"error": "operator_id is required"}), 400
-        remove = bool(data.get('remove'))
         if is_supervisor_move:
             # СВ переводит оператора МЕЖДУ группами; оставить без группы нельзя —
             # тогда у оператора нет ни супервайзера, ни учёта часов.
@@ -19997,8 +20147,9 @@ def get_users_report():
         # Кадровик выгружает всю компанию — тем же охватом, каким он её видит на
         # экране (решение владельца 22.09.2026: выгрузка ничего не меняет, это то
         # же чтение, только файлом). Правки в выгрузке нет вовсе, поэтому
-        # рядового кадровика она не отличает от главы отдела кадров.
-        employee_accounting_manager = _is_employee_accounting_manager(requester_id)
+        # рядового кадровика она не отличает от главы отдела кадров. Поимённый
+        # допуск к разделу выгружает так же: кнопка выгрузки есть только в нём.
+        employee_accounting_manager = _has_full_employee_accounting(requester_id)
         if (not is_global_admin and not headed_department_ids and not is_supervisor
                 and not employee_accounting_manager):
             return jsonify({"error": "Only admins, department heads and supervisors can generate users report"}), 403
@@ -41754,7 +41905,13 @@ def save_work_schedule_status_period():
         if not operator_id or not status_code or not start_date:
             return jsonify({"error": "Missing required fields"}), 400
 
-        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+        # Ручка и карточки «Учета сотрудников» (статус «Уволен», «Б/С»,
+        # «Больничный», «Отпуск»): поимённому допуску к разделу цель — любой.
+        # Карточка шлёт статус без диапазона; диапазон и снимок смен в ответе
+        # просит сетка графиков — там у допуска граница главы своего отдела.
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(
+            user_data, requester_id, operator_id,
+            employee_accounting_section=not (range_start and range_end))
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
@@ -41892,9 +42049,12 @@ def remove_work_schedule_dismissal_blacklist():
         if not operator_id:
             return jsonify({"error": "Missing operator_id"}), 400
 
-        # Поимённый допуск даёт права СВ отдела, а СВ ЧС не снимает.
+        # Поимённый допуск даёт права СВ отдела, а СВ ЧС не снимает. Снять ЧС
+        # можно и из «Учета сотрудников» (запрос без диапазона) — допуску к
+        # разделу цель там любой; снимок смен для сетки — только в его границе.
         target_operator, scope_error = _resolve_scoped_operator_for_requester(
-            user_data, requester_id, operator_id, allow_grant=False)
+            user_data, requester_id, operator_id, allow_grant=False,
+            employee_accounting_section=not (range_start and range_end))
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
@@ -54222,7 +54382,7 @@ try:
         is_global_admin_requester=_is_global_admin_requester,
         headed_department_ids=_headed_department_ids,
         department_scope_id_for_requester=_department_scope_id_for_requester,
-        is_employee_accounting_manager=_is_employee_accounting_manager,
+        has_full_employee_accounting=_has_full_employee_accounting,
         build_avatar_signed_url=_build_avatar_signed_url,
         back_office_roles=BACK_OFFICE_EMPLOYEE_ROLES,
         proxy_status_labels=PROXY_STATUS_LABELS,

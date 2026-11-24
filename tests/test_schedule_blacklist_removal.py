@@ -100,8 +100,10 @@ class RemoveBlacklistRouteTests(unittest.TestCase):
         db = db or _RouteDB()
         scope_calls = [] if scope_calls is None else scope_calls
 
-        def resolve_scoped(user_data, requester_id, operator_id, *, allow_grant=True):
-            scope_calls.append({"operator_id": operator_id, "allow_grant": allow_grant})
+        def resolve_scoped(user_data, requester_id, operator_id, *, allow_grant=True,
+                           employee_accounting_section=False):
+            scope_calls.append({"operator_id": operator_id, "allow_grant": allow_grant,
+                                "employee_accounting_section": employee_accounting_section})
             return (None, scope_error) if scope_error else (_user(int(operator_id), "operator"), None)
 
         namespace = {
@@ -169,7 +171,10 @@ class RemoveBlacklistRouteTests(unittest.TestCase):
         а СВ ЧС не снимает: роут просит границу без допуска."""
         scope_calls = []
         self._call(_user(15, "admin"), heads={3}, scope_calls=scope_calls)
-        self.assertEqual(scope_calls, [{"operator_id": 50, "allow_grant": False}])
+        # Снять ЧС можно и из «Учета сотрудников»: поимённому допуску к разделу
+        # (EMPLOYEE_ACCOUNTING_USER_GRANTS) цель там любой, как кадровику.
+        self.assertEqual(scope_calls, [{"operator_id": 50, "allow_grant": False,
+                                        "employee_accounting_section": True}])
 
     def test_not_blacklisted_is_404(self):
         payload, status, _ = self._call(_user(15, "admin"), db=_RouteDB(removed=[]))

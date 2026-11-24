@@ -179,7 +179,7 @@ test('гейты личных разделов повторяют ветку р�
         /* Кадровику «Графики работы» — не личный раздел: он ведёт графики всех
            отделов (владелец 09.11.2026). Пункт в ветке рядового у него тот же,
            с подписью «Графики работы», а в баре — ежедневная кнопка «Графики». */
-        const hrExclusion = flag === 'myShifts' ? '&& !isEmployeeAccountingManager\\s+' : '';
+        const hrExclusion = flag === 'myShifts' ? '&& !isHrDepartmentMember\\s+' : '';
         assert.match(
             memo,
             new RegExp(`${flag}: isRankAndFileRole\\(currentUserRole\\) && !isScopedDepartmentHead\\s+`

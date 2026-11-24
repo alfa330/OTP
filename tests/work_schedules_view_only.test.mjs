@@ -105,7 +105,7 @@ test('пункт меню — у рядового, рядом с его «Мои
     assert.ok(gate > branch && at - gate < 400, 'над пунктом нет своего условия');
     assert.match(appSource.slice(at, at + 600), /<span className="sidebar-text">Графики работы<\/span>/);
     // «Мои смены» рядового на месте.
-    assert.ok(appSource.includes("{isEmployeeAccountingManager ? 'Графики работы' : 'Мои смены'}"));
+    assert.ok(appSource.includes("{isHrDepartmentMember ? 'Графики работы' : 'Мои смены'}"));
     assert.ok(appSource.includes("const WORK_SCHEDULES_VIEW_ONLY_VIEW = 'work_schedules_view';"));
 });
 

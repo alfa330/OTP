@@ -38,7 +38,8 @@ BOT_PY = source_cache.monolith_flat_path()
 HELPERS = (
     'ROLE_HIERARCHY', '_get_role_level', '_has_min_role', '_normalize_user_role', '_is_super_admin_role',
     '_is_admin_role', '_is_supervisor_role', '_is_global_admin_requester', 'EMPLOYEE_ACCOUNTING_DEPARTMENT_CODE',
-    '_is_employee_accounting_manager', '_headed_department_id', '_headed_department_ids',
+    '_is_employee_accounting_manager', 'EMPLOYEE_ACCOUNTING_USER_GRANTS', '_has_employee_accounting_user_grant',
+    '_has_full_employee_accounting', '_headed_department_id', '_headed_department_ids',
     '_department_scope_id_for_requester', '_target_user_supervisor_id', '_requester_can_access_target_user',
     '_SV_CREDENTIALS_PAGE_SIZE', '_sv_credentials_operators', '_sv_credentials_target_allowed',
     '_sv_credentials_screen', '_sv_credentials_busy',

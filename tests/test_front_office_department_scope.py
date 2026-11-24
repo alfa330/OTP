@@ -390,8 +390,11 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
             " departmentHidesEmployeeTaxiproId,"
             " departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews,"
             " departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle,"
-            " departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole,"
-            " managesEmployeeAccounting, personalViewsAllow, rankAndFileTasksAllowed }"
+            " departmentsOutsideEmployeeAccounting, departmentUsesSimpleEmployeeAccounting,"
+            " EMPLOYEE_ACCOUNTING_LISTS_SCOPE, firstAllowedView, hasEmployeeAccountingUserGrant,"
+            " hasFullEmployeeAccounting, isBackOfficeEmployeeRole, keepOutsideEmployeeAccounting,"
+            " managesEmployeeAccounting, outsideEmployeeAccountingDepartmentIds, personalViewsAllow,"
+            " rankAndFileTasksAllowed }"
             " from './utils/departmentViews';",
             source,
         )
@@ -499,7 +502,7 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
             " departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId,"
             " departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
             " departmentCodeUsesEmployeeCity, departmentCodeAsksEmployeeJobTitle,"
-            " departmentCodeEmployeeJobTitlePlaceholder, managesEmployeeAccounting }"
+            " departmentCodeEmployeeJobTitlePlaceholder, hasFullEmployeeAccounting }"
             " from '../../utils/departmentViews';",
             modal,
         )

@@ -167,6 +167,9 @@ class VisibilityMirrorsGetAdminUsersTests(unittest.TestCase):
             '_headed_department_ids': lambda _id: frozenset(headed),
             '_department_scope_id_for_requester': lambda _id: 5,
             '_is_employee_accounting_manager': lambda _id: hr,
+            '_has_full_employee_accounting': lambda _id: hr,
+            '_sees_employee_accounting_lists': lambda _id: hr,
+            '_has_employee_accounting_user_grant': lambda *_a, **_k: False,
         }
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT_PATH), 'exec'), namespace)
         result = namespace['get_admin_users']()
@@ -231,7 +234,7 @@ class WiringTests(unittest.TestCase):
         for name in ('require_api_key=require_api_key', 'get_authenticated_requester=_get_authenticated_requester',
                      'is_global_admin_requester=_is_global_admin_requester',
                      'department_scope_id_for_requester=_department_scope_id_for_requester',
-                     'is_employee_accounting_manager=_is_employee_accounting_manager',
+                     'has_full_employee_accounting=_has_full_employee_accounting',
                      'back_office_roles=BACK_OFFICE_EMPLOYEE_ROLES', 'proxy_status_labels=PROXY_STATUS_LABELS'):
             self.assertIn(name, block)
 

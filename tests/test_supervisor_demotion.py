@@ -519,6 +519,9 @@ class DemotionEndpointTests(unittest.TestCase):
             # Кадровик понижает наравне с админом (22.09.2026); здесь он
             # выключен — проверяем ветку прежних ролей.
             "_is_employee_accounting_manager": lambda *_a, **_k: False,
+            "_has_full_employee_accounting": lambda *_a, **_k: False,
+            "_sees_employee_accounting_lists": lambda *_a, **_k: False,
+            "_has_employee_accounting_user_grant": lambda *_a, **_k: False,
             "_is_global_admin_requester": lambda r, i=None: global_admin,
             "_requester_can_access_target_user": lambda *a, **k: state.get("access", True),
             "_DEMOTE_ERROR_RESPONSES": _demote_error_responses(),

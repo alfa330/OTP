@@ -96,6 +96,9 @@ class UsersReportEndpointScopeTests(unittest.TestCase):
                 "_is_employee_accounting_manager": (
                     lambda _user_id: employee_accounting_manager
                 ),
+                "_has_full_employee_accounting": (
+                    lambda _user_id: employee_accounting_manager
+                ),
             },
         )
         return endpoint(), fake_db
@@ -242,7 +245,10 @@ class UsersReportImplementationContractTests(unittest.TestCase):
         source = _read(FRONTEND_PATH)
 
         self.assertIn("departmentId: ''", source)
-        self.assertIn("departmentId: isAdminLikeRole ? (manageUsersDeptFilter || '') : ''", source)
+        # Отдел выбирает тот, кому сервер выгружает всю компанию: глобальный админ
+        # и «Учет сотрудников» целиком (кадровик, поимённый допуск).
+        self.assertIn("const usersReportPicksDepartment = isAdminLikeRole || isEmployeeAccountingManager;", source)
+        self.assertIn("departmentId: usersReportPicksDepartment ? (manageUsersDeptFilter || '') : ''", source)
         self.assertIn("params.set('department_id', exportOptions.departmentId)", source)
         # Модалка называется «Параметры выгрузки сотрудников», и её открывает
         # глава бэк-офиса и фронт-офиса, где операторов нет вовсе.

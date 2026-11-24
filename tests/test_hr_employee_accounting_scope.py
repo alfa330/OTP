@@ -178,6 +178,9 @@ class TargetAccessTests(unittest.TestCase):
                 "_department_scope_id_for_requester": lambda _uid: None,
                 "_target_user_supervisor_id": lambda _t: None,
                 "_is_employee_accounting_manager": lambda _uid: manager,
+                "_has_full_employee_accounting": lambda _uid: manager,
+                "_sees_employee_accounting_lists": lambda _uid: manager,
+                "_has_employee_accounting_user_grant": lambda *_a, **_k: False,
             },
         )
         return helper(_user_row(10, requester_role), 10, _user_row(42, target_role))
@@ -255,6 +258,9 @@ class AdminUsersScopeTests(unittest.TestCase):
                 "_headed_department_ids": lambda _user_id: frozenset(headed),
                 "_department_scope_id_for_requester": lambda _user_id: None,
                 "_is_employee_accounting_manager": lambda _user_id: manager,
+                "_has_full_employee_accounting": lambda _user_id: manager,
+                "_sees_employee_accounting_lists": lambda _user_id: manager,
+                "_has_employee_accounting_user_grant": lambda *_a, **_k: False,
             },
         )
         return endpoint(), captured
@@ -371,6 +377,9 @@ class UpdateUserTests(unittest.TestCase):
                 ),
                 "_is_supervisor_rate_change_day": lambda: False,
                 "_is_employee_accounting_manager": lambda _uid: manager,
+                "_has_full_employee_accounting": lambda _uid: manager,
+                "_sees_employee_accounting_lists": lambda _uid: manager,
+                "_has_employee_accounting_user_grant": lambda *_a, **_k: False,
             },
         )
         return endpoint(), saved
@@ -464,6 +473,9 @@ class CredentialsTests(unittest.TestCase):
                 "_is_supervisor_role": lambda v: str(v or "").lower() in ("sv", "supervisor"),
                 "_requester_can_access_target_user": lambda *_a, **_k: manager,
                 "_is_employee_accounting_manager": lambda _uid: manager,
+                "_has_full_employee_accounting": lambda _uid: manager,
+                "_sees_employee_accounting_lists": lambda _uid: manager,
+                "_has_employee_accounting_user_grant": lambda *_a, **_k: False,
             },
         )
         return endpoint(), changed
@@ -521,14 +533,16 @@ class CreateAndTransferTests(unittest.TestCase):
         self.assertIn("canAdd: isSuperAdmin,", _read(APP_PATH))
 
     def test_promote_and_demote_are_open(self):
+        # «Учет сотрудников» целиком спрашивает _has_full_employee_accounting:
+        # кадровик внутри него — см. FullAccessPredicateTests ниже.
         promote = _function_source(BOT_PATH, "admin_promote_to_supervisor")
-        self.assertIn("_is_employee_accounting_manager(requester_id)", promote)
+        self.assertIn("_has_full_employee_accounting(requester_id)", promote)
         demote = _function_source(BOT_PATH, "admin_demote_to_operator")
-        self.assertIn("_is_employee_accounting_manager(requester_id)", demote)
+        self.assertIn("_has_full_employee_accounting(requester_id)", demote)
 
     def test_bulk_edit_is_open(self):
         bulk = _function_source(BOT_PATH, "admin_bulk_update_users")
-        self.assertIn("personnel_manager = _is_employee_accounting_manager(requester_id)", bulk)
+        self.assertIn("personnel_manager = _has_full_employee_accounting(requester_id)", bulk)
         # Группа чужого отдела кадровику не «чужая»: своих групп у него нет.
         self.assertIn(
             "if not _is_global_admin_requester(requester_role, requester_id) and not personnel_manager:",
@@ -541,8 +555,10 @@ class CatalogsTests(unittest.TestCase):
 
     def test_directions_are_open_and_unscoped(self):
         endpoint = _function_source(BOT_PATH, "get_directions")
+        # Общий справочник: кадровику всегда, поимённому допуску — по запросу
+        # раздела (_sees_employee_accounting_lists).
         self.assertIn(
-            "employee_accounting_manager = _is_employee_accounting_manager(requester_id)",
+            "employee_accounting_manager = _sees_employee_accounting_lists(requester_id)",
             endpoint,
         )
         self.assertIn(
@@ -552,7 +568,7 @@ class CatalogsTests(unittest.TestCase):
 
     def test_groups_are_open_and_unscoped(self):
         helper = _function_source(BOT_PATH, "_scoped_groups_for_requester")
-        self.assertIn("if _is_employee_accounting_manager(requester_id):", helper)
+        self.assertIn("if _is_employee_accounting_manager(requester_id) or (", helper)
         # Ветка обязана стоять ДО ветки главы отдела: у отдела кадров своих
         # групп нет, и та отдала бы пустой список.
         self.assertLess(
@@ -562,7 +578,7 @@ class CatalogsTests(unittest.TestCase):
 
     def test_moving_between_groups_is_open(self):
         self.assertIn(
-            "or _is_employee_accounting_manager(requester_id)):",
+            "or _has_full_employee_accounting(requester_id)):",
             _function_source(BOT_PATH, "_ensure_group_operator_manager"),
         )
         self.assertIn(
@@ -585,7 +601,7 @@ class CatalogsTests(unittest.TestCase):
 
     def test_avatar_is_open(self):
         self.assertIn(
-            "if _is_employee_accounting_manager(requester_id):",
+            "if _has_full_employee_accounting(requester_id):",
             _function_source(BOT_PATH, "_resolve_avatar_target_user"),
         )
 
@@ -622,6 +638,9 @@ class DepartmentsDirectoryTests(unittest.TestCase):
                 "_is_admin_role": lambda value: str(value or "").lower() in ("admin", "super_admin"),
                 "_is_marketing_observer": lambda *_a, **_k: False,
                 "_is_employee_accounting_manager": lambda _user_id: manager,
+                "_has_full_employee_accounting": lambda _user_id: manager,
+                "_sees_employee_accounting_lists": lambda _user_id: manager,
+                "_has_employee_accounting_user_grant": lambda *_a, **_k: False,
                 # Временный просмотр «Графиков работы» (tests/test_work_schedule_view_only.py) — не здесь.
                 "_is_work_schedule_view_only": lambda _user_id: False,
             },
@@ -675,6 +694,9 @@ class UserHistoryTests(unittest.TestCase):
                 "_is_supervisor_role": lambda value: str(value or "").lower() in ("sv", "supervisor"),
                 "_requester_can_access_target_user": lambda *_a, **_k: False,
                 "_is_employee_accounting_manager": lambda _user_id: manager,
+                "_has_full_employee_accounting": lambda _user_id: manager,
+                "_sees_employee_accounting_lists": lambda _user_id: manager,
+                "_has_employee_accounting_user_grant": lambda *_a, **_k: False,
             },
         )
         return endpoint()
@@ -733,6 +755,9 @@ class UsersReportScopeTests(unittest.TestCase):
                 "_headed_department_id": lambda _user_id: min(headed) if headed else None,
                 "_department_scope_id_for_requester": lambda _user_id: None,
                 "_is_employee_accounting_manager": lambda _user_id: manager,
+                "_has_full_employee_accounting": lambda _user_id: manager,
+                "_sees_employee_accounting_lists": lambda _user_id: manager,
+                "_has_employee_accounting_user_grant": lambda *_a, **_k: False,
             },
         )
         return endpoint(), calls
@@ -888,7 +913,7 @@ class FrontendCardTests(unittest.TestCase):
         """Без этого «Отдел» запирался бы на HR и завести человека на линию
         кадровик не смог бы вовсе."""
         self.assertIn(
-            "const managesEmployeeAccountingRequester = managesEmployeeAccounting(user);",
+            "const managesEmployeeAccountingRequester = hasFullEmployeeAccounting(user);",
             self.modal,
         )
         self.assertIn(

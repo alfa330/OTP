@@ -71,7 +71,7 @@ def build_user_profile_blueprint(
     _headed_department_id,
     _is_admin_role,
     _is_allowed_origin,
-    _is_employee_accounting_manager,
+    _has_full_employee_accounting,
     _is_super_admin_role,
     _is_supervisor_role,
     _load_target_user_with_scope,
@@ -111,8 +111,9 @@ def build_user_profile_blueprint(
         requester_role = _normalize_user_role(requester[3])
         if requester_id == target_user[0]:
             return target_user, None
-        # Кадровик ведёт карточки всей компании — фотография её часть.
-        if _is_employee_accounting_manager(requester_id):
+        # Кадровик ведёт карточки всей компании — фотография её часть. Так же —
+        # поимённый допуск к «Учету сотрудников» (_has_full_employee_accounting).
+        if _has_full_employee_accounting(requester_id):
             return target_user, None
         headed_dept_id = _headed_department_id(requester_id)
         if headed_dept_id is not None and not _is_super_admin_role(requester_role):
@@ -386,7 +387,7 @@ def build_user_profile_blueprint(
             # открыт ему по всей компании, а история — то же чтение, только по
             # одному человеку. Ветка стоит первой и для ГЛАВЫ отдела кадров тоже:
             # иначе он видел бы в списке всю фирму, а «Историю» открывал лишь своим.
-            if _is_employee_accounting_manager(requester_id):
+            if _has_full_employee_accounting(requester_id):
                 if _is_admin_role(_normalize_user_role(target_user[3])) and not _is_admin_role(requester_role):
                     return jsonify({"error": "Unauthorized to view this user's history"}), 403
             elif headed_dept_id is not None and not _is_super_admin_role(requester_role):
@@ -441,7 +442,7 @@ def build_user_profile_blueprint(
                 # владелец 22.09.2026 на прямой вопрос ответил «без исключений».
                 # Ветка первая — глава отдела кадров тоже кадровик, и ветка
                 # headed_dept_id ниже заперла бы его своим отделом.
-                if _is_employee_accounting_manager(requester_id):
+                if _has_full_employee_accounting(requester_id):
                     pass
                 elif headed_dept_id is not None and not _is_super_admin_role(requester_role):
                     if not _requester_can_access_target_user(
@@ -532,7 +533,7 @@ def build_user_profile_blueprint(
                 # владелец 22.09.2026 на прямой вопрос ответил «без исключений».
                 # Ветка первая — глава отдела кадров тоже кадровик, и ветка
                 # headed_dept_id ниже заперла бы его своим отделом.
-                if _is_employee_accounting_manager(requester_id):
+                if _has_full_employee_accounting(requester_id):
                     pass
                 elif headed_dept_id is not None and not _is_super_admin_role(requester_role):
                     if not _requester_can_access_target_user(

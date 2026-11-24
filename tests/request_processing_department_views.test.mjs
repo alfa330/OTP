@@ -302,7 +302,7 @@ test('бар телефона: названным — «Смены», остал
     }
     // Мосты к App.jsx: флаги бара — ровно эти выражения, без хвоста.
     // Хвост — только исключение кадровика (09.11.2026): у него раздел не личный.
-    assert.match(appSource, /\n\s*myShifts: isRankAndFileRole\(currentUserRole\) && !isScopedDepartmentHead\s+&& !isEmployeeAccountingManager\s+&& departmentAllowsView\(user, 'work_schedules'\),\n/);
+    assert.match(appSource, /\n\s*myShifts: isRankAndFileRole\(currentUserRole\) && !isScopedDepartmentHead\s+&& !isHrDepartmentMember\s+&& departmentAllowsView\(user, 'work_schedules'\),\n/);
     assert.match(appSource, /\n\s*events: eventsSectionShown,\n/);
     assert.match(appSource, /\n\s*const eventsSectionShown = departmentAllowsView\(user, 'events'\);\n/);
     // Бар пересчитывается по самому человеку, а не только по роли: выход 523 и

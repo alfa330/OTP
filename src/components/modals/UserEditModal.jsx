@@ -5,7 +5,7 @@ import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import { headedDepartmentsOf, isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
-import { departmentCodeHasOptionalEmployeeDirection, departmentCodeHasOptionalEmployeeGroup, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeAsksEmployeeJobTitle, departmentCodeEmployeeJobTitlePlaceholder, managesEmployeeAccounting } from '../../utils/departmentViews';
+import { departmentCodeHasOptionalEmployeeDirection, departmentCodeHasOptionalEmployeeGroup, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeAsksEmployeeJobTitle, departmentCodeEmployeeJobTitlePlaceholder, hasFullEmployeeAccounting } from '../../utils/departmentViews';
 import { employeeRoleForDepartmentCode } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import { directionForPickedGroup } from '../../utils/groupDirection';
@@ -331,8 +331,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
        строки его скоупом становился бы собственный отдел (у роли hr_manager нет
        admin-уровня), поле «Отдел» запиралось бы на «HR», и завести человека на
        линию он не смог бы вовсе. Глава отдела кадров — здесь же: скоуп по
-       возглавляемому отделу дал бы ему ту же клетку. */
-    const managesEmployeeAccountingRequester = managesEmployeeAccounting(user);
+       возглавляемому отделу дал бы ему ту же клетку. И тот, кому раздел выдан
+       поимённо (EMPLOYEE_ACCOUNTING_USER_GRANTS), — по той же причине. */
+    const managesEmployeeAccountingRequester = hasFullEmployeeAccounting(user);
     const isUnscopedRequester = isAdminLikeRequester || managesEmployeeAccountingRequester;
     const isSupervisorRequester = requesterRole === 'sv';
     const isPureSupervisorRequester = isSupervisorRequester && !isScopedDepartmentHeadRequester;

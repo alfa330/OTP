@@ -261,6 +261,9 @@ def stand():
             '_headed_department_id': lambda _id: min(v.headed) if v.headed else None,
             '_department_scope_id_for_requester': lambda _id: v.scope_dept,
             '_is_employee_accounting_manager': lambda _id: v.hr,
+            '_has_full_employee_accounting': lambda _id: v.hr,
+            '_sees_employee_accounting_lists': lambda _id: v.hr,
+            '_has_employee_accounting_user_grant': lambda *_a, **_k: False,
             '_is_marketing_observer': lambda *_a: False,
         })
         # _is_global_admin_requester зовёт _headed_department_id из своего пространства имён.
@@ -285,7 +288,7 @@ def stand():
         is_global_admin_requester=is_global_admin,
         headed_department_ids=lambda _id: viewer().headed,
         department_scope_id_for_requester=lambda _id: viewer().scope_dept,
-        is_employee_accounting_manager=lambda _id: viewer().hr,
+        has_full_employee_accounting=lambda _id: viewer().hr,
         build_avatar_signed_url=_avatar,
         back_office_roles=BACK_OFFICE,
         proxy_status_labels=PROXY_LABELS,

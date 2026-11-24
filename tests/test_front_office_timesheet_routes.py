@@ -218,7 +218,7 @@ class FrontendWiringTests(unittest.TestCase):
         self.assertIn('{showTimesheetView ? (', app)
         self.assertIn('<FrontOfficeTimesheetView', app)
         # Главе фронт-офисов — весь раздел, отдельной страницы табеля больше нет.
-        self.assertEqual(app.count('{( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}'), 2)
+        self.assertEqual(app.count('{( view === "sv_hours" && (<HoursAccountingView user={user} svList={svListOutsideEmployeeAccounting} showToast={showToast} />))}'), 2)
         self.assertNotIn('FrontOfficeTimesheetPage', app)
         # Сегмент «Табель» гасит подсветку показателей, выбор показателя выключает табель.
         self.assertIn('const activeInGroup = !showTimesheetView && group.tabs.some(', app)

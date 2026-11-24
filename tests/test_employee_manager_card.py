@@ -117,6 +117,7 @@ class ManagerCandidatesEndpointTests(unittest.TestCase):
             _get_authenticated_requester=lambda: (70, (70, None, 'Админ', 'super_admin'), None),
             _is_global_admin_requester=lambda role, user_id: global_admin,
             _is_employee_accounting_manager=lambda user_id: hr,
+            _has_full_employee_accounting=lambda user_id: hr,
         )
         # Декоратор маршрута при вырезке не нужен: функция зовётся напрямую.
         return ns['get_manager_candidates'](), cursor
@@ -156,7 +157,7 @@ class UpdateUserManagerFieldTests(unittest.TestCase):
         self.assertIn('not _is_global_admin_requester(requester_role, requester_id)', rule)
         self.assertIn('not personnel_manager', rule)
         # Проверка прав стоит после того, как известен спрашивающий.
-        self.assertLess(UPDATE_USER.index('personnel_manager = _is_employee_accounting_manager(requester_id)'),
+        self.assertLess(UPDATE_USER.index('personnel_manager = _has_full_employee_accounting(requester_id)'),
                         UPDATE_USER.index('Руководителя сотрудника указывает администратор или кадровик'))
 
 

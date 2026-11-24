@@ -698,7 +698,8 @@ class SupervisorGroupChangeTests(unittest.TestCase):
         self.assertIn("_is_plain_supervisor_requester(rid, _role)", ep)
         self.assertIn("_ensure_group_in_supervisor_scope(group_id, rid)", ep)
         # прежний путь админа и главы отдела не тронут
-        self.assertIn("_ensure_group_in_requester_scope(group_id, rid, _role)", ep)
+        # Флаг раздела — только перевод из карточки «Учета сотрудников» (card_move).
+        self.assertIn("_ensure_group_in_requester_scope(group_id, rid, _role, employee_accounting_section=card_move)", ep)
         # СВ переводит между группами, но не оставляет оператора без группы
         self.assertIn("Убрать оператора из группы может админ или глава отдела", ep)
         self.assertIn("supervisor_target_roles=('operator', 'trainee')", ep)

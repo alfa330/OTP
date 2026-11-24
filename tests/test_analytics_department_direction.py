@@ -77,6 +77,8 @@ _REAL_NAMES = {
 }
 # Подменяем только то, что ходит в базу, в запрос и во вход.
 _STUBBED_FUNCTIONS = ('_get_authenticated_requester', '_is_employee_accounting_manager',
+                      '_has_full_employee_accounting', '_sees_employee_accounting_lists',
+                      '_has_employee_accounting_user_grant',
                       '_headed_department_id', '_headed_department_ids')
 
 
@@ -199,6 +201,9 @@ def _add_user(payload, requester=SUPER_ADMIN):
         'jsonify': lambda body: body,
         '_get_authenticated_requester': lambda: (requester['id'], requester_row, None),
         '_is_employee_accounting_manager': lambda _requester_id: bool(requester.get('personnel')),
+        '_has_full_employee_accounting': lambda _requester_id: bool(requester.get('personnel')),
+        '_sees_employee_accounting_lists': lambda _requester_id: bool(requester.get('personnel')),
+        '_has_employee_accounting_user_grant': lambda *_a, **_k: False,
         '_headed_department_id': lambda _requester_id: requester.get('headed'),
         # Здесь каждый глава возглавляет один отдел — тот же, что в 'headed'.
         '_headed_department_ids': lambda _requester_id: frozenset(

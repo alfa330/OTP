@@ -1,7 +1,7 @@
 // Расширение в пути обязательно: этот модуль грузит напрямую Node в
 // tests/back_office_department_views.test.mjs, а ESM без расширения путь не
 // разрешает (Vite разрешает и так, поэтому сборка не замечает разницы).
-import { isAdminLikeRole, isDepartmentHead, normalizeRole } from './roles.js';
+import { headedDepartmentId, headedDepartmentsOf, isAdminLikeRole, isDepartmentHead, normalizeRole } from './roles.js';
 
 // «Аукцион смен» у Тез КЦ — свои прогоны «ТП линия» и «ОП линия» со сменами из файла
 // руководителя (задача #124, отделу открыт 13.11.2026).
@@ -544,6 +544,78 @@ export const departmentCodeManagesEmployeeAccounting = (code) => {
 
 export const managesEmployeeAccounting = (user) =>
     departmentCodeManagesEmployeeAccounting(departmentCodeOf(user));
+
+/* «Учет сотрудников» ЦЕЛИКОМ — поимённо, людям вне отдела кадров. Решение
+   владельца 24.11.2026: «выдать им полный доступ для раздела учет сотрудников».
+   Ключ — код отдела, внутри users.id; ФИО в публичный репозиторий не кладём.
+     accounting 467 — глава «Бухгалтерии»;
+     analytik   229 — глава «Отдела аналитики».
+
+   В разделе — ровно то, что у кадровика: четыре списка по всей компании,
+   правка, логины и пароли, заведение и переводы. Остальное, что даёт членство
+   в отделе кадров (графики любого отдела, «Кадры»), допуск НЕ открывает:
+   там по-прежнему спрашивают managesEmployeeAccounting. Переведут в другой
+   отдел — допуск снимется сам: ключ — отдел, в котором человек числится.
+
+   Общие справочники (сотрудники, СВ, отделы, направления, группы) раздел
+   просит у сервера с ?scope=EMPLOYEE_ACCOUNTING_LISTS_SCOPE — без него сервер
+   отдаёт главе её отделы, и так их получают все остальные разделы.
+
+   Зеркало на бэкенде — EMPLOYEE_ACCOUNTING_USER_GRANTS и
+   _has_employee_accounting_user_grant в bot_schedule2.py; совпадение держит
+   tests/test_employee_accounting_user_grants.py. */
+const EMPLOYEE_ACCOUNTING_USER_GRANTS = {
+    accounting: [467],
+    analytik: [229],
+};
+
+export const EMPLOYEE_ACCOUNTING_LISTS_SCOPE = 'employee_accounting';
+
+export const hasEmployeeAccountingUserGrant = (user) => {
+    const code = departmentCodeOf(user);
+    const grantedIds = code ? EMPLOYEE_ACCOUNTING_USER_GRANTS[code] : null;
+    const userId = Number(user?.id);
+    return Boolean(Array.isArray(grantedIds) && Number.isFinite(userId) && grantedIds.includes(userId));
+};
+
+// Раздел целиком, как у кадровика: отдел кадров или поимённый допуск.
+export const hasFullEmployeeAccounting = (user) =>
+    managesEmployeeAccounting(user) || hasEmployeeAccountingUserGrant(user);
+
+/* Срез общих справочников для разделов ВНЕ «Учета сотрудников» у человека с
+   поимённым допуском. Раздел просит справочники по всей компании, а графикам,
+   опросам, конкурсам и прочему отдаётся ровно то, что сервер вернул бы главе
+   отдела без ?scope: люди, СВ и направления возглавляемых отделов
+   (_headed_department_ids на сервере). null — срез не нужен: допуска нет или
+   человек не глава (тогда по роли admin он глобальный админ, и сервер отдаёт
+   ему всё и так). */
+export const outsideEmployeeAccountingDepartmentIds = (user) => {
+    if (!hasEmployeeAccountingUserGrant(user) || normalizeRole(user?.role) === 'super_admin') return null;
+    const primary = headedDepartmentId(user);
+    if (primary == null) return null;
+    const ids = new Set(headedDepartmentsOf(user).map((department) => department.id));
+    ids.add(primary);
+    return ids;
+};
+
+// Отдел записи справочника: у людей и СВ — department_id, у направлений — оба написания.
+const recordDepartmentId = (item) => item?.department_id ?? item?.departmentId;
+
+export const keepOutsideEmployeeAccounting = (items, departmentIds) => (
+    departmentIds
+        ? (Array.isArray(items) ? items : []).filter((item) => departmentIds.has(Number(recordDepartmentId(item))))
+        : items
+);
+
+/* Справочник отделов главе сервер отдаёт её отделами, а fetchDepartments режет
+   его дальше до одного — того, что в headed_department_id. Тот же один отдел и
+   здесь, иначе селекторы отдела в других разделах предлагали бы чужие. */
+export const departmentsOutsideEmployeeAccounting = (departments, user) => {
+    if (!outsideEmployeeAccountingDepartmentIds(user)) return departments;
+    const primary = headedDepartmentId(user);
+    return (Array.isArray(departments) ? departments : [])
+        .filter((department) => Number(department?.id) === primary);
+};
 
 // Отделы, чьи сотрудники сидят по офисам в разных городах: в карточке
 // сотрудника у них есть «Город», у остальных отделов поля нет.

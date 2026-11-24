@@ -72,7 +72,7 @@ def supervisors_scope(*, role, requester_id, headed, hr, is_global_admin_request
 def build_employees_blueprint(*, db, require_api_key, get_authenticated_requester, normalize_role,
                               is_admin_role, is_super_admin_role, is_global_admin_requester,
                               headed_department_ids, department_scope_id_for_requester,
-                              is_employee_accounting_manager, build_avatar_signed_url,
+                              has_full_employee_accounting, build_avatar_signed_url,
                               back_office_roles, proxy_status_labels):
     bp = Blueprint('employees_page', __name__)
     load_rows = rows.build_row_loader(avatar_url=build_avatar_signed_url, proxy_labels=proxy_status_labels,
@@ -93,7 +93,7 @@ def build_employees_blueprint(*, db, require_api_key, get_authenticated_requeste
 
             role = normalize_role(requester[3])
             headed = headed_department_ids(requester_id)
-            hr = is_employee_accounting_manager(requester_id)
+            hr = has_full_employee_accounting(requester_id)
             if query.list == 'supervisors':
                 scope = supervisors_scope(role=role, requester_id=requester_id, headed=headed, hr=hr,
                                           is_global_admin_requester=is_global_admin_requester)

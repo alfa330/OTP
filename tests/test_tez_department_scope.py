@@ -527,7 +527,10 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
             "department_id = data.get('department_id') if _is_global_admin_requester(role, requester_id) else headed_dept",
             create_group,
         )
-        self.assertIn("_ensure_group_in_requester_scope(group_id, rid, _role)", add_operator)
+        # Перевод в группу — ещё и из карточки «Учета сотрудников»: поимённому
+        # допуску к разделу группа любого отдела (EMPLOYEE_ACCOUNTING_USER_GRANTS).
+        self.assertIn("_ensure_group_in_requester_scope(group_id, rid, _role, employee_accounting_section=card_move)",
+                      add_operator)
         self.assertIn("_ensure_group_in_requester_scope(group_id, rid, _role)", add_supervisor)
         self.assertIn("_ensure_group_in_requester_scope(group_id, _rid, _role)", archive_group)
         self.assertIn("_ensure_group_in_requester_scope(group_id, _rid, _role)", rename_group)

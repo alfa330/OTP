@@ -101,6 +101,7 @@ def _fakes(fake_db, requester, payload):
         "_headed_department_id": lambda _uid: None,
         "_headed_department_ids": lambda _uid: frozenset(),
         "_is_employee_accounting_manager": lambda _uid: False,
+        "_has_full_employee_accounting": lambda _uid: False,
         "_is_admin_role": lambda role: str(role or "").strip().lower() in ("admin", "super_admin"),
     }
 
