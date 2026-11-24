@@ -3901,12 +3901,24 @@ def _notify_sensitive_access_approved(
         claims = claims or {}
         operator_id = operator[0] if isinstance(operator, (tuple, list)) and operator else None
         session_id = claims.get('session_id')
-        operator_session = (
-            db.get_user_session(session_id=session_id, user_id=operator_id)
-            if session_id and operator_id else None
-        )
         supervisor_id = operator[6] if isinstance(operator, (tuple, list)) and len(operator) > 6 else None
-        supervisor = db.get_user(id=supervisor_id) if supervisor_id else None
+        # Сессия и супервайзер нужны только для текста. Не прочитались — сообщение
+        # всё равно уходит, с прочерками: доступ уже открыт, и включившие тумблер
+        # обязаны об этом узнать.
+        operator_session = None
+        if session_id and operator_id:
+            try:
+                operator_session = db.get_user_session(session_id=session_id, user_id=operator_id)
+            except Exception as read_error:
+                logging.warning("Sensitive access notification: session %s not read: %s",
+                                session_id, read_error)
+        supervisor = None
+        if supervisor_id:
+            try:
+                supervisor = db.get_user(id=supervisor_id)
+            except Exception as read_error:
+                logging.warning("Sensitive access notification: supervisor %s not read: %s",
+                                supervisor_id, read_error)
 
         message = _build_sensitive_access_approved_message_html(
             approver=approver,
@@ -12901,7 +12913,7 @@ def admin_sessions_notify():
             # Только настоящий bool: строка «false» в Python истинна, и
             # «выключить» молча включало бы.
             if not isinstance(enabled, bool):
-                return jsonify({"error": "enabled must be true or false"}), 400
+                return jsonify({"error": "Нужно передать enabled: true или false"}), 400
             state = db.set_session_access_notify(user_id, enabled)
         else:
             state = db.get_session_access_notify_state(user_id)
@@ -13098,9 +13110,10 @@ def grant_admin_session_sensitive_access(session_id):
     его живые сессии поимённо, и решение принимается здесь же.
 
     Выдача идёт ровно тем же путём, что и по QR: та же запись в сессию, та же
-    строка в журнале `session_access_events`, то же уведомление супер-админу.
-    Иначе появился бы способ открыть чувствительные данные мимо аудита — а
-    именно ради аудита журнал и уведомление и заводились.
+    строка в журнале `session_access_events`, то же уведомление в Telegram —
+    админам, включившим тумблер «Уведомления о доступе» (по умолчанию он
+    выключен). Иначе появился бы способ открыть чувствительные данные мимо
+    аудита, а аудит — это журнал: его видно в карточке сессии всегда.
 
     Периметр тоже общий с QR (`_sensitive_access_grant_capability`): гвард
     раздела шире правила выдачи, и глава одного отдела видит карточки всего

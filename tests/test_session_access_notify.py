@@ -122,6 +122,7 @@ class RecipientsTests(unittest.TestCase):
             {'user_id': 3, 'role': 'admin', 'telegram_id': 'не число'},
             {'user_id': 4, 'role': 'admin', 'telegram_id': -100500},
             {'user_id': 5, 'role': 'admin', 'telegram_id': None},
+            {'user_id': 6, 'role': 'admin', 'telegram_id': 0},
         ])
         self.assertEqual(_resolver(fake_db)(), [9001])
 
@@ -222,13 +223,47 @@ class NotifyTests(unittest.TestCase):
             notify(APPROVER, OPERATOR, {'session_id': SESSION_ID}, {})
         self.assertEqual([chat for chat, _, _ in sends], [9002])
 
+    def test_unread_session_still_sends_the_message(self):
+        """Сессия нужна только для текста: доступ уже открыт, и включившие обязаны узнать."""
+        fake_db, sends, built = _NotifyDB(), [], []
+        fake_db.get_user_session = lambda **kwargs: (_ for _ in ()).throw(RuntimeError('нет базы'))
+        notify = _notifier([9001, 9002], fake_db, sends, built)
+        with self.assertLogs(level='WARNING'):
+            notify(APPROVER, OPERATOR, {'session_id': SESSION_ID}, {})
+        self.assertEqual([chat for chat, _, _ in sends], [9001, 9002])
+        self.assertIsNone(built[0]['operator_session'])
+        self.assertEqual(built[0]['operator_supervisor_name'], 'Элекова Арайлым')
+
+    def test_unread_supervisor_still_sends_the_message(self):
+        fake_db, sends, built = _NotifyDB(), [], []
+        fake_db.get_user = lambda id: (_ for _ in ()).throw(RuntimeError('нет базы'))  # noqa: A006
+        notify = _notifier([9001], fake_db, sends, built)
+        with self.assertLogs(level='WARNING'):
+            notify(APPROVER, OPERATOR, {'session_id': SESSION_ID}, {})
+        self.assertEqual([chat for chat, _, _ in sends], [9001])
+        self.assertIsNone(built[0]['operator_supervisor_name'])
+        self.assertEqual(built[0]['operator_session']['ip_address'], '212.154.168.10')
+
+    def test_missing_claims_still_send_the_message(self):
+        fake_db, sends, built = _NotifyDB(), [], []
+        _notifier([9001], fake_db, sends, built)(APPROVER, OPERATOR, None, None)
+        self.assertEqual([chat for chat, _, _ in sends], [9001])
+        self.assertNotIn('session', [call[0] for call in fake_db.calls])
+
     def test_failure_stays_inside_the_background_thread(self):
         """Поток фоновый: исключение из него никто не поймает, кроме него самого."""
-        fake_db = _NotifyDB()
-        fake_db.get_user_session = lambda **kwargs: (_ for _ in ()).throw(RuntimeError('нет базы'))
-        notify = _notifier([9001], fake_db, [], [])
+        sends = []
+        broken = _load(('_notify_sensitive_access_approved',), {
+            'db': _NotifyDB(),
+            'logging': logging,
+            '_resolve_session_access_notify_chat_ids': lambda: [9001],
+            '_build_sensitive_access_approved_message_html': lambda **kw: 1 / 0,
+            '_send_telegram_text_message': lambda **kw: sends.append(kw),
+            '_get_telegram_error_text': lambda response: 'ошибка',
+        })['_notify_sensitive_access_approved']
         with self.assertLogs(level='ERROR'):
-            notify(APPROVER, OPERATOR, {'session_id': SESSION_ID}, {})
+            broken(APPROVER, OPERATOR, {'session_id': SESSION_ID}, {})
+        self.assertEqual(sends, [])
 
 
 class _ToggleDB:
@@ -283,6 +318,14 @@ class ToggleRouteTests(unittest.TestCase):
         payload, status = _toggle_route(fake_db, 'PUT', {'enabled': False})()
         self.assertEqual((status, payload['enabled']), (200, False))
         self.assertEqual(fake_db.writes, [(5, True), (5, False)])
+
+    def test_answer_is_what_the_database_holds_not_what_was_asked(self):
+        """Экран рисует ответ — значит, в нём правда базы, а не эхо запроса."""
+        fake_db = _ToggleDB()
+        fake_db.set_session_access_notify = lambda user_id, enabled: {
+            'enabled': False, 'telegram_linked': True}
+        payload, status = _toggle_route(fake_db, 'PUT', {'enabled': True})()
+        self.assertEqual((status, payload['enabled']), (200, False))
 
     def test_tells_when_telegram_is_not_linked(self):
         fake_db = _ToggleDB(state={'enabled': False, 'telegram_linked': False})
@@ -348,6 +391,21 @@ class WiringTests(unittest.TestCase):
         for handler in ('approve_sensitive_access', 'grant_admin_session_sensitive_access'):
             self.assertEqual(_thread_targets(handler), [('_notify_sensitive_access_approved', 4)],
                              handler)
+
+    def test_notification_follows_a_grant_that_really_happened(self):
+        """Поток будится только ПОСЛЕ проверки, что UPDATE открыл доступ: на 409
+        («сессию прервали между проверкой и записью») сообщения быть не должно."""
+        for handler in ('approve_sensitive_access', 'grant_admin_session_sensitive_access'):
+            function = FUNCTIONS[handler]
+            guard = next(node for node in ast.walk(function)
+                         if isinstance(node, ast.If) and isinstance(node.test, ast.UnaryOp)
+                         and isinstance(node.test.op, ast.Not)
+                         and getattr(node.test.operand, 'id', None) == 'updated')
+            self.assertIsInstance(guard.body[-1], ast.Return, handler)
+            threads = [node for node in ast.walk(function)
+                       if isinstance(node, ast.Call) and getattr(node.func, 'attr', '') == 'Thread']
+            self.assertEqual(len(threads), 1, handler)
+            self.assertGreater(threads[0].lineno, guard.end_lineno, handler)
 
     def test_old_unconditional_broadcast_is_gone(self):
         for name in ('_notify_super_admin_sensitive_access_approved', '_resolve_super_admin_chat_ids'):

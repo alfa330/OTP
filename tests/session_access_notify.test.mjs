@@ -95,15 +95,58 @@ test('строка стоит над поиском', () => {
 const app = readFileSync(join(process.cwd(), 'src', 'App.jsx'), 'utf8');
 const panel = app.slice(app.indexOf('const SessionsPanel = ({'), app.indexOf('const _SkPulse'));
 
-test('состояние читается своей ручкой один раз, а не с ответом списка', () => {
+/* Настоящие обработчики тумблера: вырезаются из App.jsx и исполняются с
+   подменой axios, setState и тостов — проверяется поведение, а не строки. */
+const callback = (name) => {
+    const head = `const ${name} = React.useCallback(`;
+    const start = panel.indexOf(head);
+    assert.ok(start > 0, `${name} не найден — проверь тест`);
+    const from = start + head.length;
+    const end = panel.indexOf('\n        }, [', from);
+    assert.ok(end > from, `конец ${name} не найден — проверь тест`);
+    const deps = panel.slice(end + '\n        }, ['.length, panel.indexOf(']);', end)).trim();
+    return { source: panel.slice(from, end + '\n        }'.length), deps };
+};
+
+const evaluate = (source, scope) => {
+    const names = Object.keys(scope);
+    return new Function(...names, `return (${source});`)(...names.map((name) => scope[name]));
+};
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+const deferred = () => {
+    let resolve;
+    const promise = new Promise((ok) => { resolve = ok; });
+    return { promise, resolve };
+};
+
+const toggleHarness = ({ initial = { enabled: false, telegram_linked: true }, put, get } = {}) => {
+    const h = { state: initial, sets: 0, busy: [], toasts: [], puts: [], gets: [], ref: { current: 0 } };
+    const scope = {
+        axios: {
+            put: (url, body, config) => { h.puts.push({ url, body, config }); return put(); },
+            get: (url, config) => { h.gets.push({ url, config }); return get(); },
+        },
+        API_BASE_URL: 'https://api.test',
+        notifyUserId: 7,
+        notifyRequestRef: h.ref,
+        setNotify: (value) => { h.sets += 1; h.state = typeof value === 'function' ? value(h.state) : value; },
+        setNotifyBusy: (value) => { h.busy.push(value); },
+        emitAppToast: (message, type) => { h.toasts.push({ message, type }); },
+    };
+    h.toggle = evaluate(callback('toggleNotify').source, scope);
+    h.load = evaluate(callback('loadNotify').source, scope);
+    return h;
+};
+
+test('тумблер читается своей ручкой при входе, а не с ответом списка', () => {
     assert.ok(panel.length > 1000, 'SessionsPanel не найден — проверь тест');
-    const read = panel.indexOf("axios.get(`${API_BASE_URL}/api/admin/sessions/notify`");
-    assert.ok(read > 0, 'тумблер не читает своё состояние');
-    // Эффект зависит только от того, кто смотрит: от поиска и фильтров — нет,
+    // Чтение зависит только от того, кто смотрит: от поиска и фильтров — нет,
     // иначе ответ списка, ушедший до щелчка, возвращал бы тумблер назад.
-    const deps = panel.slice(read).match(/\}, \[([^\]]*)\]\);/);
-    assert.ok(deps, 'зависимости эффекта не найдены — проверь тест');
-    assert.equal(deps[1].trim(), 'notifyUserId');
+    assert.equal(callback('loadNotify').deps, 'notifyUserId');
+    assert.equal(callback('toggleNotify').deps, 'notifyUserId');
+    assert.match(panel, /React\.useEffect\(\(\) => \{\s*loadNotify\(\);\s*return \(\) => \{ notifyRequestRef\.current \+= 1; \};\s*\}, \[loadNotify\]\);/);
 
     const listFetch = app.slice(app.indexOf('const fetchAdminSessions = useCallback'),
         app.indexOf('const refreshAdminSessions = useCallback'));
@@ -111,24 +154,101 @@ test('состояние читается своей ручкой один ра�
     assert.ok(!listFetch.includes('notify'), 'список сессий не должен нести тумблер');
 });
 
-test('щелчок шлёт настоящий bool и откатывает тумблер при ошибке', () => {
-    const toggle = panel.slice(panel.indexOf('const toggleNotify = React.useCallback'));
-    const body = toggle.slice(0, toggle.indexOf('}, [notifyUserId]);'));
-    assert.ok(body.length > 100, 'toggleNotify не найден — проверь тест');
-    assert.match(body, /axios\.put\(\s*`\$\{API_BASE_URL\}\/api\/admin\/sessions\/notify`,\s*\{ enabled: next \}/);
-    assert.match(body, /catch \(err\) \{\s*setNotify\(\(prev\) => \(prev \? \{ \.\.\.prev, enabled: !next \} : prev\)\);/);
-    assert.match(body, /emitAppToast\(/, 'ошибка обязана быть видна');
+test('чтение: состояние — из ответа сервера, своей ручкой', async () => {
+    const h = toggleHarness({ initial: null,
+        get: () => Promise.resolve({ data: { status: 'success', enabled: true, telegram_linked: false } }) });
+    h.load();
+    await tick();
+    assert.equal(h.gets[0].url, 'https://api.test/api/admin/sessions/notify');
+    assert.equal(h.gets[0].config.headers['X-User-Id'], 7);
+    assert.deepEqual(h.state, { enabled: true, telegram_linked: false });
+});
+
+test('чтение не удалось — тумблер не выдумывается «выключенным» и тостом не шумит', async () => {
+    for (const get of [() => Promise.reject(new Error('сеть')),
+        () => Promise.resolve({ data: { status: 'error', error: 'Forbidden' } })]) {
+        const h = toggleHarness({ initial: null, get });
+        h.load();
+        await tick();
+        assert.equal(h.state, null);
+        assert.equal(h.sets, 0);
+        assert.deepEqual(h.toasts, []);
+    }
+});
+
+test('щелчок: на сервер — настоящий bool, на экране — ответ сервера, тумблер занят на время запроса', async () => {
+    const h = toggleHarness({
+        put: () => Promise.resolve({ data: { status: 'success', enabled: true, telegram_linked: false } }) });
+    await h.toggle(true);
+    assert.equal(h.puts.length, 1);
+    assert.equal(h.puts[0].url, 'https://api.test/api/admin/sessions/notify');
+    assert.deepEqual(h.puts[0].body, { enabled: true });
+    assert.equal(h.puts[0].config.headers['X-User-Id'], 7);
+    assert.deepEqual(h.state, { enabled: true, telegram_linked: false }, 'правда — в ответе сервера');
+    assert.deepEqual(h.busy, [true, false]);
+    assert.deepEqual(h.toasts, []);
+});
+
+test('ошибка: тумблер возвращается назад, тост — свой, по-русски, без английского ответа сервера', async () => {
+    const failures = [
+        () => Promise.reject({ response: { status: 500, data: { error: 'Internal server error' } } }),
+        () => Promise.reject({ response: { status: 403, data: { error: 'Forbidden: only admins can access' } } }),
+        () => Promise.reject(new Error('Network Error')),
+        () => Promise.resolve({ data: { status: 'error', error: 'Unauthorized' } }),
+    ];
+    for (const put of failures) {
+        const h = toggleHarness({ put });
+        await h.toggle(true);
+        assert.deepEqual(h.state, { enabled: false, telegram_linked: true });
+        assert.deepEqual(h.toasts, [{ message: 'Не удалось переключить уведомления', type: 'error' }]);
+        assert.deepEqual(h.busy, [true, false]);
+    }
+});
+
+test('опоздавшее чтение не перебивает щелчок', async () => {
+    const slowGet = deferred();
+    const h = toggleHarness({
+        get: () => slowGet.promise,
+        put: () => Promise.resolve({ data: { status: 'success', enabled: true, telegram_linked: true } }) });
+    h.load();
+    await h.toggle(true);
+    slowGet.resolve({ data: { status: 'success', enabled: false, telegram_linked: true } });
+    await tick();
+    assert.deepEqual(h.state, { enabled: true, telegram_linked: true });
+});
+
+test('«Обновить»: список — всегда, тумблер — только если прошлое чтение не удалось', () => {
+    const { source, deps } = callback('refreshPanel');
+    assert.equal(deps, 'fetchAdminSessions, loadNotify, notify');
+    for (const [notify, reread] of [[null, 1], [{ enabled: false, telegram_linked: true }, 0]]) {
+        const calls = { list: 0, notify: 0 };
+        evaluate(source, {
+            fetchAdminSessions: () => { calls.list += 1; },
+            loadNotify: () => { calls.notify += 1; },
+            notify,
+        })();
+        assert.deepEqual(calls, { list: 1, notify: reread });
+    }
+    // И кнопка на компьютере, и круглая на телефоне идут через неё.
+    assert.match(panel, /<button onClick=\{refreshPanel\} disabled=\{isAdminSessionsLoading\}/);
+    assert.ok(!panel.includes('onClick={fetchAdminSessions}'));
+    const mobile = panel.slice(panel.indexOf('<SessionsMobileView'));
+    assert.ok(mobile.slice(0, mobile.indexOf('/>')).includes('onRefresh={refreshPanel}'));
 });
 
 test('тумблер есть в обеих раскладках', () => {
-    // Компьютер: в шапке раздела, рядом с «Обновить».
+    // Компьютер: в шапке раздела, рядом с «Обновить», пока состояние прочитано.
+    assert.match(panel, /\{notify && \(\s*<div className="inline-flex items-center gap-2 rounded-lg/);
     assert.match(panel, /<IosToggle checked=\{notify\.enabled\} disabled=\{notifyBusy\}\s+onChange=\{toggleNotify\}/);
     assert.match(panel, /\{notify\?\.enabled && !notify\.telegram_linked && \(/);
-    // Телефон: те же состояние и обработчик уходят в свою раскладку.
+    // Телефон: те же состояние и обработчик уходят в свою раскладку…
     const mobile = panel.slice(panel.indexOf('<SessionsMobileView'));
     for (const prop of ['notify={notify}', 'notifyBusy={notifyBusy}', 'onToggleNotify={toggleNotify}',
         'notifyLabel={SESSION_NOTIFY_LABEL}', 'notifyHint={SESSION_NOTIFY_HINT}',
         'notifyNoTelegram={SESSION_NOTIFY_NO_TELEGRAM}']) {
         assert.ok(mobile.slice(0, mobile.indexOf('/>')).includes(prop), `телефону не передан ${prop}`);
     }
+    // …и раскладка подключает к ним сам переключатель.
+    const view = readFileSync(join(process.cwd(), 'src', 'components', 'sessions', 'SessionsMobileView.jsx'), 'utf8');
+    assert.match(view, /<IosToggle checked=\{notify\.enabled\} disabled=\{notifyBusy\}\s+onChange=\{onToggleNotify\} ariaLabel=\{notifyLabel\} \/>/);
 });

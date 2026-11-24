@@ -450,7 +450,7 @@ const SESSION_DEPARTMENT_NONE = 'none';
 const SESSION_DEPARTMENT_NONE_LABEL = 'Без отдела';
 // Тумблер «Уведомления о доступе» в «Сессиях» — одни слова на обе раскладки.
 const SESSION_NOTIFY_LABEL = 'Уведомления о доступе';
-const SESSION_NOTIFY_HINT = 'Сообщение в Telegram, когда сотруднику открывают доступ к чувствительным данным — по QR или кнопкой в этом разделе. Только вам и только пока переключатель включён; по умолчанию он выключен.';
+const SESSION_NOTIFY_HINT = 'Сообщение вам в Telegram, когда сотруднику открывают доступ к чувствительным данным — по QR или кнопкой в этом разделе.';
 const SESSION_NOTIFY_NO_TELEGRAM = 'Telegram не привязан — уведомления не придут. Войдите в бота портала своим логином и паролем.';
 const FOUR_YOU_ADMIN_USER_ID = 2;
 // Раздел 4 You закрыт для всех, в том числе для того, кто его ведёт (04.10.2026,
@@ -43927,28 +43927,37 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         // ── Тумблер «Уведомления о доступе» ──────────────────────────────────────
         // Свой у каждого админа и по умолчанию выключен (владелец, 24.11.2026):
         // «Открыт доступ к чувствительным данным» уходит в Telegram только
-        // включившим. Читается один раз при входе в раздел — список сессий
+        // включившим. Читается своей ручкой при входе в раздел — список сессий
         // перезапрашивается на каждую букву поиска, и тумблер к нему не привязан:
         // иначе ответ списка, ушедший до щелчка, вернул бы тумблер назад.
         const notifyUserId = apiHeaders?.['X-User-Id'] ?? null;
         const [notify, setNotify] = React.useState(null); // { enabled, telegram_linked } | null
         const [notifyBusy, setNotifyBusy] = React.useState(false);
+        // Номер последнего запроса к тумблеру: ответ, который обогнали (щелчком
+        // или уходом из раздела), состояние уже не трогает.
+        const notifyRequestRef = React.useRef(0);
 
-        React.useEffect(() => {
-            if (!notifyUserId) return undefined;
-            let cancelled = false;
+        const loadNotify = React.useCallback(() => {
+            if (!notifyUserId) return;
+            const requestId = ++notifyRequestRef.current;
             axios.get(`${API_BASE_URL}/api/admin/sessions/notify`, { headers: { 'X-User-Id': notifyUserId } })
                 .then(({ data }) => {
-                    if (cancelled || data?.status !== 'success') return;
+                    if (requestId !== notifyRequestRef.current || data?.status !== 'success') return;
                     setNotify({ enabled: Boolean(data.enabled), telegram_linked: Boolean(data.telegram_linked) });
                 })
-                // Не прочитали — тумблер просто не показываем: список от него не зависит.
+                // Не прочитали — тумблер не показываем: выдумывать «выключено» нельзя.
+                // «Обновить» прочитает его снова; тост здесь был бы шумом.
                 .catch(() => {});
-            return () => { cancelled = true; };
         }, [notifyUserId]);
+
+        React.useEffect(() => {
+            loadNotify();
+            return () => { notifyRequestRef.current += 1; };
+        }, [loadNotify]);
 
         const toggleNotify = React.useCallback(async (next) => {
             if (!notifyUserId) return;
+            const requestId = ++notifyRequestRef.current;
             setNotifyBusy(true);
             setNotify((prev) => (prev ? { ...prev, enabled: next } : prev));
             try {
@@ -43957,15 +43966,28 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     { enabled: next },
                     { headers: { 'X-User-Id': notifyUserId } }
                 );
-                if (data?.status !== 'success') throw new Error(data?.error || '');
-                setNotify({ enabled: Boolean(data.enabled), telegram_linked: Boolean(data.telegram_linked) });
+                if (data?.status !== 'success') throw new Error('');
+                if (requestId === notifyRequestRef.current) {
+                    setNotify({ enabled: Boolean(data.enabled), telegram_linked: Boolean(data.telegram_linked) });
+                }
             } catch (err) {
-                setNotify((prev) => (prev ? { ...prev, enabled: !next } : prev));
-                emitAppToast(err?.response?.data?.error || 'Не удалось переключить уведомления', 'error');
+                if (requestId === notifyRequestRef.current) {
+                    setNotify((prev) => (prev ? { ...prev, enabled: !next } : prev));
+                }
+                // Свой текст, а не ответ сервера: тот бывает английским
+                // («Internal server error», «Unauthorized»).
+                emitAppToast('Не удалось переключить уведомления', 'error');
             } finally {
                 setNotifyBusy(false);
             }
         }, [notifyUserId]);
+
+        // «Обновить» перечитывает и тумблер, если прошлое чтение не удалось:
+        // иначе он пропал бы до следующего входа в раздел.
+        const refreshPanel = React.useCallback(() => {
+            fetchAdminSessions();
+            if (!notify) loadNotify();
+        }, [fetchAdminSessions, loadNotify, notify]);
 
         // ── Карточка сотрудника ──────────────────────────────────────────────────
         const [detailPerson, setDetailPerson] = React.useState(null);
@@ -44385,7 +44407,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             isLoadingMore={isAdminSessionsLoadingMore}
                             hasMore={hasMoreAdminSessions}
                             onLoadMore={loadMoreAdminSessions}
-                            onRefresh={fetchAdminSessions}
+                            onRefresh={refreshPanel}
                             onOpen={openDetail}
                             selected={selected}
                             onToggle={toggleRow}
@@ -44471,7 +44493,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             onChange={toggleNotify} ariaLabel={SESSION_NOTIFY_LABEL} />
                     </div>
                 )}
-                <button onClick={fetchAdminSessions} disabled={isAdminSessionsLoading}
+                <button onClick={refreshPanel} disabled={isAdminSessionsLoading}
                 className="shrink-0 inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-gray-200 bg-white text-sm font-medium text-gray-600 shadow-sm hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                 <svg className={`w-4 h-4 ${isAdminSessionsLoading ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
