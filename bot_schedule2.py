@@ -1242,6 +1242,10 @@ def _get_user_payload(user):
     # вкладку «Участники». Пункт меню экран рисует по флагу (canAccessMailForUser), границу держат
     # ручки раздела (mail/access.py).
     mail_access = _mail_section_open_for(user_id, role)
+    # Открыт ли раздел «Основные средства» (ACC-1): бухгалтерия, HR, IT, главы отделов, тот, за
+    # кем числится ОС или кто участвует в запросе. Пункт меню экран рисует по флагу
+    # (canAccessFixedAssetsForUser), границу держат ручки раздела (fixed_assets/access.py).
+    fixed_assets_access = _fixed_assets_section_open_for(user_id)
     # «Дресс-код» (#418): человеку положено фото при приходе — отдел и роль из настройки
     # раздела. Пункт меню экран рисует по флагу (canAccessDressCodeForUser), границу держит
     # ручка /api/dress_code/photo тем же правилом.
@@ -1269,6 +1273,7 @@ def _get_user_payload(user):
         "syntony_window": syntony_window_open,
         "client_cards_access": client_cards_access,
         "mail_access": mail_access,
+        "fixed_assets_access": fixed_assets_access,
         "dress_code_access": dress_code_access,
         "wazzup_chat_operator": wazzup_chat_operator,
         "wazzup_chat_potok": wazzup_chat_potok,
@@ -14520,6 +14525,11 @@ def admin_update_user():
         elif field == 'status':
             if value not in ['working', 'fired', 'unpaid_leave', 'bs', 'sick_leave', 'annual_leave', 'dismissal']:
                 return jsonify({"error": "Invalid status value"}), 400
+            if value in ('fired', 'dismissal'):
+                # ТЗ ACC-1: увольнение недоступно, пока за сотрудником ОС без подписанного акта.
+                assets_hold = _fixed_assets_dismissal_block(user_id)
+                if assets_hold:
+                    return jsonify({"error": assets_hold, "code": "FIXED_ASSETS_HOLD"}), 409
         elif field == 'rate':
             try:
                 value = float(value)
@@ -41916,6 +41926,12 @@ def save_work_schedule_status_period():
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
 
+        if str(status_code or '').strip().lower() == 'dismissal':
+            # ТЗ ACC-1: увольнение недоступно, пока за сотрудником ОС без подписанного акта.
+            assets_hold = _fixed_assets_dismissal_block(int(target_operator[0]))
+            if assets_hold:
+                return jsonify({"error": assets_hold, "code": "FIXED_ASSETS_HOLD"}), 409
+
         status_period = db.save_schedule_status_period(
             operator_id=int(target_operator[0]),
             status_code=status_code,
@@ -55158,6 +55174,84 @@ async def mail_reminders_async():
         return await loop.run_in_executor(executor_pool, mail_reminders_job)
     except Exception:
         logging.exception("mail reminders failed")
+
+# ── Раздел «Основные средства» (задача ACC-1, ТЗ бухгалтерии) ───────────────
+# Приём в учёт, перемещение, списание и передача при увольнении — только запросом с фото и
+# подписанным актом; история не правится (триггер базы). Кто что видит — fixed_assets/access.py:
+# роли берутся из отделов портала. Таблицы раздел заводит сам при подключении
+# (fixed_assets/schema.py: ensure). Фото ОС и сканы актов — в бакет: свой env или общий бакет
+# вложений задач.
+def _fixed_assets_bucket_name():
+    return (
+        os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_FIXED_ASSETS')
+        or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS')
+        or ''
+    ).strip()
+
+
+# Раздел поднялся — только тогда профиль и увольнение спрашивают его таблицы.
+_FIXED_ASSETS_SECTION = {'ready': False}
+
+
+def _fixed_assets_section_open_for(user_id):
+    """Открыт ли раздел «Основные средства» — то же правило, что у его ручек
+    (fixed_assets/access.can_open). Сбой не роняет вход: без флага пункта меню нет."""
+    if user_id is None or not _FIXED_ASSETS_SECTION['ready']:
+        return False
+    try:
+        from fixed_assets import queries as fixed_assets_queries
+        with db._get_cursor() as cursor:
+            return bool(fixed_assets_queries.section_open_for(cursor, user_id))
+    except Exception:
+        logging.exception("Не удалось определить доступ к «Основным средствам» пользователя %s", user_id)
+        return False
+
+
+def _fixed_assets_dismissal_block(user_id):
+    """ТЗ ACC-1, правило «Увольнение»: приказ недоступен, пока за сотрудником числится ОС без
+    подписанного акта. Возвращает текст отказа либо None.
+
+    Пока раздел в пилоте (открыт только суперадминам), увольнение он не держит: HR не должен
+    упираться в раздел, которого не видит. Сбой самой проверки увольнение тоже не держит —
+    он уходит в лог."""
+    if user_id is None or not _FIXED_ASSETS_SECTION['ready']:
+        return None
+    try:
+        from fixed_assets import access as fixed_assets_access, queries as fixed_assets_queries
+        if fixed_assets_access.PILOT_SUPER_ADMIN_ONLY:
+            return None
+        with db._get_cursor() as cursor:
+            blockers = fixed_assets_queries.dismissal_blockers(cursor, user_id)
+    except Exception:
+        logging.exception("Основные средства: проверка перед увольнением пользователя %s не прошла", user_id)
+        return None
+    if not blockers:
+        return None
+    shown = ', '.join('«%s» (инв. № %s)' % (item['name'], item['inventory_number']) for item in blockers[:3])
+    more = len(blockers) - 3
+    return ('Увольнение недоступно: за сотрудником числятся основные средства без подписанного акта — %s%s. '
+            'Оформите передачу в разделе «Основные средства».'
+            % (shown, ' и ещё %d' % more if more > 0 else ''))
+
+
+try:
+    from fixed_assets import access as _fixed_assets_access  # noqa: E402
+    from fixed_assets.routes import build_fixed_assets_blueprint  # noqa: E402
+
+    if os.getenv('FIXED_ASSETS_PILOT', '').strip().lower() in ('off', '0', 'false'):
+        _fixed_assets_access.PILOT_SUPER_ADMIN_ONLY = False
+    app.register_blueprint(build_fixed_assets_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        excel_text_warning=_excel_suppress_number_as_text_warning,
+        gcs={'bucket_name': _fixed_assets_bucket_name, 'client': get_gcs_client},
+    ))
+    _FIXED_ASSETS_SECTION['ready'] = True
+    logging.info("Раздел «Основные средства»: Blueprint подключён на /api/fixed_assets")
+except Exception:
+    logging.exception("Раздел «Основные средства»: Blueprint НЕ подключён")
 
 
 # ── Раздел «Продакшн» (задача #316): материалы задач продакшна (#354) ──

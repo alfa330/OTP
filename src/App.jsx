@@ -345,6 +345,7 @@ const ClientCardsView = lazyWithRetry(() => import('./components/client_cards/Cl
 const DressCodeView = lazyWithRetry(() => import('./components/dress_code/DressCodeView'));
 const HrOfficeView = lazyWithRetry(() => import('./components/hr_office/HrOfficeView'));
 const MailView = lazyWithRetry(() => import('./components/mail/MailView'));
+const FixedAssetsView = lazyWithRetry(() => import('./components/fixed_assets/FixedAssetsView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const TezWallboardView = lazyWithRetry(() => import('./components/monitoring/TezWallboardView'));
 const OpWallboardView = lazyWithRetry(() => import('./components/monitoring/OpWallboardView'));
@@ -967,6 +968,10 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     // «Участники» — тренеру в том числе. Без строки там раздел закрыт своим предикатом
     // (canAccessMailForUser) и своей веткой перебросов.
     'mail',
+    // «Основные средства» (ACC-1): раздел открыт каждому, за кем числится ОС или кто участвует в
+    // запросе, — тренеру в том числе. Без этого раздел закрыт своим предикатом
+    // (canAccessFixedAssetsForUser) и своей веткой перебросов.
+    'fixed_assets',
     // «Коды 2FA» (#373): доступ выдаёт глава маркетинга любому работающему сотруднику, и
     // тренер под выдачу попадает. Без выдачи раздел закрыт своим предикатом
     // (canAccessTwofaSectionForUser) и своей веткой перебросов.
@@ -1041,6 +1046,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     client_cards: 'Client card',
     hr_office: 'HR office',
     mail: 'Mail',
+    fixed_assets: 'Fixed assets',
     olx_leads: 'OLX leads',
     olx_ads: 'OLX adverts',
     touches: 'Sales touches',
@@ -2754,6 +2760,11 @@ const canAccessHrOfficeForUser = (userLike) => userLike?.hr_office_access === tr
 /* «Почта» (#417): суперадмину и тем, кого администратор раздела добавил во вкладку «Участники».
    Круг считает сервер (bot_schedule2.py: _mail_section_open_for), границу держат ручки mail/. */
 const canAccessMailForUser = (userLike) => userLike?.mail_access === true;
+/* «Основные средства» (ACC-1): бухгалтерия, HR, IT, глава отдела аналитики, главы отделов и каждый,
+   за кем числится ОС или кто участвует в запросе. Круг считает сервер (bot_schedule2.py:
+   _fixed_assets_section_open_for — то же правило, что у ручек fixed_assets/access.py) и отдаёт
+   флагом в профиле. Строго true: профиль без поля (старый кэш) — не доступ. */
+const canAccessFixedAssetsForUser = (userLike) => userLike?.fixed_assets_access === true;
 
 // Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
 // уведомления руководству — не его решение. Ту же границу держит _szov_broadcast_guard.
@@ -3514,6 +3525,8 @@ const buildAppViewUrl = (nextView) => {
         }
         /* И вкладка «Почты» (mail_tab=…, MailView.jsx). */
         if (nextView !== 'mail') url.searchParams.delete('mail_tab');
+        /* И метки «Основных средств»: вкладка и открытая карточка (FixedAssetsView.jsx). */
+        if (nextView !== 'fixed_assets') ['fa_tab', 'fa_request', 'fa_asset'].forEach((name) => url.searchParams.delete(name));
         /* И метка фото «Дресс-кода» (dc_check=… — ссылка из Telegram на вкладку в «Отметках»). */
         if (nextView !== 'group_late_bot') url.searchParams.delete('dc_check');
         /* И вкладка «Кадров» (hr_tab=…, HrOfficeView). Своя метка, а не «tab»: «tab» — вкладка вики,
@@ -3596,6 +3609,8 @@ const syncAppViewWithUrl = (nextView) => {
         /* И вкладка «Почты» (mail_tab=…, MailView.jsx): условие «не mail», иначе обновление
            страницы теряло бы открытую вкладку раздела. */
         if (nextView !== 'mail') url.searchParams.delete('mail_tab');
+        /* И метки «Основных средств» (fa_tab, fa_request, fa_asset) — по тому же правилу. */
+        if (nextView !== 'fixed_assets') ['fa_tab', 'fa_request', 'fa_asset'].forEach((name) => url.searchParams.delete(name));
         /* И метка фото «Дресс-кода» (dc_check=… — ссылка из Telegram на вкладку в «Отметках»). */
         if (nextView !== 'group_late_bot') url.searchParams.delete('dc_check');
         /* И вкладка «Кадров» (hr_tab=…, HrOfficeView). Своя метка, а не «tab»: «tab» — вкладка вики,
@@ -45198,6 +45213,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const canAccessHrOfficeSection = canAccessHrOfficeForUser(user);
             // «Почта» — свой круг: «Участники» раздела и суперадмины.
             const canAccessMailSection = canAccessMailForUser(user);
+            // «Основные средства» — свой круг: роли раздела и каждый, за кем числится ОС.
+            const canAccessFixedAssetsSection = canAccessFixedAssetsForUser(user);
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
             // раздел общий, и в карте разделов пришлось бы держать его у всех.
             // Личный набор разделов прячет его так же, как «Библиотеку».
@@ -49078,6 +49095,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     (requestedViewFromUrl !== 'dress_code' || canAccessDressCodeSection) &&
                     (requestedViewFromUrl !== 'hr_office' || canAccessHrOfficeSection) &&
                     (requestedViewFromUrl !== 'mail' || canAccessMailSection) &&
+                    // «Основные средства»: ссылка на запрос — ?view=fixed_assets&fa_request=<id>.
+                    (requestedViewFromUrl !== 'fixed_assets' || canAccessFixedAssetsSection) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection) &&
                     (requestedViewFromUrl !== 'op_funnel' || canAccessOpFunnelSection) &&
                     (requestedViewFromUrl !== 'library' || canAccessLibrarySection) &&
@@ -49101,7 +49120,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFixedAssetsSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks') return;
@@ -49324,7 +49343,16 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFourYouSection]);
+                // «Основные средства» — свой круг (бухгалтерия, HR, IT, главы отделов, МОЛ): ссылка на
+                // раздел у того, кому он не открыт, оставила бы пустой экран.
+                if (view === 'fixed_assets' && !canAccessFixedAssetsSection) {
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
+                }
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFixedAssetsSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -55409,6 +55437,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // «Почта» — свой круг («Участники» раздела): у фронт-офисов и бухгалтерии есть allowlist,
                 // без этой строки проверка ниже выбросила бы их из раздела.
                 if (view === 'mail' && canAccessMailSection) return;
+                // «Основные средства» — свой круг: у бухгалтерии, HR и отделов линии есть allowlist,
+                // без этой строки проверка ниже выбросила бы их из раздела.
+                if (view === 'fixed_assets' && canAccessFixedAssetsSection) return;
                 // «Вики» — база знаний. Раздел выдаётся ОТДЕЛУ тумблером
                 // (departments.wiki_enabled), а не allowlist'ом: он общий, и
                 // держать его в карте разделов пришлось бы у каждого отдела.
@@ -55470,7 +55501,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, isEmployeeAccountingManager, workSchedulesViewOnly, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFixedAssetsSection, isEmployeeAccountingManager, workSchedulesViewOnly, wikiSectionEnabled, view]);
 
             /* Временный просмотр всех графиков сняли (WORK_SCHEDULE_VIEW_ONLY_USER_IDS), а
                адрес раздела остался в ссылке или истории — уводим в «Графики работы» роли
@@ -56268,6 +56299,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     || canAccessDressCodeSection
                     || canAccessHrOfficeSection
                     || canAccessMailSection
+                    || canAccessFixedAssetsSection
                     || (canAccessLmsSection && departmentAllowsView(user, 'lms'))
                     || isAdminLikeRole
                     || isPlainTrainer
@@ -57081,6 +57113,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'mail' ? 'bg-blue-700' : ''}`}
                                         >
                                             <FaIcon className="fas fa-envelope"></FaIcon> <span className="sidebar-text">Почта</span>
+                                        </button>
+                                    </li>
+                                    )}
+                                    {/* «Основные средства» (ACC-1) — один пункт для всех ролей раздела: бухгалтерия, HR, IT,
+                                        главы отделов и каждый, за кем числится ОС. Что внутри, решает сервер
+                                        (fixed_assets/access.py). */}
+                                    {canAccessFixedAssetsSection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'fixed_assets')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'fixed_assets' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-computer"></FaIcon> <span className="sidebar-text">Основные средства</span>
                                         </button>
                                     </li>
                                     )}
@@ -61208,6 +61254,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
                                     focusRequest={mailFocusRequest}
+                                />
+                            </Suspense>
+                        )}
+                        {/* «Основные средства» (ACC-1): приём в учёт, перемещение, списание и передача при
+                            увольнении — запросом с фото и подписанным актом. QR-замка нет: на экране техника,
+                            мебель и фамилии коллег. */}
+                        {view === 'fixed_assets' && canAccessFixedAssetsSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <FixedAssetsView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
                                 />
                             </Suspense>
                         )}
