@@ -7,9 +7,11 @@ Syntony — формой (syntony_leads/form.py). Решение «переда�
 
 Чем Syntony отличается от amoCRM и почему здесь меньше кода
 -----------------------------------------------------------
-* **Воронку, ответственного и теги задаёт форма** в самой Syntony. Запрос несёт только
-  телефон, комментарий и метки. Тега «Пропущенный входящий» запросом не поставить —
-  его ставит форма, если так настроена.
+* **Воронку, ответственного и теги задаёт форма** в самой Syntony. Тега «Пропущенный
+  входящий» запросом не поставить — его ставит форма, если так настроена. Запрос несёт
+  телефон, комментарий, метки utm и свои поля карточки — опознавательные знаки перезвона
+  (просьба владельца 24.11.2026): «Обращение: Пропущенный входящий», парк и номер линии,
+  время звонка. Поля менеджер видит в карточке новой заявки; в выгрузку API они не попадают.
 * **Повтор по номеру Syntony разбирает сама.** Пока у номера есть открытая заявка, новая
   не заводится — наш текст ложится в неё комментарием. Поэтому нет ни поиска «нашей
   сделки в „Новой заявке“», ни примечания к ней отдельным запросом, ни проверки «не
@@ -27,9 +29,17 @@ Syntony показала бы как имя клиента — в карточк
 from cdr import missed, missed_config, touches as touches_mod
 from syntony_leads import form
 
-__all__ = ['SyntonyFormError', 'SyntonyMissedWriter', 'build_payload']
+__all__ = ['SyntonyFormError', 'SyntonyMissedWriter', 'build_fields', 'build_payload']
 
 SyntonyFormError = form.SyntonyFormError
+
+# Свои поля карточки заявки: название — то, что менеджер увидит в карточке. Первое поле —
+# главный опознавательный знак: заявку «Пропущенный входящий» не спутать с заявкой формы сайта.
+FIELD_KIND = 'Обращение'
+KIND_MISSED = 'Пропущенный входящий'
+FIELD_PARK = 'Парк линии'
+FIELD_LINE = 'Линия'
+FIELD_CALL = 'Звонок'
 
 
 def form_phone(phone):
@@ -38,12 +48,28 @@ def form_phone(phone):
     return '+7' + digits if digits else ''
 
 
+def build_fields(touch, park):
+    """Опознавательные поля заявки: что это за обращение, на линию какого парка звонил клиент
+    и когда. Чего станция не назвала — того поля нет, прочерков не шлём."""
+    fields = {FIELD_KIND: KIND_MISSED}
+    if park:
+        fields[FIELD_PARK] = park
+    line = missed.pretty_phone(touch.get('line_number'))
+    if line:
+        fields[FIELD_LINE] = line
+    started = missed._moment(touch.get('started_at'))
+    if started is not None:
+        fields[FIELD_CALL] = started.strftime('%d.%m.%Y %H:%M:%S')
+    return fields
+
+
 def build_payload(touch, park):
-    """Что уходит в Syntony по пропущенному звонку: (телефон, комментарий, метки)."""
+    """Что уходит в Syntony по пропущенному звонку: (телефон, комментарий, метки, поля)."""
     phone = form_phone(touch.get('phone'))
     if not phone:
         raise SyntonyFormError('у пропущенного звонка нет номера клиента', final=True)
-    return phone, missed.note_text(touch, park), dict(missed_config.SYNTONY_UTM)
+    return (phone, missed.note_text(touch, park), dict(missed_config.SYNTONY_UTM),
+            build_fields(touch, park))
 
 
 class SyntonyMissedWriter(object):
@@ -57,5 +83,6 @@ class SyntonyMissedWriter(object):
 
     def send(self, touch, park=''):
         """Передать звонок. Не принят — SyntonyFormError (final — повтор не поможет)."""
-        phone, comment, utm = build_payload(touch, park)
-        form.create_lead(self.key, phone, comment=comment, utm=utm, session=self._session)
+        phone, comment, utm, fields = build_payload(touch, park)
+        form.create_lead(self.key, phone, comment=comment, utm=utm, fields=fields,
+                         session=self._session)

@@ -46,6 +46,10 @@ _KEY_RE = re.compile(r'^sf_[A-Za-z0-9_\-]{8,128}$')
 PHONE_MIN_DIGITS = 6
 PHONE_MAX_DIGITS = 30
 
+# «Свои поля { "название": "значение" }, до 40 штук. Видны менеджеру в карточке, в выгрузку
+# не попадают». Больше 40 Syntony не обещает принять — лишние не шлём.
+MAX_FIELDS = 40
+
 # Код ошибки из тела ответа попадает в журнал, только если это действительно код.
 _ERROR_CODE_RE = re.compile(r'^[a-z][a-z_]{1,40}$')
 
@@ -118,10 +122,11 @@ def _accepted(response):
     return False
 
 
-def create_lead(key, phone, comment=None, utm=None, session=None):
+def create_lead(key, phone, comment=None, utm=None, fields=None, session=None):
     """Завести заявку (или дописать комментарий в открытую заявку этого номера).
 
-    Ничего не возвращает: номера заявки Syntony не отдаёт. Не принята — SyntonyFormError.
+    fields — свои поля карточки {название: значение}: пустые не уходят, больше MAX_FIELDS —
+    тоже. Ничего не возвращает: номера заявки Syntony не отдаёт. Не принята — SyntonyFormError.
     """
     if not key or not _KEY_RE.match(key):
         raise SyntonyFormError('Syntony: нет ключа формы', final=True)
@@ -133,6 +138,11 @@ def create_lead(key, phone, comment=None, utm=None, session=None):
         payload['comment'] = str(comment)
     if utm:
         payload['utm'] = {name: str(value) for name, value in utm.items() if value}
+    if fields:
+        filled = [(str(name), str(value)) for name, value in fields.items()
+                  if name and value not in (None, '')]
+        if filled:
+            payload['fields'] = dict(filled[:MAX_FIELDS])
 
     own = session is None
     session = session or requests.Session()

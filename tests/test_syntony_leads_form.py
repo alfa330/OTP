@@ -14,7 +14,8 @@
     исключение;
   * кривой ключ в окружении (пробел, перевод строки) — «ключа нет», а не запрос;
   * запись пропущенного: +7 и десять цифр, текст примечания робота, метки icore/missed_call,
-    без имени клиента.
+    свои поля карточки — «Обращение: Пропущенный входящий», парк и номер линии, время звонка
+    (опознавательные знаки, просьба владельца 24.11), без имени клиента.
 
 Телефоны учебные (7XX555XXXX), ключ выдуманный.
 """
@@ -77,6 +78,19 @@ class CreateLeadTests(unittest.TestCase):
         self.assertNotIn('Origin', kwargs['headers'])
         self.assertFalse(kwargs['allow_redirects'])
         self.assertTrue(kwargs['timeout'])
+
+    def test_fields_go_as_is_without_empties_and_not_more_than_forty(self):
+        session = self.send(fields={'Обращение': 'Пропущенный входящий', 'Парк линии': '',
+                                    'Линия': None, 'Звонок': '23.11.2026 10:00:00'})
+        self.assertEqual(session.calls[0][1]['json']['fields'],
+                         {'Обращение': 'Пропущенный входящий', 'Звонок': '23.11.2026 10:00:00'})
+        many = {'Поле %02d' % i: str(i) for i in range(45)}
+        session = self.send(fields=many)
+        sent = session.calls[0][1]['json']['fields']
+        self.assertEqual(len(sent), form.MAX_FIELDS)
+        self.assertEqual(list(sent)[:2], ['Поле 00', 'Поле 01'], 'порядок полей сохраняется')
+        # Пустой набор полей — ключа нет вовсе.
+        self.assertNotIn('fields', self.send(fields={'Линия': ''}).calls[0][1]['json'])
 
     def test_accepted_answers(self):
         self.send(_Response(202, None))                      # 202 — договор, тело не важно
@@ -185,7 +199,8 @@ def missed_touch(**over):
 
 class MissedWriterTests(unittest.TestCase):
     def test_payload_is_phone_note_and_marks(self):
-        phone, comment, utm = missed_syntony.build_payload(missed_touch(), 'Центр регистрации')
+        phone, comment, utm, fields = missed_syntony.build_payload(missed_touch(),
+                                                                   'Центр регистрации')
         self.assertEqual(phone, '+77015550001')
         self.assertEqual(comment, 'Пропущенный входящий звонок 23.11.2026 в 10:00:00 на линию '
                                   '+7 747 555 00 78 (Центр регистрации). Ждал в очереди 40 с, '
@@ -193,14 +208,25 @@ class MissedWriterTests(unittest.TestCase):
                                   'ответили — нужно перезвонить.')
         self.assertEqual(utm, missed_config.SYNTONY_UTM)
         self.assertIsNot(utm, missed_config.SYNTONY_UTM, 'общий словарь меток не отдаём наружу')
+        self.assertEqual(fields, {'Обращение': 'Пропущенный входящий',
+                                  'Парк линии': 'Центр регистрации',
+                                  'Линия': '+7 747 555 00 78',
+                                  'Звонок': '23.11.2026 10:00:00'})
+        self.assertEqual(list(fields)[0], 'Обращение', 'главный знак — первым полем')
+
+    def test_fields_without_what_the_station_did_not_name(self):
+        fields = missed_syntony.build_fields(missed_touch(line_number='', started_at=None), '')
+        self.assertEqual(fields, {'Обращение': 'Пропущенный входящий'})
 
     def test_writer_sends_without_a_client_name(self):
         session = _Session()
         writer = missed_syntony.SyntonyMissedWriter(key=KEY, session=session)
         writer.send(missed_touch(), 'Jana такси')
         body = session.calls[0][1]['json']
-        self.assertEqual(set(body), {'phone', 'comment', 'utm'})
+        self.assertEqual(set(body), {'phone', 'comment', 'utm', 'fields'})
         self.assertIn('(Jana такси)', body['comment'])
+        self.assertEqual(body['fields']['Обращение'], 'Пропущенный входящий')
+        self.assertEqual(body['fields']['Парк линии'], 'Jana такси')
 
     def test_no_phone_is_final_without_a_request(self):
         session = _Session()
