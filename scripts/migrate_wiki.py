@@ -412,7 +412,7 @@ def main():
 
     # ADMIN_BASE_URL — адрес ФРОНТЕНДА (GitHub Pages), туда ходить нельзя:
     # API живёт на Render. Origin для проверки происхождения берём тот же.
-    base_url = env('WIKI_MIGRATION_API_URL') or 'https://otp-2-fos4.onrender.com'
+    base_url = env('WIKI_MIGRATION_API_URL') or 'https://api.icorehub.kz'
     login_value, password = env('ADMIN_LOGIN'), env('ADMIN_PASSWORD')
     if not login_value or not password:
         raise SystemExit('Нет ADMIN_LOGIN/ADMIN_PASSWORD в .env.codex.local')

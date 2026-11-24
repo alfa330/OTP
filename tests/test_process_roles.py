@@ -105,3 +105,26 @@ def test_compose_runs_three_roles_of_one_image():
     limits = [int(value) for value in re.findall(r'_STREAM_LIMIT: "(\d+)"', realtime)]
     assert len(limits) == 6 and sum(limits) < threads, (threads, limits)
     assert int(re.search(r'WAITRESS_CONN_LIMIT: "(\d+)"', realtime).group(1)) > threads
+
+
+# Потоки, что стартуют при импорте монолита: в роли realtime их нет (ROLE_RUNS_BACKGROUND).
+IMPORT_TIME_WORKERS = ('wazzup_syntony.start_worker(db)', 'partner_webhooks.start_worker(db)',
+                       'wazzup_voice.start_worker(db)', 'wazzup_driver_cards_sync.start_worker(db)',
+                       'syntony_chats_sync.start_worker(db)', 'syntony_autogrant.start_worker(db)')
+
+
+def test_background_workers_skip_realtime_role():
+    """Поды realtime держат только SSE; у забора и сторожа Syntony нет координации между
+    процессами, и каждая реплика realtime умножала бы запросы к Syntony."""
+    assert "ROLE_RUNS_BACKGROUND = OTP_ROLE != 'realtime'" in MONOLITH
+    lines = MONOLITH.splitlines()
+    for call in IMPORT_TIME_WORKERS:
+        hits = [i for i, line in enumerate(lines) if call in line and not line.lstrip().startswith('#')]
+        assert hits, call
+        for i in hits:
+            guarded = 'ROLE_RUNS_BACKGROUND' in lines[i] or lines[i - 1].strip() == 'if ROLE_RUNS_BACKGROUND:'
+            assert guarded, f'{call} (строка {i + 1}) стартует и в роли realtime'
+    # Подхват брошенных выгрузок «Провайдера ЭДО» — нить внутри строителя раздела.
+    assert 'run_sweeper=ROLE_RUNS_BACKGROUND' in MONOLITH
+    fleet = (ROOT / 'fleet_edm' / 'routes.py').read_text(encoding='utf-8')
+    assert 'if run_sweeper:' in fleet and 'run_sweeper=True' in fleet

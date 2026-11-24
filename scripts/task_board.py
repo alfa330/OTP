@@ -42,7 +42,7 @@ from datetime import datetime, timedelta
 import requests
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_API_BASE_URL = 'https://otp-2-fos4.onrender.com'
+DEFAULT_API_BASE_URL = 'https://api.icorehub.kz'
 
 # Куда падают скачанные вложения. Вне репозитория — файлы заказчика в git не место.
 DOWNLOAD_ROOT = os.path.join(tempfile.gettempdir(), 'otp_task_files')

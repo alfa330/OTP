@@ -79,7 +79,8 @@ CHECKPOINT_MAX_ROWS = 2000
 
 
 def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                              resolve_requester, pool, excel_text_warning=None):
+                              resolve_requester, pool, excel_text_warning=None,
+                              run_sweeper=True):
     """pool — свой ThreadPoolExecutor раздела. Общий executor_pool сюда не годится:
     в нём четыре места на всё приложение, а выгрузка занимает одно из них на
     минуты подряд."""
@@ -601,7 +602,10 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 logging.exception("Провайдер ЭДО: обход брошенных выгрузок не удался")
             time.sleep(SWEEP_SECONDS)
 
-    threading.Thread(target=_sweeper, name='fleet-edm-sweeper', daemon=True).start()
+    # run_sweeper=False — процесс роли realtime: он держит только SSE, выгрузки подхватит
+    # процесс с ролью all/api (bot_schedule2.ROLE_RUNS_BACKGROUND).
+    if run_sweeper:
+        threading.Thread(target=_sweeper, name='fleet-edm-sweeper', daemon=True).start()
 
     # ── ручки ────────────────────────────────────────────────────────────────
 

@@ -1761,12 +1761,16 @@ def get_pool():
     if POOL is None:
         with POOL_LOCK:
             if POOL is None:
+                # Сессия каждого соединения пула — в UTC, как на Render: код считает время
+                # базы в UTC, а у Managed PostgreSQL в Yandex Cloud по умолчанию Europe/Moscow.
+                from common.pg_session import UtcConnection
                 conn_params = {
                     'dbname': os.getenv('POSTGRES_DB'),
                     'user': os.getenv('POSTGRES_USER'),
                     'password': os.getenv('POSTGRES_PASSWORD'),
                     'host': os.getenv('POSTGRES_HOST'),
-                    'port': os.getenv('POSTGRES_PORT', 5432)
+                    'port': os.getenv('POSTGRES_PORT', 5432),
+                    'connection_factory': UtcConnection,
                 }
                 POOL = ThreadedConnectionPool(MIN_CONN, MAX_CONN, **conn_params)
                 POOL_SEMAPHORE = threading.BoundedSemaphore(MAX_CONN)

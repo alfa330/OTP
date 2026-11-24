@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import requests
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_BASE = 'https://otp-2-fos4.onrender.com'
+DEFAULT_BASE = 'https://api.icorehub.kz'
 GLOBAL_CHANNEL = '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2'
 SYNTHETIC_CHAT = '__icore_readonly_smoke_no_chat__'
 

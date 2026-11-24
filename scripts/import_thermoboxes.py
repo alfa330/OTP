@@ -10,7 +10,7 @@
 
     # прод — через ручки раздела, под учёткой с правом заводить офисы (глава ФО / админ):
     THERMO_API_LOGIN=… THERMO_API_PASSWORD=… \
-    python scripts/import_thermoboxes.py --csv лист.csv --api https://otp-2-fos4.onrender.com --office … --apply
+    python scripts/import_thermoboxes.py --csv лист.csv --api https://api.icorehub.kz --office … --apply
 
 Что делает:
   * строку листа сопоставляет с офисом справочника вики (тот же справочник, что
@@ -393,7 +393,7 @@ def main():
     target = parser.add_mutually_exclusive_group()
     target.add_argument('--dsn', default=os.environ.get('THERMO_IMPORT_DSN'),
                         help='строка подключения к Postgres (или THERMO_IMPORT_DSN) — стенд')
-    target.add_argument('--api', help='адрес API портала, например https://otp-2-fos4.onrender.com — прод')
+    target.add_argument('--api', help='адрес API портала, например https://api.icorehub.kz — прод')
     parser.add_argument('--office', action='append', default=[],
                         help='офис вручную: «Город=id» или «Город|адрес из листа=id»')
     parser.add_argument('--apply', action='store_true', help='записать (без него — сухой прогон)')

@@ -600,17 +600,21 @@ def _pg_kwargs():
 
 def _connect_pg():
     import psycopg2
+    from common.pg_session import UtcConnection
     kw = _pg_kwargs()
     if not kw:
         raise RuntimeError("нет настроек БД: задайте POSTGRES_* (как в приложении) или DATABASE_URL(_READONLY)")
-    return psycopg2.connect(**kw)
+    # Сессия в UTC, как у пула приложения (common/pg_session.py): даты оценок и окна «за сутки»
+    # считаются в SQL, а у Managed PostgreSQL в Yandex Cloud пояс по умолчанию — Europe/Moscow.
+    return psycopg2.connect(connection_factory=UtcConnection, **kw)
 
 
 def connect_ro():
     """Чтение: локально DATABASE_URL_READONLY, на проде POSTGRES_* (полный доступ, сессия read-only)."""
     import psycopg2
+    from common.pg_session import UtcConnection
     url = env("DATABASE_URL_READONLY")
-    conn = psycopg2.connect(url) if url else _connect_pg()
+    conn = psycopg2.connect(url, connection_factory=UtcConnection) if url else _connect_pg()
     conn.set_session(readonly=True, autocommit=True)
     return conn
 
@@ -618,8 +622,9 @@ def connect_ro():
 def connect_rw():
     """Запись: DATABASE_URL или POSTGRES_* (полный доступ). Локально (только RO) бросит ошибку."""
     import psycopg2
+    from common.pg_session import UtcConnection
     url = env("DATABASE_URL")
-    return psycopg2.connect(url) if url else _connect_pg()
+    return psycopg2.connect(url, connection_factory=UtcConnection) if url else _connect_pg()
 
 # --- Ревью ---
 REVIEW_MODEL_CONF = 0.60   # ниже — на ревью

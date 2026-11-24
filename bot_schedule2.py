@@ -229,6 +229,18 @@ if OTP_ROLE not in ('all', 'api', 'realtime', 'worker'):
     raise Exception(f"OTP_ROLE={OTP_ROLE!r}: допустимы all, api, realtime, worker")
 ROLE_SERVES_HTTP = OTP_ROLE != 'worker'
 ROLE_RUNS_BOT = OTP_ROLE in ('all', 'worker')
+# Фоновые потоки, что стартуют при импорте (пересылка Wazzup→Syntony, вебхуки партнёрам,
+# голосовые, карточки в amoCRM, забор чатов Syntony, сторож окна Syntony, подхват выгрузок
+# «Провайдера ЭДО»), — не в realtime: его поды только держат SSE, а у забора Syntony и
+# сторожа окна координации между процессами нет — каждая реплика realtime умножала бы
+# запросы к Syntony (10 в минуту на ключ). Роли all/api/worker — как раньше.
+ROLE_RUNS_BACKGROUND = OTP_ROLE != 'realtime'
+# Фоновые потоки, что стартуют при импорте (пересылка в Syntony и «Поток», вебхуки партнёрам,
+# голосовые в Gemini, карточки в amoCRM, забор чатов и сторож окна Syntony, подхват выгрузок
+# «Провайдера ЭДО»), — во всех ролях, кроме realtime. Её поды держат только SSE и в облаке
+# стоят в двух экземплярах: забор Syntony без аренды строк шёл бы там втрое (лимит ключа —
+# 10 запросов в минуту на всех), а amoCRM получала бы лишние входы общей учёткой.
+ROLE_RUNS_BACKGROUND = OTP_ROLE != 'realtime'
 # Нити waitress — общий бюджет и для запросов, и для SSE-потоков (каждый держит нить всё
 # соединение), поэтому потолки потоков ниже считаются от него. 96 — как на Render; у роли
 # realtime свой, больше (deploy/yandex/docker-compose.yml). Соединений — больше нитей:
@@ -802,6 +814,8 @@ SHIFT_AUCTION_EVENT_BUFFER_MAXLEN = _env_int('SHIFT_AUCTION_EVENT_BUFFER_MAXLEN'
 
 
 def _build_postgres_connection_params():
+    # Отдельные соединения (LISTEN живых потоков, аукцион) — тоже в UTC, как пул (common/pg_session.py).
+    from common.pg_session import UtcConnection
     return {
         'dbname': os.getenv('POSTGRES_DB'),
         'user': os.getenv('POSTGRES_USER'),
@@ -813,6 +827,7 @@ def _build_postgres_connection_params():
         'keepalives_interval': 10,
         'keepalives_count': 3,
         'connect_timeout': 5,
+        'connection_factory': UtcConnection,
     }
 
 
@@ -8663,11 +8678,13 @@ app.register_blueprint(build_pilot_blueprint(
     access=_wazzup_chat_access,
     stream_limit=_env_int('WAZZUP_PILOT_STREAM_LIMIT', 24, minimum=4, maximum=WAITRESS_THREADS),
 ))
-wazzup_syntony.start_worker(db)
+if ROLE_RUNS_BACKGROUND:
+    wazzup_syntony.start_worker(db)
 # Доставка событий партнёрам по их подпискам (partner_keys/webhooks.py): свой
 # демон на процесс, строки очереди арендуются в базе.
 from partner_keys import webhooks as partner_webhooks  # noqa: E402
-partner_webhooks.start_worker(db)
+if ROLE_RUNS_BACKGROUND:
+    partner_webhooks.start_worker(db)
 
 # Голосовые «Чатов ОП» текстом (wazzup/voice.py): Gemini расшифровывает их фоном,
 # своим потоком, не трогая общий пул бота. Текст своих голосовых лента берёт той же
@@ -8677,7 +8694,8 @@ app.register_blueprint(wazzup_voice.build_voice_blueprint(
     db=db, require_api_key=require_api_key, guard=_wazzup_chat_reader_guard,
     preflight=_build_cors_preflight_response, account_arg=lambda: _wazzup_account_arg(),
     channel_scope=_wazzup_channel_scope))
-wazzup_voice.start_worker(db)
+if ROLE_RUNS_BACKGROUND:
+    wazzup_voice.start_worker(db)
 
 # Кастомизация «Чатов ОП»: свои обои на фоне переписки (wazzup/appearance.py).
 # Свои — каждому, кому раздел открыт; у кого какие стоят — видят админы.
@@ -8736,7 +8754,8 @@ app.register_blueprint(wazzup_embed_auth.build_embed_blueprint(
 # Карточка водителя в чатах Верификаторов: свой поток пишет её поля в сделку
 # amoCRM этого чата (wazzup/driver_cards_sync.py), не занимая общий пул бота.
 from wazzup import driver_cards_sync as wazzup_driver_cards_sync  # noqa: E402
-wazzup_driver_cards_sync.start_worker(db)
+if ROLE_RUNS_BACKGROUND:
+    wazzup_driver_cards_sync.start_worker(db)
 
 # Рабочее место верификатора в «Чатах ОП»: подтверждение доступа (обычный QR портала;
 # прежний код чатов с кодом главы для СВ — wazzup/workspace_routes.py) и статусы смены.
@@ -55233,7 +55252,7 @@ except Exception:
 try:
     from syntony_chats import sync as syntony_chats_sync  # noqa: E402
 
-    if syntony_chats_sync.start_worker(db):
+    if ROLE_RUNS_BACKGROUND and syntony_chats_sync.start_worker(db):
         logging.info("Чаты Syntony: забор из API запущен — раз в 3 минуты")
 except Exception:
     logging.exception("Чаты Syntony: забор из API НЕ запущен")
@@ -55243,7 +55262,7 @@ except Exception:
 try:
     from syntony_window import autogrant as syntony_autogrant  # noqa: E402
 
-    if syntony_autogrant.start_worker(db):
+    if ROLE_RUNS_BACKGROUND and syntony_autogrant.start_worker(db):
         logging.info("Окно Syntony: сторож списка запущен — новые ОП и СЗоВ раз в 15 минут")
 except Exception:
     logging.exception("Окно Syntony: сторож списка НЕ запущен")
@@ -56167,6 +56186,7 @@ try:
         resolve_requester=_resolve_requester,
         pool=fleet_edm_pool,
         excel_text_warning=_excel_suppress_number_as_text_warning,
+        run_sweeper=ROLE_RUNS_BACKGROUND,
     ))
     logging.info("Раздел «Провайдер ЭДО»: Blueprint подключён на /api/fleet_edm")
 except Exception:

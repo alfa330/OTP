@@ -565,7 +565,7 @@ def main():
 
     env = load_env(os.path.join(ROOT, '.env.codex.local'))
     api_base = (args.api or os.getenv('OTP_API_BASE_URL')
-                or env.get('OTP_API_BASE_URL') or 'https://otp-2-fos4.onrender.com')
+                or env.get('OTP_API_BASE_URL') or 'https://api.icorehub.kz')
     login = os.getenv('ADMIN_LOGIN') or env.get('ADMIN_LOGIN')
     password = os.getenv('ADMIN_PASSWORD') or env.get('ADMIN_PASSWORD')
     if not (login and password):

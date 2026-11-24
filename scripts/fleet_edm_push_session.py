@@ -54,7 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fleet_edm.client import DEFAULT_USER_AGENT  # noqa: E402
 
-DEFAULT_API_BASE_URL = 'https://otp-2-fos4.onrender.com'
+DEFAULT_API_BASE_URL = 'https://api.icorehub.kz'
 FLEET_URL = 'https://fleet.yandex.kz/'
 
 # Куда нести сессию и в каком профиле Chromium держать вход. Профили разные:

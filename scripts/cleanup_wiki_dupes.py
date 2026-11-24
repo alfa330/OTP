@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BASE = 'https://otp-2-fos4.onrender.com'
+BASE = 'https://api.icorehub.kz'
 
 
 def env(name):
