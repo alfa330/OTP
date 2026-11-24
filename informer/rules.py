@@ -212,6 +212,31 @@ def in_window(now, window_start, window_end):
     return local >= window_start or local < window_end
 
 
+# «Завершить в» (владелец, 24.11.2026: рассылку «сегодня последний день подписания» — «завершение на завтра», «чтобы
+# работало без включенного компьютера»): момент, после которого рассылка закрывается сама — на сервере, при опросе
+# робота. Дальше двух месяцев — скорее опечатка в годе, чем план.
+FINISH_AT_MAX_DAYS = 60
+
+
+def parse_finish_at(value, now):
+    """Когда рассылка завершится сама: 'ГГГГ-ММ-ДДTЧЧ:ММ' по Алматы (поле datetime-local) или ISO со сдвигом →
+    aware datetime; пусто — None (завершать только руками). Прошедшее время и дальше FINISH_AT_MAX_DAYS — ValueError."""
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        raise ValueError('Время завершения — дата и время, например 25.11.2026 21:00')
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=ALMATY)
+    if moment <= now:
+        raise ValueError('Время завершения уже прошло')
+    if moment - now > timedelta(days=FINISH_AT_MAX_DAYS):
+        raise ValueError(f'Завершение — не дальше {FINISH_AT_MAX_DAYS} дней вперёд')
+    return moment
+
+
 def parse_hhmm(value, default):
     """'HH:MM' → time; пусто — default; мусор — ValueError."""
     text = str(value or '').strip()

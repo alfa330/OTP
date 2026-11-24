@@ -158,3 +158,17 @@ def test_recipients_rejects_files_without_numbers():
         recipients.parse('Иванов\nПетров\n'.encode(), '.csv')
     with pytest.raises(ValueError):
         recipients.parse(b'x', '.txt')
+
+
+def test_finish_at_is_almaty_time_in_the_future():
+    """«Завершить в» (24.11.2026): поле datetime-local без пояса — время Алматы; пусто — только руками."""
+    assert rules.parse_finish_at('', NOW) is None and rules.parse_finish_at(None, NOW) is None
+    moment = rules.parse_finish_at('2026-10-16T21:00', NOW)
+    assert moment == datetime(2026, 10, 16, 16, 0, tzinfo=timezone.utc)          # 21:00 по Алматы = 16:00 UTC
+    assert rules.parse_finish_at('2026-10-16T16:00:00+00:00', NOW) == moment
+    with pytest.raises(ValueError, match='уже прошло'):
+        rules.parse_finish_at('2026-10-15T12:00', NOW)                           # ровно «сейчас» (12:00 Алматы)
+    with pytest.raises(ValueError, match='не дальше'):
+        rules.parse_finish_at('2027-10-16T21:00', NOW)                           # опечатка в годе
+    with pytest.raises(ValueError):
+        rules.parse_finish_at('завтра вечером', NOW)

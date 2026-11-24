@@ -116,8 +116,9 @@ class InformerService:
     # ── рассылки (руководитель) ──────────────────────────────────────────────
     def create_campaign(self, department_id, created_by, *, name, wav_bytes, parts, recipients,
                         file_name='', window_start=None, window_end=None, max_per_minute=None,
-                        max_attempts=None, retry_after_min=None, script=None):
+                        max_attempts=None, retry_after_min=None, script=None, finish_at=None):
         """Новая рассылка (черновик): запись, части, список водителей. Звонить начнёт «Запустить».
+        finish_at — когда завершится сама (rules.parse_finish_at); пусто — только руками.
 
         Запись — оригинал 24 кГц (склеивает браузер); робот играет её телефонную версию 8 кГц, которую
         сводит сервер (informer/telephone.py). WAV 8 кГц — запись прежней страницы: оригинала у неё нет."""
@@ -137,6 +138,7 @@ class InformerService:
                                        rules.MAX_ATTEMPTS_LIMIT, 'Попыток на водителя')
             retry = rules.clamp_int(retry_after_min, rules.DEFAULT_RETRY_MINUTES, 5, 24 * 60,
                                     'Повтор через, мин')
+            finish = rules.parse_finish_at(finish_at, self.clock())
         except ValueError as exc:
             raise InformerError(str(exc))
         if start == end:
@@ -157,12 +159,12 @@ class InformerService:
                 INSERT INTO informer_campaigns
                     (department_id, name, status, audio_wav, audio_master, audio_sha256, audio_ms, parts,
                      script, window_start, window_end, max_per_minute, max_attempts, retry_after_min,
-                     targets_total, file_name, created_by, created_at)
-                VALUES (%s, %s, 'draft', %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     targets_total, file_name, created_by, created_at, finish_at)
+                VALUES (%s, %s, 'draft', %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (int(department_id), name[:200], phone, master, sha, phone_ms, json.dumps(clean),
                   script_json, start, end, per_minute, attempts, retry, len(rows), str(file_name or '')[:255],
-                  created_by, self.clock()))
+                  created_by, self.clock(), finish))
             campaign_id = cur.fetchone()[0]
             execute_values(cur, """
                 INSERT INTO informer_targets (campaign_id, phone, full_name, row_number, next_call_at)
@@ -174,6 +176,8 @@ class InformerService:
     def list_campaigns(self, department_id):
         self.ready()
         with self.db._get_cursor() as cur:
+            # Робот не на связи — раздел всё равно не покажет «идёт» у рассылки, чьё «завершить в» наступило.
+            self._finish_due(cur, self.clock())
             cur.execute("""
                 SELECT c.id, c.name, c.status, c.audio_ms, c.parts, c.window_start, c.window_end,
                        c.max_per_minute, c.max_attempts, c.retry_after_min, c.targets_total, c.created_at,
@@ -182,7 +186,7 @@ class InformerService:
                        COUNT(t.id) FILTER (WHERE t.state = 'given_up'),
                        COUNT(t.id) FILTER (WHERE t.state IN ('pending', 'calling')),
                        AVG(t.best_listened_ms) FILTER (WHERE t.state = 'done'),
-                       c.script, c.warmup_since, c.cooldown_until
+                       c.script, c.warmup_since, c.cooldown_until, c.finish_at
                 FROM informer_campaigns c
                 LEFT JOIN informer_targets t ON t.campaign_id = c.id
                 WHERE c.department_id = %s
@@ -194,6 +198,24 @@ class InformerService:
             agent_warm = self._agent_warmup(cur)
         now = self.clock()
         return [self._campaign_row(r, agent_warm, now) for r in rows]
+
+    @staticmethod
+    def _finish_due(cur, now):
+        """Рассылки, у которых наступило «завершить в», — завершены, как кнопкой «Завершить»: кому не успели
+        позвонить — «рассылку завершили». Делает это сам сервер — при каждом опросе робота (он стучится круглые
+        сутки, раз в 10–60 с) и при открытии раздела, — так что ни браузер, ни чей-то компьютер не нужны
+        (владелец, 24.11.2026). Завершено в момент «завершить в», а не когда заметили."""
+        cur.execute("""
+            UPDATE informer_campaigns SET status = %s, finished_at = finish_at
+            WHERE status = ANY(%s) AND finish_at IS NOT NULL AND finish_at <= %s
+            RETURNING id
+        """, (rules.CAMPAIGN_DONE, [rules.CAMPAIGN_DRAFT, rules.CAMPAIGN_ACTIVE, rules.CAMPAIGN_PAUSED], now))
+        ids = [r[0] for r in cur.fetchall()]
+        if ids:
+            cur.execute("UPDATE informer_targets SET state = 'stopped' WHERE campaign_id = ANY(%s) AND state = 'pending'",
+                        (ids,))
+            log.info("Автоинформатор: рассылки %s завершены по времени «завершить в»", ids)
+        return ids
 
     @staticmethod
     def _agent_warmup(cur):
@@ -224,6 +246,8 @@ class InformerService:
             "answered": done, "given_up": given_up, "left": left,
             "avg_listened_ms": int(r[18]) if r[18] is not None else None,
             "script": r[19] or {},
+            # Когда завершится сама (None — только руками).
+            "finish_at": r[22].isoformat() if len(r) > 22 and r[22] else None,
         }
 
     def campaign_action(self, department_id, campaign_id, action):
@@ -234,6 +258,8 @@ class InformerService:
         allowed_from, target = rules.CAMPAIGN_ACTIONS[action]
         now = self.clock()
         with self.db._get_cursor() as cur:
+            # Время «завершить в» прошло — рассылка уже завершена: «Продолжить» её не оживит.
+            self._finish_due(cur, now)
             cur.execute("SELECT status FROM informer_campaigns WHERE id = %s AND department_id = %s FOR UPDATE",
                         (int(campaign_id), int(department_id)))
             row = cur.fetchone()
@@ -259,10 +285,32 @@ class InformerService:
                 """, (int(campaign_id),))
         return self.campaign_detail(department_id, campaign_id, targets_limit=0)
 
+    def set_finish_at(self, department_id, campaign_id, value):
+        """Когда рассылка завершится сама: 'ГГГГ-ММ-ДДTЧЧ:ММ' по Алматы или ISO; пусто — только руками.
+        У завершённой не меняется."""
+        self.ready()
+        now = self.clock()
+        try:
+            moment = rules.parse_finish_at(value, now)
+        except ValueError as exc:
+            raise InformerError(str(exc))
+        with self.db._get_cursor() as cur:
+            self._finish_due(cur, now)
+            cur.execute("SELECT status FROM informer_campaigns WHERE id = %s AND department_id = %s FOR UPDATE",
+                        (int(campaign_id), int(department_id)))
+            row = cur.fetchone()
+            if not row:
+                raise InformerError('Рассылка не найдена', 404)
+            if row[0] == rules.CAMPAIGN_DONE:
+                raise InformerError('Рассылка уже завершена', 409)
+            cur.execute("UPDATE informer_campaigns SET finish_at = %s WHERE id = %s", (moment, int(campaign_id)))
+        return self.campaign_detail(department_id, campaign_id, targets_limit=0)
+
     def campaign_detail(self, department_id, campaign_id, targets_limit=DETAIL_TARGETS_LIMIT):
         """Рассылка с аналитикой: дозвон, сколько слушали, на какой части клали трубку, водители."""
         self.ready()
         with self.db._get_cursor() as cur:
+            self._finish_due(cur, self.clock())
             cur.execute("""
                 SELECT c.id, c.name, c.status, c.audio_ms, c.parts, c.window_start, c.window_end,
                        c.max_per_minute, c.max_attempts, c.retry_after_min, c.targets_total, c.created_at,
@@ -271,7 +319,7 @@ class InformerService:
                        COUNT(t.id) FILTER (WHERE t.state = 'given_up'),
                        COUNT(t.id) FILTER (WHERE t.state IN ('pending', 'calling')),
                        AVG(t.best_listened_ms) FILTER (WHERE t.state = 'done'),
-                       c.script, c.warmup_since, c.cooldown_until
+                       c.script, c.warmup_since, c.cooldown_until, c.finish_at
                 FROM informer_campaigns c
                 LEFT JOIN informer_targets t ON t.campaign_id = c.id
                 WHERE c.id = %s AND c.department_id = %s
@@ -576,6 +624,8 @@ class InformerService:
                   now if robot_paused else None, robot_paused))
             agent_warm = cur.fetchone()[0]
             self._reclaim_stale(cur, now)
+            # До раздачи: после «завершить в» ни одного нового звонка.
+            self._finish_due(cur, now)
             if not ami_ok or not lines:
                 return {"calls": [], "next_poll_sec": POLL_AMI_DOWN_SEC}
             free = {line: max(0, info["capacity"] - info["active"]) for line, info in lines.items()}

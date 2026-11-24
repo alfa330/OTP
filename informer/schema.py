@@ -102,6 +102,8 @@ DDL = [
     # Остывание после отказов сети (18.10.2026): до какого момента рассылка молчит и какое это остывание подряд.
     "ALTER TABLE informer_campaigns ADD COLUMN IF NOT EXISTS cooldown_until TIMESTAMPTZ",
     "ALTER TABLE informer_campaigns ADD COLUMN IF NOT EXISTS cooldown_count SMALLINT NOT NULL DEFAULT 0",
+    # «Завершить в» (24.11.2026): после этого момента сервер закрывает рассылку сам; NULL — только руками.
+    "ALTER TABLE informer_campaigns ADD COLUMN IF NOT EXISTS finish_at TIMESTAMPTZ",
 ]
 
 _ready = False

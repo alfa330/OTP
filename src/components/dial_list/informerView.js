@@ -159,6 +159,30 @@ export const shortDateTime = (iso) => {
     return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
 
+/* «Завершить в» (24.11.2026) — время Алматы (UTC+5) при любом поясе браузера: так же его читает сервер
+   (informer/rules.parse_finish_at). Момент ISO → значение поля datetime-local: «2026-11-25T21:00». */
+const ALMATY_OFFSET_MS = 5 * 3600 * 1000;
+export const almatyInputValue = (iso) => {
+    if (!iso) return '';
+    const ms = Date.parse(iso);
+    if (Number.isNaN(ms)) return '';
+    return new Date(ms + ALMATY_OFFSET_MS).toISOString().slice(0, 16);
+};
+
+/* Что предложить в поле: сегодня в конце окна рассылки; окно на сегодня уже кончилось — завтра. */
+export const defaultFinishInput = (windowEnd, now = Date.now()) => {
+    const end = /^\d{2}:\d{2}$/.test(windowEnd || '') ? windowEnd : '21:00';
+    const day = (shiftDays) => new Date(now + ALMATY_OFFSET_MS + shiftDays * 86400000).toISOString().slice(0, 10);
+    const today = `${day(0)}T${end}`;
+    return Date.parse(`${today}:00+05:00`) > now ? today : `${day(1)}T${end}`;
+};
+
+/* Подпись: «25.11 в 21:00» (по Алматы). */
+export const finishAtLabel = (iso) => {
+    const v = almatyInputValue(iso);
+    return v ? `${v.slice(8, 10)}.${v.slice(5, 7)} в ${v.slice(11, 16)}` : '';
+};
+
 /* Части записи для подписи: «казахская 0,5–13,1 с · русская 13,7–25,2 с». */
 export const partsLabel = (parts = []) => parts
     .map((p) => `${LANG_LABEL[p.lang] || p.lang} ${seconds(p.start_ms).replace(' с', '')}–${seconds(p.end_ms)}`)

@@ -9,8 +9,8 @@ import {
 } from '../ui/ios';
 import { prepareInformerTrack } from './informerAudio';
 import {
-    CALLS_PER_LINE, MAX_ACTIVE_CALLS, MAX_PER_MINUTE, RESULT_LABEL, STATE_LABEL, STATUS, VOICE_SPEEDS, callSeconds,
-    campaignActions, lineCapacity,
+    CALLS_PER_LINE, MAX_ACTIVE_CALLS, MAX_PER_MINUTE, RESULT_LABEL, STATE_LABEL, STATUS, VOICE_SPEEDS, almatyInputValue,
+    callSeconds, campaignActions, defaultFinishInput, finishAtLabel, lineCapacity,
     lineRate, partsLabel, percent, plural, robotSummary, seconds, shortDateTime, speechEstimate, stageLabel,
     stageShares, trackEstimateMs, unreachedRows,
 } from './informerView';
@@ -39,6 +39,11 @@ const RETRY_OPTIONS = [
     { value: '60', label: '1 час' },
     { value: '120', label: '2 часа' },
 ];
+/* «Завершить в» (владелец, 24.11.2026: рассылку «сегодня последний день» — «завершение на завтра», «чтобы работало
+   без включенного компьютера»): завершает сам сервер — при опросе робота, — браузер и компьютер для этого не нужны. */
+const FINISH_AT_HINT = 'Пусто — рассылка идёт, пока не обзвонит всех или пока её не завершат вручную. Со временем — '
+    + 'в эту минуту сервер завершит её сам, даже если раздел никто не открывал и компьютер выключен. '
+    + 'Кому не успели позвонить — уже не позвоним.';
 const PART_META = {
     kz: { title: 'Казахская часть', order: 'звучит первой', from: 'ru', translate: 'Перевести с русского',
           placeholder: 'Сәлеметсіз бе! …' },
@@ -137,6 +142,7 @@ const CampaignRow = ({ campaign, onOpen }) => {
                 <div className="mt-1 text-[12px] text-slate-500">
                     Дозвонились {campaign.answered}{rate != null ? ` · ${rate}%` : ''}
                     {campaign.avg_listened_ms != null ? ` · слушали в среднем ${seconds(campaign.avg_listened_ms)}` : ''}
+                    {campaign.finish_at && campaign.status !== 'done' ? ` · до ${finishAtLabel(campaign.finish_at)}` : ''}
                 </div>
             </div>
             <FaIcon className="fas fa-chevron-right text-slate-300" />
@@ -147,7 +153,7 @@ const CampaignRow = ({ campaign, onOpen }) => {
 /* ── новая рассылка ───────────────────────────────────────────────────────── */
 const emptyForm = () => ({
     name: '', source: 'tts', brief: '', texts: { kz: '', ru: '' }, files: { kz: null, ru: null },
-    recipients: null, windowStart: '10:00', windowEnd: '20:00', attempts: '2', retry: '60',
+    recipients: null, windowStart: '10:00', windowEnd: '20:00', attempts: '2', retry: '60', finishAt: '',
     // Темп: пока руководитель его не трогал — сколько тянут линии робота (считается заново под запись).
     perMinute: '', perMinuteEdited: false,
 });
@@ -296,6 +302,7 @@ const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast, robot }
             body.append('max_per_minute', form.perMinuteEdited ? form.perMinute : String(lineRate(channels, built.durationMs)));
             body.append('max_attempts', form.attempts);
             body.append('retry_after_min', form.retry);
+            if (form.finishAt) body.append('finish_at', form.finishAt);
             body.append('script', JSON.stringify(form.source === 'tts'
                 ? { source: 'tts', voice, speed, texts: form.texts } : { source: 'upload' }));
             const resp = await api('/campaigns', { method: 'POST', body });
@@ -491,6 +498,14 @@ const CreateCampaignModal = ({ open, onClose, onCreated, api, showToast, robot }
                             <IosSegmented value={form.retry} onChange={(v) => set({ retry: v })} options={RETRY_OPTIONS}
                                 stretch size="xs" ariaLabel="Повтор через" />
                         </div>
+                        <div className="space-y-1.5">
+                            <div className="flex items-center gap-1.5 px-0.5 text-[12px] font-medium text-slate-500">
+                                Завершить автоматически, по Алматы
+                                <IosHint text={FINISH_AT_HINT} />
+                            </div>
+                            <input type="datetime-local" className={iosInput} value={form.finishAt}
+                                onChange={(e) => set({ finishAt: e.target.value })} />
+                        </div>
                     </div>
                 </section>
             </div>
@@ -526,6 +541,68 @@ const CardTitle = ({ children, hint, right = null }) => (
         {right}
     </div>
 );
+
+/* «Завершится в …» в карточке хода рассылки: показать и поменять. Не всплывающим окном — оно легло бы под лист
+   рассылки (z 90 против 160), — а прямо в строке. */
+const FinishAtRow = ({ campaign, canEdit, api, onSaved, showToast }) => {
+    const [editing, setEditing] = useState(false);
+    const [value, setValue] = useState('');
+    const [saving, setSaving] = useState(false);
+    if (campaign.status === 'done') return null;
+    const label = campaign.finish_at
+        ? `Завершится сама ${finishAtLabel(campaign.finish_at)} по Алматы`
+        : 'Завершится, когда обзвонит всех или вручную';
+    const save = async (next) => {
+        setSaving(true);
+        try {
+            const resp = await api(`/campaigns/${campaign.id}/finish_at`, { method: 'PUT', json: { finish_at: next || null } });
+            if (!resp.ok) { showToast?.(await errorText(resp, 'Не сохранилось — попробуйте ещё раз'), 'error'); return; }
+            onSaved((await resp.json()).campaign);
+            setEditing(false);
+        } finally {
+            setSaving(false);
+        }
+    };
+    if (!editing) {
+        return (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-slate-500">
+                <span>{label}</span>
+                <IosHint text={FINISH_AT_HINT} />
+                {canEdit && (
+                    <button type="button" className="font-medium text-blue-600 transition hover:text-blue-700"
+                        onClick={() => { setValue(almatyInputValue(campaign.finish_at) || defaultFinishInput(campaign.window_end)); setEditing(true); }}>
+                        {campaign.finish_at ? 'Изменить' : 'Задать время'}
+                    </button>
+                )}
+            </div>
+        );
+    }
+    return (
+        <div className="space-y-2 rounded-xl bg-slate-50 p-3">
+            <div className="flex items-center gap-1.5 text-[12px] font-medium text-slate-500">
+                Завершить автоматически, по Алматы
+                <IosHint text={FINISH_AT_HINT} />
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+                <div className="w-full sm:w-60">
+                    <input type="datetime-local" className={iosInput} value={value} disabled={saving}
+                        onChange={(e) => setValue(e.target.value)} />
+                </div>
+                <button type="button" className={iosBtnPrimary} disabled={saving || !value} onClick={() => save(value)}>
+                    <FaIcon className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-check'}`} /> Сохранить
+                </button>
+                {campaign.finish_at && (
+                    <button type="button" className={iosBtnSecondary} disabled={saving} onClick={() => save(null)}>
+                        Без времени
+                    </button>
+                )}
+                <button type="button" className={iosBtnGhost} disabled={saving} onClick={() => setEditing(false)}>
+                    Отмена
+                </button>
+            </div>
+        </div>
+    );
+};
 
 /* ── окно рассылки ─────────────────────────────────────────────────────────
    Владелец, 17.10.2026: «окно конкретного прогона надо бы сделать на всё окно, а данные внутри удобными,
@@ -686,6 +763,13 @@ const CampaignSheet = ({ campaignId, onClose, api, robot, showToast, onChanged, 
                     {campaign.warmup_rate ? ` · прогрев до ${campaign.max_per_minute}` : ''}
                     {' · '}окно {campaign.window_start}–{campaign.window_end}
                 </div>
+                <FinishAtRow campaign={campaign} canEdit={canEdit} api={api} showToast={showToast}
+                    onSaved={(next) => {
+                        // Ответ без списка водителей (targets_limit=0) — берём из него только время и статус.
+                        setCampaign((prev) => ({ ...prev, finish_at: next.finish_at, status: next.status }));
+                        load();
+                        onChanged();
+                    }} />
             </div>
 
             <div className={`grid grid-cols-2 gap-2 ${signing ? 'sm:grid-cols-4' : 'sm:grid-cols-3'}`}>

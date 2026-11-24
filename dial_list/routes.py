@@ -248,13 +248,16 @@ phone_event, outcome и mode — без замка: идущий разгово�
                                                              частей), recipients (.csv/.xlsx номеров),
                                                              window_start/_end, max_per_minute (1–600; не
                                                              задан — сколько тянут линии робота),
-                                                             max_attempts, retry_after_min
+                                                             max_attempts, retry_after_min, finish_at
+                                                             (завершится сама: ГГГГ-ММ-ДДTЧЧ:ММ по Алматы)
     GET     /api/dial_list/departments/<id>/informer/voices  голоса озвучки (Soniox), темпы, предел текста
     POST    /api/dial_list/departments/<id>/informer/tts     {lang: kz|ru, text, voice, speed} → WAV 24 кГц
     POST    /api/dial_list/departments/<id>/informer/ai      ИИ для текста: generate {brief} → {kz, ru};
                                                              polish {text, lang}; translate {text, source, target}
     GET     /api/dial_list/departments/<id>/informer/campaigns/<cid>        аналитика и водители (маска номера)
     POST    /api/dial_list/departments/<id>/informer/campaigns/<cid>/<act>  start | pause | finish
+    PUT     /api/dial_list/departments/<id>/informer/campaigns/<cid>/finish_at  {finish_at: ГГГГ-ММ-ДДTЧЧ:ММ по
+                                                             Алматы | null} — когда сервер завершит рассылку сам
     GET     /api/dial_list/departments/<id>/informer/campaigns/<cid>/audio  запись рассылки (оригинал)
     GET     /api/dial_list/departments/<id>/informer/campaigns/<cid>/export xlsx: водители, звонки, контекст
 
@@ -1468,7 +1471,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             recipients=parsed, file_name=list_name, window_start=form.get('window_start'),
             window_end=form.get('window_end'), max_per_minute=form.get('max_per_minute'),
             max_attempts=form.get('max_attempts'), retry_after_min=form.get('retry_after_min'),
-            script=script))
+            script=script, finish_at=form.get('finish_at')))
         return jsonify({"status": "success", "campaign": campaign,
                         "recipients": {"rows": len(parsed["rows"]), "invalid": parsed["invalid"],
                                        "duplicates": parsed["duplicates"]}}), 200
@@ -1543,6 +1546,18 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         _manager(department_id)
         inf = _informer(department_id)
         detail = _informer_do(lambda: inf.campaign_action(department_id, campaign_id, action))
+        return jsonify({"status": "success", "campaign": detail}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/informer/campaigns/<int:campaign_id>/finish_at',
+              methods=['PUT', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def informer_campaign_finish_at(department_id, campaign_id):
+        """{finish_at: 'ГГГГ-ММ-ДДTЧЧ:ММ' по Алматы | null} — когда сервер завершит рассылку сам (24.11.2026)."""
+        _manager(department_id)
+        inf = _informer(department_id)
+        payload = request.get_json(silent=True) or {}
+        detail = _informer_do(lambda: inf.set_finish_at(department_id, campaign_id, payload.get('finish_at')))
         return jsonify({"status": "success", "campaign": detail}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/informer/campaigns/<int:campaign_id>/audio',

@@ -310,6 +310,68 @@ def test_campaign_rate_and_window(env):
     assert poll(svc, big)['calls'] == []
 
 
+
+def test_finish_at_closes_campaign_on_its_own(env):
+    """Владелец, 24.11.2026: рассылку «сегодня последний день» — «завершение на завтра», «чтобы работало без
+    включенного компьютера». После «завершить в» сервер сам закрывает рассылку при опросе робота: новых звонков нет,
+    кому не успели позвонить — «рассылку завершили», время завершения — то самое «завершить в»."""
+    svc, clock, _ = env
+    finish = NOON + timedelta(hours=3)                                    # 15:00 по Алматы
+    campaign = make_campaign(svc, phones(10), finish_at='2026-10-15T15:00')
+    assert datetime.fromisoformat(campaign['finish_at']) == finish
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    calls = poll(svc)['calls']
+    assert len(calls) == 2
+    answer(svc, calls[0], 25000, played=True)
+    clock.tick(hours=2, minutes=59)                                       # 14:59 — ещё звоним
+    assert poll(svc)['calls']
+    clock.tick(minutes=1)                                                 # 15:00 — всё
+    assert poll(svc)['calls'] == []
+    detail = svc.campaign_detail(DEPT, campaign['id'])
+    assert detail['status'] == 'done' and datetime.fromisoformat(detail['finished_at']) == finish
+    assert detail['analytics']['targets'].get('pending', 0) == 0 and detail['analytics']['targets']['stopped'] > 0
+    assert detail['analytics']['targets']['done'] == 1                    # дозвонившийся остался дозвонившимся
+    with pytest.raises(InformerError) as err:                             # «Продолжить» завершённую не оживит
+        svc.campaign_action(DEPT, campaign['id'], 'start')
+    assert err.value.status == 409
+
+
+def test_finish_at_without_robot_and_on_paused(env):
+    """Робот не на связи — раздел сам покажет завершённой; на паузе — тоже завершается."""
+    svc, clock, _ = env
+    campaign = make_campaign(svc, phones(3), finish_at='2026-10-15T13:00')
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    svc.campaign_action(DEPT, campaign['id'], 'pause')
+    other = make_campaign(svc, phones(2))                                 # без «завершить в» — не трогаем
+    clock.tick(hours=2)
+    by_id = {c['id']: c for c in svc.list_campaigns(DEPT)}
+    assert by_id[campaign['id']]['status'] == 'done' and by_id[campaign['id']]['left'] == 0
+    assert by_id[other['id']]['status'] == 'draft' and by_id[other['id']]['finish_at'] is None
+
+
+def test_set_finish_at_on_existing_campaign(env):
+    svc, clock, _ = env
+    campaign = make_campaign(svc, phones(4))
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    assert campaign['finish_at'] is None
+    changed = svc.set_finish_at(DEPT, campaign['id'], '2026-10-16T21:00')
+    assert datetime.fromisoformat(changed['finish_at']) == datetime(2026, 10, 16, 16, 0, tzinfo=timezone.utc)
+    assert changed['status'] == 'active'
+    for bad in ('2026-10-15T11:00', 'потом'):                             # прошлое и мусор
+        with pytest.raises(InformerError) as err:
+            svc.set_finish_at(DEPT, campaign['id'], bad)
+        assert err.value.status == 400
+    with pytest.raises(InformerError) as err:
+        svc.set_finish_at(OTHER_DEPT, campaign['id'], '2026-10-16T21:00')  # чужой отдел
+    assert err.value.status == 404
+    assert svc.set_finish_at(DEPT, campaign['id'], None)['finish_at'] is None   # убрали — только руками
+    clock.tick(days=2)
+    assert poll(svc)['calls']                                             # без срока звонит дальше
+    svc.campaign_action(DEPT, campaign['id'], 'finish')
+    with pytest.raises(InformerError) as err:
+        svc.set_finish_at(DEPT, campaign['id'], '2026-10-20T21:00')
+    assert err.value.status == 409
+
 def test_dispatcher_polls_once_a_minute_while_nothing_may_call(env):
     """Без рассылки в своём окне диспетчер стучался раз в 10 с круглые сутки (27.10.2026).
     Теперь — раз в минуту; пока рассылка вправе звонить — как раньше."""

@@ -23,7 +23,7 @@ import {
 } from '../src/components/dial_list/informerAudio.js';
 import {
     CALLS_PER_LINE, CALL_OVERHEAD_S, DEFAULT_AUDIO_S, EXPECTED_RING_S, MAX_ACTIVE_CALLS, MAX_PER_MINUTE, RESULT_LABEL,
-    campaignActions, lineCapacity,
+    almatyInputValue, campaignActions, defaultFinishInput, finishAtLabel, lineCapacity,
     lineRate, partsLabel, plural, robotSummary, seconds, speechEstimate, stageLabel, stageShares, trackEstimateMs,
     unreachedRows,
 } from '../src/components/dial_list/informerView.js';
@@ -216,4 +216,27 @@ test('вкладка — только у удалённого КЦ и ходит
     assert.match(panel, /\/api\/dial_list\/departments\/\$\{departmentId\}\/informer\$\{path\}/);
     // Иконки пунктов меню — компоненты lucide, а не строки: строка роняет страницу (React #130).
     assert.doesNotMatch(panel, /icon: 'fas /);
+});
+
+test('«завершить в» — время Алматы при любом поясе браузера, как читает сервер', () => {
+    // 16:00 UTC = 21:00 по Алматы.
+    assert.equal(almatyInputValue('2026-11-25T16:00:00+00:00'), '2026-11-25T21:00');
+    assert.equal(almatyInputValue('2026-11-25T21:00:00+05:00'), '2026-11-25T21:00');
+    assert.equal(almatyInputValue(null), '');
+    assert.equal(almatyInputValue('мусор'), '');
+    assert.equal(finishAtLabel('2026-11-25T16:00:00+00:00'), '25.11 в 21:00');
+    assert.equal(finishAtLabel(null), '');
+    // По умолчанию — сегодня в конце окна; окно на сегодня кончилось — завтра.
+    const noon = Date.parse('2026-11-24T12:00:00+05:00');
+    assert.equal(defaultFinishInput('21:00', noon), '2026-11-24T21:00');
+    assert.equal(defaultFinishInput('21:00', Date.parse('2026-11-24T21:30:00+05:00')), '2026-11-25T21:00');
+    assert.equal(defaultFinishInput('', noon), '2026-11-24T21:00');
+    // После полуночи по Алматы (ещё 23.11 по UTC) — день уже 24.11.
+    assert.equal(defaultFinishInput('21:00', Date.parse('2026-11-24T01:00:00+05:00')), '2026-11-24T21:00');
+});
+
+test('«завершить в» в разделе: поле формы и правка в карточке ходят в ручки сервера', () => {
+    const panel = read('../src/components/dial_list/DialListInformerPanel.jsx');
+    assert.match(panel, /body\.append\('finish_at', form\.finishAt\)/);
+    assert.match(panel, /\/campaigns\/\$\{campaign\.id\}\/finish_at`, \{ method: 'PUT'/);
 });
