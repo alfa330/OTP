@@ -293,7 +293,7 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertNotIn("boot.dictionaries?.groups || []).filter((g) => g.status === 'active');\n    const kind", self.sheet)
 
     def test_board_and_card_wiring_for_sources(self):
-        """Связки интерфейса правки 20.11.2026 (каналы → источники, «Отклики» группами, период только у них)."""
+        """Связки интерфейса правки 20.11.2026 (каналы → источники, «Отклики» группами); период — общий (24.11.2026)."""
         # Доска перезагружается по периоду, раскрытым группам и «Показать ещё»; на доске — ответ на последний запрос.
         self.assertIn("mine: scope === 'mine', query: debounced, filters, period, expanded, open: openGroups, openDays, expandedDays,",
                       self.board)
@@ -305,9 +305,14 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertIn('const cards = groupCards(group, cardsById);', self.board)
         self.assertIn('onExpand={() => onExpandGroup(group)}', self.board)
         self.assertIn('const expandGroup = (group) => setExpanded((prev) => withExpanded(prev, group));', self.board)
-        # Внутри групп плашки источника нет — он в шапке группы; период — только у «Откликов».
+        # Внутри групп плашки источника нет — он в шапке группы.
         self.assertIn('{cards.map((card) => tile(card, { showSource: false, inGroup: true }))}', self.board)
         self.assertIn("{...(column.stage === 'responses' ? {", self.board)
+        # Период — один на все колонки, в панели рядом с «Фильтрами» (владелец 24.11.2026), а не в шапке «Откликов».
+        toolbar = self.board[self.board.index('<FiltersToggle open={filtersOpen}'):self.board.index('<FiltersRow open={filtersOpen}')]
+        self.assertIn('<IosDateRangePicker portal from={period.from} to={period.to}', toolbar)
+        self.assertNotIn('ResponsesPeriod', self.board)
+        self.assertNotIn('onPeriod', self.board)
         # Карточка меняет источник полем source_id, у завершённой — только руководитель; окно источника — sourceRequestBody.
         self.assertIn('await api.patch(`/cards/${card.id}`, { source_id: sourceId });', self.sheet)
         self.assertIn('canEdit={isOwnerOrLead && (!card.is_closed || Boolean(caps.lead))}', self.sheet)

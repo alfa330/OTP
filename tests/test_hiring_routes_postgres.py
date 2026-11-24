@@ -500,8 +500,8 @@ def test_sources_with_color_through_routes(client):
 
 def test_board_responses_groups_and_period_through_routes(client):
     """Владелец 20.11.2026: «Отклики» поделены по источникам с названием и числом; группы свёрнуты, пока их не раскрыли
-    (open — карточки только раскрытым); период — только у «Откликов» (по дате поступления, «по» — включительно),
-    остальные этапы им не режутся; «Показать ещё» — expand. Карточки группы — номерами: сами они в колонке, один раз."""
+    (open — карточки только раскрытым); «Показать ещё» — expand. Карточки группы — номерами: сами они в колонке, один раз.
+    24.11.2026: период (from / to, по дате отклика, «по» — включительно) — общий на все колонки."""
     rec = as_user(REC1)
     boot = client.get('/api/hiring', headers=rec).get_json()
     by_code = {s['code']: s for s in boot['dictionaries']['sources']}
@@ -549,16 +549,18 @@ def test_board_responses_groups_and_period_through_routes(client):
     assert remote_responses['cards'] and all(c['phone'] is None and c['phone_hidden'] for c in remote_responses['cards'])
     assert all(set(g) == {'source_id', 'name', 'color', 'total', 'card_ids'} for g in remote_responses['groups'])
 
-    # Период 12.11–18.11 включительно: «Отклики» — только поступившие в эти дни, «В работе» — как было.
-    cut = board(responses_from='2026-11-12', responses_to='2026-11-18')
+    # Период — общий на все колонки (владелец 24.11.2026), по дате отклика, «по» — включительно: 12.11–18.11 — два
+    # отклика «Таргета», а «В работе» (отклик 1.11) пусто.
+    cut = board(**{'from': '2026-11-12', 'to': '2026-11-18'})
     assert cut['responses']['total'] == 2 and [(g['name'], g['total']) for g in cut['responses']['groups']] == [('Таргет', 2)]
-    assert cut['in_work']['total'] == 1 and [c['id'] for c in cut['in_work']['cards']] == [old]
-    assert board(responses_from='2026-11-19')['responses']['total'] == 1
-    assert board(responses_to='2026-11-10')['responses']['total'] == 1
-    assert board(responses_from='мусор', responses_to='2026-13-45')['responses']['total'] == 4     # неразборчивое — без периода
-    assert board(responses_from='2026-12-01')['responses']['groups'] == []
-    # Общий отбор доски (from / to) по-прежнему режет все колонки — период «Откликов» отдельный параметр.
-    assert board(**{'from': '2026-11-12'})['in_work']['total'] == 0
+    assert cut['in_work']['total'] == 0 and cut['in_work']['cards'] == []
+    assert board(**{'from': '2026-11-19'})['responses']['total'] == 1
+    early = board(to='2026-11-10')
+    assert early['responses']['total'] == 1 and [c['id'] for c in early['in_work']['cards']] == [old]
+    assert board(**{'from': 'мусор', 'to': '2026-13-45'})['responses']['total'] == 4     # неразборчивое — без периода
+    assert board(**{'from': '2026-12-01'})['responses']['groups'] == []
+    # Прежний период только «Откликов» (responses_from / responses_to) ручка больше не читает — страница шлёт общий.
+    assert board(responses_from='2026-11-19')['responses']['total'] == 4
     # expand принимает только числа (в пределах int4) и не ломает ответ.
     assert board(expand='%s,abc,99999999999' % by_code['target']['id'])['responses']['total'] == 4
 

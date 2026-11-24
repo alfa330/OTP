@@ -1187,21 +1187,11 @@ def _filters(filters):
     return where, params
 
 
-def _board_where(caps, user_id, filters, responses_period=None):
-    """Условие доски и его параметры: круг человека (scope_clause), отборы и период «Откликов» — он режет только их."""
+def _board_where(caps, user_id, filters):
+    """Условие доски и его параметры: круг человека (scope_clause) и отборы. Период (from / to, по дате отклика) режет все
+    колонки (владелец 24.11.2026: «сделать пикер периода общим на все столбцы»)."""
     scope_sql, scope_params = scope_clause(caps, user_id)
     where, params = _filters(filters)
-    start, end = responses_period or (None, None)
-    bounds, bound_params = [], []
-    if start:
-        bounds.append("c.received_at >= %s")
-        bound_params.append(start)
-    if end:
-        bounds.append("c.received_at < %s")
-        bound_params.append(end)
-    if bounds:
-        where.append("(c.stage <> 'responses' OR (" + " AND ".join(bounds) + "))")
-        params.extend(bound_params)
     return " AND ".join([scope_sql] + where), scope_params + params
 
 
@@ -1210,24 +1200,22 @@ _BOARD_DAY = ("CASE c.stage WHEN 'invited_office' THEN c.office_visit_at::date "
               "WHEN 'invited_training' THEN g.start_date END")
 
 
-def board(cursor, caps, user_id, filters, per_column=60, responses_period=None, expand_sources=(), expanded_limit=1000,
+def board(cursor, caps, user_id, filters, per_column=60, expand_sources=(), expanded_limit=1000,
           responses_open=None, days_open=None, expand_days=None):
     """Колонки доски: порция карточек на колонку и полное число. Пул — свежие сверху, остальные — по последнему
-    изменению.
+    изменению. Отборы (filters) режут все колонки, период по дате отклика (from / to) — тоже (владелец 24.11.2026).
 
     «Отклики» поделены по источникам (владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и
     кол-вом»): порция и число — у каждого источника своё; expand_sources — источники, у которых «Показать ещё»
     (порция expanded_limit). Группы свёрнуты, пока их не раскрыли (решение владельца 20.11.2026): responses_open —
     (id источников, раскрыта ли группа без источника) — карточки отдаются только раскрытым группам, остальным — одно
-    число; None — всем (как до свёртки). Период — только у «Откликов» («остальные статусы не должны по периоду
-    фильтроваться»): responses_period = (с, по) по дате поступления, «по» не включительно, любая граница может быть
-    None. Возвращает (колонки, число по этапам, число откликов по источникам).
+    число; None — всем (как до свёртки). Возвращает (колонки, число по этапам, число откликов по источникам).
 
     «Приглашен в офис» и «Приглашен на обучение» поделены по дням так же (владелец 24.11.2026, rules.board_day): порция —
     на день, в офисе карточки дня идут по времени визита. days_open — {этап: (дни, раскрыта ли группа без даты)}:
     карточки только раскрытым дням, этапа нет в словаре — ни одному; None — всем дням. expand_days — {этап: дни} с
     «Показать ещё». Число карточек на каждый день — board_days."""
-    base_where, base_params = _board_where(caps, user_id, filters, responses_period)
+    base_where, base_params = _board_where(caps, user_id, filters)
     cursor.execute("SELECT c.stage, COUNT(*) " + _CARD_FROM + " WHERE " + base_where + " GROUP BY c.stage", base_params)
     counts = {stage: int(count) for stage, count in cursor.fetchall()}
     cursor.execute("SELECT c.source_id, COUNT(*) " + _CARD_FROM + " WHERE " + base_where

@@ -114,13 +114,12 @@ export const withExpandedDay = (list, group) => {
 };
 
 /*
- * Запрос доски. Период — только «Откликам» (владелец 20.11.2026: «именно в отклики надо добавить возможность
- * фильтровать по периоду, остальные статусы не должны по периоду фильтроваться»): уходит отдельными
- * responses_from / responses_to, а не общими from / to, которые сервер применил бы ко всем колонкам. open — раскрытые
- * группы «Откликов» (группы свёрнуты по умолчанию — решение владельца 20.11.2026): карточки сервер отдаёт только им,
- * '-' — ни одной; без open сервер отдал бы карточки всем. expand — источники, где нажали «Показать ещё». Так же дни
- * колонок «Приглашен в офис / на обучение»: openDays и expandedDays — {этап: [дни]} → office_open, training_open
- * (с openDays уходят оба, '-' — ни одного дня) и office_expand, training_expand. Пустые отборы не отправляются.
+ * Запрос доски. Период — общий для всех колонок (владелец 24.11.2026: «сделать пикер периода общим на все столбцы»; до
+ * этого он был только у «Откликов»): from / to по дате отклика, «по» — включительно. open — раскрытые группы «Откликов»
+ * (группы свёрнуты по умолчанию — решение владельца 20.11.2026): карточки сервер отдаёт только им, '-' — ни одной; без
+ * open сервер отдал бы карточки всем. expand — источники, где нажали «Показать ещё». Так же дни колонок «Приглашен в
+ * офис / на обучение»: openDays и expandedDays — {этап: [дни]} → office_open, training_open (с openDays уходят оба,
+ * '-' — ни одного дня) и office_expand, training_expand. Пустые отборы не отправляются.
  */
 export const boardQuery = ({
     mine = false, query = '', filters = {}, period = {}, expanded = [], open, openDays, expandedDays,
@@ -132,8 +131,8 @@ export const boardQuery = ({
         city: filters.city || undefined,
         source_id: filters.source_id || undefined,
         recruiter_id: filters.recruiter_id || undefined,
-        responses_from: period?.from || undefined,
-        responses_to: period?.to || undefined,
+        from: period?.from || undefined,
+        to: period?.to || undefined,
         open: Array.isArray(open) ? (open.filter((key) => GROUP_KEY_RE.test(String(key))).join(',') || '-') : undefined,
         expand: (expanded || []).filter((key) => /^\d+$/.test(String(key))).join(',') || undefined,
     };

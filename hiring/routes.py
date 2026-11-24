@@ -8,9 +8,10 @@ Blueprint собирается фабрикой и получает зависи
 
     GET    ''                               экран: права, справочники, состояние интеграций
     GET    /desk                             рабочий стол: план найма, задачи на сегодня, моя воронка, мотивация
-    GET    /board                            канбан: колонки с порцией карточек и счётчиками; «Отклики» — по источникам
-                                             (groups) и с периодом responses_from/responses_to, expand — «Показать все»;
-                                             «Приглашен в офис / на обучение» — по дням (days), office_/training_open|expand
+    GET    /board                            канбан: колонки с порцией карточек и счётчиками; период from/to — по дате
+                                             отклика, на все колонки; «Отклики» — по источникам (groups), expand —
+                                             «Показать все»; «Приглашен в офис / на обучение» — по дням (days),
+                                             office_/training_open|expand
     GET    /cards                            список по фильтрам (и по ids — для клика по цифре дашборда)
     POST   /cards                            отклик вручную
     GET    /cards/<id>                       карточка целиком (гасит уведомления по ней)
@@ -93,15 +94,6 @@ def _int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _day_arg(value, next_day=False):
-    """«2026-11-19» из строки запроса → полночь этого дня (next_day — следующего: граница «по» включительно). Иначе None."""
-    try:
-        day = datetime.strptime(str(value or '').strip()[:10], '%Y-%m-%d')
-    except ValueError:
-        return None
-    return day + timedelta(days=1) if next_day else day
 
 
 def response_groups(cards, counts, sources):
@@ -373,10 +365,9 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
     @hiring_route('/board')
     def hiring_board(ctx):
         caps = access.capabilities(ctx)
+        # Период (from / to, по дате отклика, «по» — включительно) — среди отборов и режет все колонки (владелец 24.11.2026:
+        # «сделать пикер периода общим на все столбцы»; до этого он был только у «Откликов»).
         filters = _filters_from_args(ctx)
-        # Период — только у «Откликов» (владелец 20.11.2026: «остальные статусы не должны по периоду фильтроваться»):
-        # по дате поступления, «по» — включительно (день целиком).
-        period = (_day_arg(request.args.get('responses_from')), _day_arg(request.args.get('responses_to'), next_day=True))
         expand = _source_ids_arg(request.args.get('expand'))[0]
         # Группы «Откликов» свёрнуты, пока их не раскрыли (решение владельца 20.11.2026): open — раскрытые, карточки
         # приходят только им. Без open — всем группам (старая страница во время выкладки).
@@ -387,9 +378,8 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                      if any(open_arg in request.args for _stage, open_arg, _more in DAY_ARGS) else None)
         expand_days = {stage: _days_arg(request.args.get(more_arg))[0] for stage, _open, more_arg in DAY_ARGS}
         with db._get_cursor() as cursor:
-            columns, counts, by_source = queries.board(cursor, caps, ctx['user_id'], filters, responses_period=period,
-                                                       expand_sources=expand, responses_open=opened,
-                                                       days_open=days_open, expand_days=expand_days)
+            columns, counts, by_source = queries.board(cursor, caps, ctx['user_id'], filters, expand_sources=expand,
+                                                       responses_open=opened, days_open=days_open, expand_days=expand_days)
             by_day = queries.board_days(cursor, caps, ctx['user_id'], filters)
             sources = queries.list_sources(cursor)
         today = rules.now_almaty().date()

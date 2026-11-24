@@ -141,16 +141,16 @@ test('card source choices: same kind, switched on, directory order', () => {
     assert.deepEqual(sourceChoices({ kind: 'response' }, null), []);
 });
 
-test('board query: period goes only to «Отклики», empty filters are not sent', () => {
-    // Владелец 20.11.2026: «именно в отклики надо добавить возможность фильтровать по периоду, остальные статусы не
-    // должны по периоду фильтроваться» — отдельные responses_from / responses_to, а не общие from / to.
+test('board query: one period for all columns, empty filters are not sent', () => {
+    // Владелец 24.11.2026: «сделать пикер периода общим на все столбцы» — общие from / to (по дате отклика), а не
+    // прежние responses_from / responses_to, которые резали только «Отклики».
     assert.deepEqual(boardQuery(), {});
     assert.deepEqual(boardQuery({ mine: true, query: '  Асель ', filters: { vacancy_id: '3', city: '', source_id: '4', recruiter_id: '' } }),
         { mine: '1', q: 'Асель', vacancy_id: '3', source_id: '4' });
     const withPeriod = boardQuery({ period: { from: '2026-11-12', to: '2026-11-18' } });
-    assert.deepEqual(withPeriod, { responses_from: '2026-11-12', responses_to: '2026-11-18' });
-    assert.ok(!('from' in withPeriod) && !('to' in withPeriod));
-    assert.deepEqual(boardQuery({ period: { from: '', to: '2026-11-18' } }), { responses_to: '2026-11-18' });
+    assert.deepEqual(withPeriod, { from: '2026-11-12', to: '2026-11-18' });
+    assert.ok(!('responses_from' in withPeriod) && !('responses_to' in withPeriod));
+    assert.deepEqual(boardQuery({ period: { from: '', to: '2026-11-18' } }), { to: '2026-11-18' });
     // Остальные отборы доски уходят как были: город и рекрутер тоже.
     assert.deepEqual(boardQuery({ filters: { city: 'Алматы', recruiter_id: '10' } }), { city: 'Алматы', recruiter_id: '10' });
     // «Показать ещё» — только числовые id источников; группа без источника не раскрывается.

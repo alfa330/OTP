@@ -27,8 +27,11 @@ import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loadin
  * «Отклики» поделены по источникам (владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и
  * кол-вом», каналы слиты с источниками): у группы — цвет источника, название и сколько откликов. Группы свёрнуты,
  * пока их не раскрыли (решение владельца 20.11.2026: сначала видно все каналы с числами), раскрытые запоминаются в
- * браузере; карточки сервер присылает только раскрытым, у длинной — «Показать ещё». Период — только у «Откликов»,
- * в их шапке: остальные этапы им не режутся (так и просил владелец).
+ * браузере; карточки сервер присылает только раскрытым, у длинной — «Показать ещё».
+ *
+ * Период — общий для всех колонок, в панели рядом с «Фильтрами» (владелец 24.11.2026: «сделать пикер периода общим на
+ * все столбцы и переместить наверх к фильтрам»; до этого он был только в шапке «Откликов»): по дате отклика — доска
+ * показывает, где сейчас кандидаты, откликнувшиеся за этот период.
  *
  * «Приглашен в офис» и «Приглашен на обучение» поделены по дням (владелец 24.11.2026: «разбивку по датам приглашения
  * начиная от сегодня… как в откликах раскрыть и посмотреть людей, которые приглашены к этому дню»; «прошлые дни должны
@@ -52,14 +55,15 @@ const ARCHIVE_OPEN_KEY = 'hiring.board.openArchive';
 // Быстрые периоды — как у остальных разделов сайта: «Сегодня», «Неделя», «Месяц», «Весь период»; виды — дни и месяцы.
 const PERIOD_PRESETS = quickPeriods();
 const PERIOD_VIEWS = ['days', 'months'];
-// Обводка в покое — рамкой, а не кольцом: тёмная тема красит кольцо ring-slate-200/70 через !important, и синее кольцо
-// фокуса с клавиатуры под ним пропадало бы (разбор 20.11.2026).
-const PERIOD_TRIGGER = 'flex h-8 w-full items-center gap-1.5 rounded-lg border px-2.5 text-[12px] font-medium transition '
-    + 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70 [&>span]:min-w-0 [&>span]:flex-1 [&>span]:truncate [&>span]:text-left';
-// Отбор по периоду включён — шапка «Откликов» это показывает: иначе меньшее число читалось бы как «откликов мало».
+// Период — кнопкой панели, как «Фильтры». Обводка в покое — рамкой, а не кольцом: тёмная тема красит кольцо
+// ring-slate-200/70 через !important, и синее кольцо фокуса с клавиатуры под ним пропадало бы (разбор 20.11.2026).
+const PERIOD_TRIGGER = 'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-xl border px-3 text-[13px] font-medium '
+    + 'shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70 '
+    + '[&>span]:whitespace-nowrap';
+// Отбор по периоду включён — кнопка синеет: иначе меньшие числа колонок читались бы как «кандидатов мало».
 const periodTrigger = (active) => `${PERIOD_TRIGGER} ${active
     ? 'border-blue-200 bg-blue-50 text-blue-700'
-    : 'border-slate-200/70 bg-white/70 text-slate-600 hover:bg-white'}`;
+    : 'border-slate-200/70 bg-white text-slate-700 hover:bg-slate-50'}`;
 // Кнопка пула — свой класс в styles.css (.hiring-take-btn), а не утилиты: с мышью она проявляется с задержкой и до
 // этого щелчков не берёт (быстрый щелчок в угол открывает карточку, а не берёт её), а тёмная тема перекрашивает
 // bg-blue-50/text-blue-700 через !important — синеть под курсором утилиты бы перестали.
@@ -208,25 +212,14 @@ const BoardGroup = ({ label, dot = '', muted = false, total, open, cards, expand
     );
 };
 
-/* Период «Откликов» — в их шапке и только у них (владелец 20.11.2026: «остальные статусы не должны по периоду
-   фильтроваться»). Календарь — общий сайта; в портале: доска прокручивается вбок и обрезала бы его. */
-const ResponsesPeriod = ({ period, onChange }) => (
-    <div className="px-1 pb-2">
-        <IosDateRangePicker portal from={period.from} to={period.to} max={todayIso()} presets={PERIOD_PRESETS} views={PERIOD_VIEWS}
-                            triggerClassName={periodTrigger(Boolean(period.from || period.to))}
-                            onChange={({ from, to }) => onChange({ from: from || '', to: to || '' })} />
-    </div>
-);
-
 const Column = ({
     column, caps, dropState, collapsed, onToggle, onOpen, onTake, onCall, canDrag, canCall, onDragStart, onDragEnd, onDrop,
-    period, onPeriod, openGroups = [], onToggleGroup, onExpandGroup, today, openDays = [], onToggleDay, onExpandDay,
+    openGroups = [], onToggleGroup, onExpandGroup, today, openDays = [], onToggleDay, onExpandDay,
 }) => {
     const [over, setOver] = useState(false);
     const grouped = Array.isArray(column.groups);
     const dated = Array.isArray(column.days);
     const cardsById = useMemo(() => new Map(column.cards.map((card) => [card.id, card])), [column.cards]);
-    const periodActive = Boolean(onPeriod && (period?.from || period?.to));
     const tone = STAGE_TONES[column.stage];
     const archive = column.stage === ARCHIVE_STAGE;
     const titleClass = tone === 'red' ? 'text-rose-700' : tone === 'green' ? 'text-emerald-700' : archive ? 'text-slate-400' : 'text-slate-700';
@@ -240,12 +233,11 @@ const Column = ({
     };
     if (collapsed) {
         return (
-            <button type="button" onClick={onToggle} title={`Развернуть «${column.label}»${periodActive ? ' — включён отбор по периоду' : ''}`} {...dragProps}
+            <button type="button" onClick={onToggle} title={`Развернуть «${column.label}»`} {...dragProps}
                     className={`flex min-h-[220px] w-11 min-w-[44px] flex-col items-center gap-2 rounded-2xl py-3 transition hover:bg-slate-200/70 ${surface}`}>
                 <ChevronsRight size={14} className="text-slate-400" />
-                <span className={`rounded-full px-1.5 py-0.5 text-[11.5px] font-semibold tabular-nums ring-1 ${periodActive
-                    ? 'bg-blue-50 text-blue-700 ring-blue-200' : archive ? 'bg-slate-100 text-slate-400 ring-slate-200/60'
-                        : 'bg-white text-slate-500 ring-slate-200/70'}`}>{column.total}</span>
+                <span className={`rounded-full px-1.5 py-0.5 text-[11.5px] font-semibold tabular-nums ring-1 ${archive
+                    ? 'bg-slate-100 text-slate-400 ring-slate-200/60' : 'bg-white text-slate-500 ring-slate-200/70'}`}>{column.total}</span>
                 <span className={`text-[12.5px] font-semibold [writing-mode:vertical-rl] ${titleClass}`}>{column.label}</span>
             </button>
         );
@@ -283,7 +275,6 @@ const Column = ({
                     <ChevronsLeft size={14} />
                 </button>
             </header>
-            {onPeriod && <ResponsesPeriod period={period} onChange={onPeriod} />}
             <div className={`thin-scroll flex flex-col gap-2 overflow-y-auto px-0.5 pb-1 ${archive ? 'opacity-75 transition-opacity hover:opacity-100' : ''}`}>
                 {grouped ? column.groups.map((group) => {
                     const cards = groupCards(group, cardsById);
@@ -297,7 +288,7 @@ const Column = ({
                     );
                 }) : dated ? column.days.map(dayGroup) : column.cards.map((card) => tile(card))}
                 {column.total === 0 && (
-                    <div className="py-6 text-center text-[12px] text-slate-400">{periodActive ? 'За этот период откликов нет' : 'Пусто'}</div>
+                    <div className="py-6 text-center text-[12px] text-slate-400">Пусто</div>
                 )}
                 {!grouped && !dated && column.total > column.cards.length && (
                     <div className="py-2 text-center text-[11.5px] text-slate-400">
@@ -402,8 +393,8 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
     const [dragging, setDragging] = useState(null);
     const [collapsed, setCollapsed] = useState(() => readList(COLLAPSED_KEY));
     const [openedArchive, setOpenedArchive] = useState(() => readList(ARCHIVE_OPEN_KEY));
-    // «Отклики»: период (только у них), раскрытые группы источников (по умолчанию свёрнуты все — решение владельца
-    // 20.11.2026) и группы, где нажали «Показать ещё».
+    // Период — на все колонки (по дате отклика). «Отклики»: раскрытые группы источников (по умолчанию свёрнуты все —
+    // решение владельца 20.11.2026) и группы, где нажали «Показать ещё».
     const [period, setPeriod] = useState({ from: '', to: '' });
     const [openGroups, setOpenGroups] = useState(() => readList(OPEN_GROUPS_KEY).map(String));
     const [expanded, setExpanded] = useState([]);
@@ -555,6 +546,10 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
                     )}
                 </label>
                 <FiltersToggle open={filtersOpen} count={activeFilters} onToggle={() => setFiltersOpen((v) => !v)} />
+                {/* Период — на все колонки, по дате отклика (владелец 24.11.2026). Календарь — общий сайта, в портале. */}
+                <IosDateRangePicker portal from={period.from} to={period.to} max={todayIso()} presets={PERIOD_PRESETS} views={PERIOD_VIEWS}
+                                    triggerClassName={periodTrigger(Boolean(period.from || period.to))}
+                                    onChange={({ from, to }) => setPeriod({ from: from || '', to: to || '' })} />
                 <div className="ml-auto flex items-center gap-2">
                     <button type="button" className={TOOLBAR_BTN} onClick={load} disabled={loading} aria-label="Обновить" title="Обновить">
                         <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
@@ -585,7 +580,7 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
                                     onOpen={onOpenCard} onTake={take} onCall={call} canDrag={canDrag} canCall={canCall}
                                     onDragStart={onDragStart} onDragEnd={onDragEnd} onDrop={onDrop}
                                     {...(column.stage === 'responses' ? {
-                                        period, onPeriod: setPeriod, openGroups, onToggleGroup: toggleGroup, onExpandGroup: expandGroup,
+                                        openGroups, onToggleGroup: toggleGroup, onExpandGroup: expandGroup,
                                     } : DATED_STAGES.includes(column.stage) ? {
                                         today, openDays: openDays[column.stage] || [], onToggleDay: (key) => toggleDay(column.stage, key),
                                         onExpandDay: (group) => expandDay(column.stage, group),

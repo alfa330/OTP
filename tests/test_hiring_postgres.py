@@ -1949,10 +1949,10 @@ def test_channels_merge_into_sources(world):
 
 
 def test_board_responses_by_source_and_period(world):
-    """Владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и кол-вом» и «именно в отклики надо добавить
-    возможность фильтровать по периоду, остальные статусы не должны по периоду фильтроваться». Доска считает отклики по
-    источникам, режет по периоду только «Отклики» (по дате поступления, «по» не включительно), порция — на источник, а
-    «Показать ещё» (expand) отдаёт источник целиком."""
+    """Владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и кол-вом»; 24.11.2026: «сделать пикер периода
+    общим на все столбцы» (до этого период был только у «Откликов»). Доска считает отклики по источникам, период по дате
+    отклика («по» не включительно) режет все колонки, порция — на источник, а «Показать ещё» (expand) отдаёт источник
+    целиком."""
     service = world['service']
     sources = world['sources']
     me = ctx_of(world, REC1)
@@ -1968,7 +1968,7 @@ def test_board_responses_by_source_and_period(world):
     t3 = response('8 705 700 00 03', 'target', datetime(2026, 10, 14, 8, 0))
     w1 = response('8 705 700 00 04', 'whatsapp', datetime(2026, 10, 11, 10, 0))
     h1 = response('8 705 700 00 05', 'hh', datetime(2026, 10, 1, 10, 0))
-    # В работе — отклики давнего числа (разных источников) и контакт из базы: период «Откликов» их не режет.
+    # В работе — отклики давнего числа (разных источников) и контакт из базы.
     taken = response('8 705 700 00 06', 'hh', datetime(2026, 9, 1, 10, 0))
     taken2 = response('8 705 700 00 07', 'target', datetime(2026, 9, 2, 10, 0))
     service.take(me, taken)
@@ -1985,26 +1985,26 @@ def test_board_responses_by_source_and_period(world):
         # Карточки «Откликов» — свежие сверху, и внутри источника тоже.
         assert [c['id'] for c in columns['responses']] == [t3, t2, w1, t1, h1]
 
-        # Период 10.10–12.10 включительно (сервер получает «по» = 13.10 00:00).
-        columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {},
-                                                   responses_period=(datetime(2026, 10, 10), datetime(2026, 10, 13)))
-        assert counts == {'responses': 3, 'in_work': 2, 'contacts': 1}
+        # Период 10.10–12.10 включительно (ручка присылает «по» = 13.10 00:00) — на все колонки: «В работе» (отклики
+        # сентября) и контакт (3.09) в него не входят.
+        columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT,
+                                                   {'from': datetime(2026, 10, 10), 'to': datetime(2026, 10, 13)})
+        assert counts == {'responses': 3}
         assert by_source == {sources['target']['id']: 2, sources['whatsapp']['id']: 1}
-        assert [c['id'] for c in columns['responses']] == [t2, w1, t1] and {c['id'] for c in columns['in_work']} == {taken, taken2}
-        assert [c['id'] for c in columns['contacts']] == [contact]
+        assert [c['id'] for c in columns['responses']] == [t2, w1, t1] and columns['in_work'] == [] and columns['contacts'] == []
         # «По» в запросе — не включительно: отклик ровно на границе в период не входит (день целиком прибавляет ручка).
-        _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {},
-                                                     responses_period=(datetime(2026, 10, 10), datetime(2026, 10, 12, 23, 59)))
-        assert counts['responses'] == 2
-        # Одна граница — тоже период.
-        _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, responses_period=(datetime(2026, 10, 12), None))
-        assert counts == {'responses': 2, 'in_work': 2, 'contacts': 1}
-        _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, responses_period=(None, datetime(2026, 10, 2)))
+        _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT,
+                                                     {'from': datetime(2026, 10, 10), 'to': datetime(2026, 10, 12, 23, 59)})
+        assert counts == {'responses': 2}
+        # Одна граница — тоже период; ранняя «по» захватывает и сентябрьские «В работе» с контактом.
+        _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {'from': datetime(2026, 10, 12)})
+        assert counts == {'responses': 2}
+        _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {'to': datetime(2026, 10, 2)})
         assert counts == {'responses': 1, 'in_work': 2, 'contacts': 1}
-        # Период вместе с отбором по источнику: «В работе» режет только источник (taken2 — «Таргет»), не период.
-        _columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {'source_id': sources['target']['id']},
-                                                    responses_period=(datetime(2026, 10, 10), datetime(2026, 10, 13)))
-        assert counts == {'responses': 2, 'in_work': 1} and by_source == {sources['target']['id']: 2}
+        # Период вместе с отбором по источнику режут обе: из «Таргета» до 2.10 — только taken2 в работе.
+        _columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT,
+                                                    {'source_id': sources['target']['id'], 'to': datetime(2026, 10, 2)})
+        assert counts == {'in_work': 1} and by_source == {}
 
         # Порция — на источник: по две карточки, «Показать ещё» у «Таргета» отдаёт его целиком.
         columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, per_column=2)
@@ -2100,6 +2100,10 @@ def test_board_invited_by_day(world):
                                                                                 'invited_training': {}}
         assert sum(queries.board_days(cur, {'recruiter': True}, REC1, {})['invited_office'].values()) == 5
         assert queries.board_days(cur, {'recruiter': True}, REC2, {}) == {'invited_office': {}, 'invited_training': {}}
+        # Период по дате отклика — общий на все колонки (владелец 24.11.2026) — режет и числа дней (отклики пришли 15.10).
+        assert queries.board_days(cur, lead, LEAD_GRANT, {'to': datetime(2026, 10, 15)}) == {'invited_office': {},
+                                                                                             'invited_training': {}}
+        assert sum(queries.board_days(cur, lead, LEAD_GRANT, {'from': datetime(2026, 10, 15)})['invited_office'].values()) == 5
 
         # Визит без даты (старые данные) — своя группа, раскрывается своим признаком.
         cur.execute("UPDATE hiring_cards SET office_visit_at = NULL WHERE id = %s", (astana,))
