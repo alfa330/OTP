@@ -96,3 +96,45 @@ class BillingWiringTests(unittest.TestCase):
         self.assertIn('first_day=chat_billing_syntony_from()', job)
         self.assertIn("id='syntony_chat_billing_refresh'", SOURCE)
 
+
+class ChatBroadcastSyntonyTests(unittest.TestCase):
+    """Отбивка табло «Чат» по Syntony: плитки картинки и строка людей — как на табло."""
+
+    @staticmethod
+    def _namespace():
+        ns = {}
+        names = ('_szov_wallboard_int', '_szov_plural', '_szov_format_seconds_mmss',
+                 '_szov_chat_broadcast_duration', '_szov_render_chat_wallboard_png')
+        exec(compile(ast.Module(body=[node for node in TREE.body
+                                      if isinstance(node, ast.FunctionDef) and node.name in names],
+                                type_ignores=[]), 'bot_schedule2.py', 'exec'), ns)
+        captured = {}
+        ns['_szov_render_tiles_png'] = lambda title, subtitle, key_tiles, stat_tiles: captured.update(
+            key=[tile[0] for tile in key_tiles], stat=[tile[0] for tile in stat_tiles]) or b'png'
+        return ns, captured
+
+    DATA = {'source': 'syntony', 'generated_at': '24.11.2026 19:00', 'target_seconds': 120,
+            'now': {'operators_online': 5, 'operators_on_break': 1, 'operators_offline': 10},
+            'today': {'chats': 553, 'chats_new': 433, 'first_reply_seconds': 200,
+                      'inner_reply_seconds': 440}}
+
+    def test_with_statuses_the_picture_has_a_break_tile(self):
+        ns, captured = self._namespace()
+        ns['_szov_render_chat_wallboard_png'](dict(self.DATA, statuses=True))
+        self.assertEqual(captured['key'], ['Онлайн', 'Перерыв', 'Первый ответ', 'Не в системе'])
+        self.assertEqual(captured['stat'], ['Чатов за сутки', 'Поступивших', 'Ответ внутри чата'])
+
+    def test_without_statuses_no_zero_tiles(self):
+        ns, captured = self._namespace()
+        ns['_szov_render_chat_wallboard_png'](dict(self.DATA, statuses=False))
+        self.assertNotIn('Перерыв', captured['key'])
+        self.assertEqual(captured['stat'], ['Чатов за сутки', 'Поступивших'])
+
+    def test_statuses_flag_reaches_the_broadcast(self):
+        collect = _function('_szov_chat_broadcast_collect')
+        self.assertIn("'statuses': (snapshot or {}).get('statuses', True) is not False", collect)
+
+    def test_one_busy_reads_in_singular(self):
+        notes = _function('_szov_chat_broadcast_notes')
+        self.assertIn("_szov_plural(busy, 'занят', 'заняты', 'заняты')", notes)
+

@@ -36510,6 +36510,9 @@ def _szov_chat_broadcast_collect(scheduled=False):
         'now': (snapshot or {}).get('now') or {},
         'today': (snapshot or {}).get('today') or {},
         'source': (snapshot or {}).get('source'),
+        # Есть ли статусы операторов: у Syntony — пока сторож забирает их методом /operator-statuses;
+        # от него зависят плитки картинки (_szov_render_chat_wallboard_png).
+        'statuses': (snapshot or {}).get('statuses', True) is not False,
         'snapshot_stale': bool((snapshot or {}).get('stale')),
         'snapshot_age_seconds': _szov_wallboard_int((snapshot or {}).get('age_seconds')),
     }
@@ -36569,8 +36572,9 @@ def _szov_chat_broadcast_notes(data):
     notes.extend(_szov_break_violation_notes(data.get('break_violations')))
 
     online = _szov_wallboard_int(now.get('operators_online'))
+    busy = _szov_wallboard_int(now.get('operators_busy'))
     parts = [f"{online} {_szov_plural(online, 'чатник', 'чатника', 'чатников')} на линии"]
-    for count, label in ((_szov_wallboard_int(now.get('operators_busy')), 'заняты'),
+    for count, label in ((busy, _szov_plural(busy, 'занят', 'заняты', 'заняты')),
                          (_szov_wallboard_int(now.get('operators_on_break')), 'на перерыве'),
                          (_szov_wallboard_int(now.get('operators_on_training')), 'на тренинге')):
         if count:
@@ -36621,8 +36625,25 @@ def _szov_render_chat_wallboard_png(data):
     else:
         first_colors = ('#d1fae5', '#047857')
 
+    if data.get('source') == 'syntony' and data.get('statuses'):
+        # Syntony со статусами (метод /operator-statuses): плитки людей — как на табло, «Онлайн /
+        # Перерыв / Не в системе»; открытых чатов у Syntony нет.
+        key_tiles = [
+            ('Онлайн', str(_szov_wallboard_int(now.get('operators_online'))), '#dbeafe', '#1d4ed8'),
+            ('Перерыв', str(_szov_wallboard_int(now.get('operators_on_break'))), '#fef3c7', '#b45309'),
+            ('Первый ответ', _szov_chat_broadcast_duration(first), first_colors[0], first_colors[1]),
+            ('Не в системе', str(_szov_wallboard_int(now.get('operators_offline'))),
+             neutral[0], neutral[1]),
+        ]
+        stat_tiles = [
+            ('Чатов за сутки', str(_szov_wallboard_int(today.get('chats')))),
+            ('Поступивших', str(_szov_wallboard_int(today.get('chats_new')))),
+            ('Ответ внутри чата', _szov_chat_broadcast_duration(inner)),
+        ]
+        return _szov_render_tiles_png(
+            'Табло СЗоВ · чаты', f"Чаты · {data['generated_at']}", key_tiles, stat_tiles)
     if data.get('source') == 'syntony':
-        # Syntony (SZOV-12): статусов и открытых чатов у неё нет — плиток из нулей не рисуем.
+        # Syntony без статусов (метод не отвечает) и открытых чатов — плиток из нулей не рисуем.
         key_tiles = [
             ('Онлайн', str(_szov_wallboard_int(now.get('operators_online'))), '#dbeafe', '#1d4ed8'),
             ('Первый ответ', _szov_chat_broadcast_duration(first), first_colors[0], first_colors[1]),
