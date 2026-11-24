@@ -3546,6 +3546,14 @@ class SchemaMixin:
                 CREATE INDEX IF NOT EXISTS idx_task_project_members_user
                 ON task_project_members(user_id, project_id);
             """)
+            # Исполнитель доски (владелец 24.11.2026): кому ставят задачи этой доски.
+            # От уровня не зависит — исполнителем бывает и участник, и «доска». Пока
+            # у доски никто не отмечен, задачу поручают как раньше (task_projects.py).
+            # Добавление колонки с постоянным DEFAULT таблицу не переписывает.
+            cursor.execute("""
+                ALTER TABLE task_project_members
+                ADD COLUMN IF NOT EXISTS is_executor BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id INTEGER REFERENCES task_projects(id) ON DELETE SET NULL;")
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_number INTEGER;")
             # Один номер — одна задача проекта. Индекс же держит и фильтр доски

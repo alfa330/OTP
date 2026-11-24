@@ -17,6 +17,7 @@ from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
 from werkzeug.utils import secure_filename
 import collections
+import concurrent.futures
 import html
 import json
 import logging
@@ -218,6 +219,34 @@ def _collect_task_assignee_recipients(task_ctx, actor_user_id):
     recipients = _collect_task_notification_recipients(task_ctx, actor_user_id)
     return [item for item in recipients if (item.get('kind') or '').strip() == 'assignee']
 
+# Задачу ставят и всем исполнителям доски разом (владелец 24.11.2026), и одно и то
+# же «Новая задача» по одному заставило бы постановщика ждать у окна по секунде на
+# каждые несколько человек. Шлём в несколько потоков, но не больше четырёх разом:
+# предел Telegram — около 30 сообщений в секунду на бота, а отбивки идут и без нас.
+TASK_TELEGRAM_FANOUT_THREADS = 4
+
+
+def _send_same_task_message(send, chat_ids, message, reply_markup=None):
+    """Одно сообщение нескольким чатам. Ответы — по порядку чатов.
+
+    send — функция отправки (_send_telegram_text_message): модуль собирается
+    без бота, поэтому она приходит аргументом. Сбой одного чата остальных не
+    останавливает: на его месте в ответах стоит само исключение.
+    """
+    chats = list(chat_ids or [])
+
+    def deliver(chat_id):
+        try:
+            return send(chat_id, message, parse_mode='HTML', reply_markup=reply_markup)
+        except Exception as send_error:  # noqa: BLE001 — сбой одного чата не роняет рассылку
+            return send_error
+
+    if len(chats) <= 1:
+        return [deliver(chat_id) for chat_id in chats]
+    workers = min(TASK_TELEGRAM_FANOUT_THREADS, len(chats))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix='task-tg') as pool:
+        return list(pool.map(deliver, chats))
+
 def _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths):
     if not gcs_bucket or not uploaded_blob_paths:
         return
@@ -362,12 +391,14 @@ def build_tasks_blueprint(
     Database._normalize_task_assignees, чтобы правила «дубликаты свернуть,
     порядок сохранить, потолок не превысить» жили в одном месте.
 
-    Порядок значим: первый становится tasks.assigned_to.
+    Порядок значим: первый становится tasks.assigned_to. Потолок здесь — размер
+    доски, а не десять: сверх десяти можно ставить исполнителей доски («Все»,
+    24.11.2026), и это решает слой данных, у которого есть состав доски.
     """
         if raw_value is None:
             raise ValueError("Выберите хотя бы одного исполнителя")
         try:
-            return db._normalize_task_assignees(raw_value)
+            return db._normalize_task_assignees(raw_value, limit=db.TASK_MAX_ASSIGNEES_PROJECT)
         except ValueError as normalize_error:
             code = str(normalize_error)
             if code == 'TOO_MANY_ASSIGNEES':
@@ -376,12 +407,22 @@ def build_tasks_blueprint(
                 raise ValueError("Выберите хотя бы одного исполнителя")
             raise ValueError("assigned_to must be an integer")
 
-    def _task_assignees_outside_scope(assignee_ids, requester_id, requester_role):
+    def _task_assignees_outside_scope(assignee_ids, requester_id, requester_role,
+                                      project_id=None, task_id=None):
         """Кому из состава поручать нельзя. Пустой список — всё в порядке.
 
     Список разрешённых спрашиваем ОДИН раз на весь состав: раньше эта сверка
     стояла отдельно в создании и в правке, дословно повторённая, и разъезжалась
     при любой правке одной из двух копий.
+
+    Сверх списка получателей (24.11.2026) разрешены исполнители доски — их назначил
+    админ раздела, и поручить им её задачу вправе любой, кто ставит задачи на эту
+    доску, иначе СВ другого отдела с доступом к доске HR не смог бы поставить на неё
+    ни одной задачи, — и при правке нынешние исполнители задачи: уже стоящих в
+    составе правка не перепроверяет (db.get_task_extra_assignable_ids). Доска —
+    project_id из запроса, а без него — доска задачи task_id (правка без переноса).
+    Спрашиваем, только если кто-то вне списка нашёлся. Что новые в составе —
+    исполнители доски, сверяет слой данных (_require_task_project_assignees_tx).
     """
         allowed_recipients = db.get_task_recipients(
             requester_id,
@@ -389,7 +430,20 @@ def build_tasks_blueprint(
             scope_department_id=getattr(g, 'task_scope_department_id', None)
         )
         allowed_ids = {int(item['id']) for item in allowed_recipients if item.get('id') is not None}
-        return [person_id for person_id in (assignee_ids or []) if int(person_id) not in allowed_ids]
+        outside = [person_id for person_id in (assignee_ids or []) if int(person_id) not in allowed_ids]
+        if not outside:
+            return []
+        try:
+            project_value = db._normalize_task_project_id(project_id)
+        except ValueError:
+            # Неверный проект отвергнет само создание — понятным текстом про проект.
+            project_value = None
+        if project_value is None and task_id is None:
+            return outside
+        extra = db.get_task_extra_assignable_ids(
+            requester_id, requester_role, project_id=project_value, task_id=task_id
+        )
+        return [person_id for person_id in outside if int(person_id) not in extra]
 
     def _task_assignee_chat_ids(assignee_ids):
         """Telegram-чаты исполнителей одним запросом (порядок — как в составе)."""
@@ -1812,7 +1866,9 @@ def build_tasks_blueprint(
                 return jsonify({"error": str(assignee_error)}), 400
             assigned_to = assignee_ids[0]
 
-            forbidden = _task_assignees_outside_scope(assignee_ids, requester_id, requester_role)
+            forbidden = _task_assignees_outside_scope(
+                assignee_ids, requester_id, requester_role, project_id=project_id_raw
+            )
             if forbidden:
                 return jsonify({"error": "You cannot assign a task to this user"}), 403
 
@@ -1919,17 +1975,20 @@ def build_tasks_blueprint(
                     message = "\n".join(message_lines)
                     reply_markup = _build_task_notification_reply_markup(task_link)
                     failures = []
-                    for assignee_chat_id in assignee_chat_ids:
-                        tg_response = _send_telegram_text_message(
-                            assignee_chat_id,
-                            message,
-                            parse_mode='HTML',
-                            reply_markup=reply_markup
-                        )
-                        if tg_response.status_code != 200:
+                    # Всем исполнителям — одно сообщение, в несколько потоков: задачу
+                    # ставят и всем исполнителям доски разом (24.11.2026).
+                    tg_responses = _send_same_task_message(
+                        _send_telegram_text_message, assignee_chat_ids, message, reply_markup
+                    )
+                    for assignee_chat_id, tg_response in zip(assignee_chat_ids, tg_responses):
+                        if isinstance(tg_response, Exception):
+                            error_detail = _telegram_exception_text(tg_response)
+                        elif tg_response.status_code != 200:
                             error_detail = _get_telegram_error_text(tg_response)
-                            failures.append(error_detail)
-                            logging.error(f"Task Telegram API error: {error_detail}")
+                        else:
+                            continue
+                        failures.append(error_detail)
+                        logging.error(f"Task Telegram API error: {error_detail}")
                     if failures:
                         telegram_warning = (
                             "Task created, but Telegram notification failed: "
@@ -2033,7 +2092,11 @@ def build_tasks_blueprint(
                         return jsonify({"error": str(assignee_error)}), 400
                     assigned_to = assignee_ids[0]
 
-                    forbidden = _task_assignees_outside_scope(assignee_ids, requester_id, requester_role)
+                    forbidden = _task_assignees_outside_scope(
+                        assignee_ids, requester_id, requester_role,
+                        project_id=data.get('project_id') if has_project else None,
+                        task_id=task_id,
+                    )
                     if forbidden:
                         return jsonify({"error": "You cannot assign a task to this user"}), 403
 

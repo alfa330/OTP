@@ -3335,7 +3335,7 @@ class SchedulesMixin:
         page_size = max(1, min(cls.SURVEY_PAGE_SIZE_MAX, page_size))
         return page, page_size
 
-    def _normalize_task_assignees(self, assignees):
+    def _normalize_task_assignees(self, assignees, limit=None):
         """Состав исполнителей из того, что прислал клиент.
 
         Понимает список, кортеж, строку «12,15,7» (так состав приезжает в
@@ -3345,6 +3345,11 @@ class SchedulesMixin:
         Возвращает None для _UNSET/None: это «состав не меняем», и отличать его
         от «состав пустой» обязательно — иначе правка одной темы задачи молча
         снимала бы с неё всех исполнителей.
+
+        limit — потолок длины; без него — TASK_MAX_ASSIGNEES. Создание и правка
+        задачи передают TASK_MAX_ASSIGNEES_PROJECT: сверх десяти можно только
+        исполнителей доски, а это знает лишь проверка с базой
+        (_require_task_project_assignees_tx).
         """
         if assignees is None or assignees is _UNSET:
             return None
@@ -3376,7 +3381,7 @@ class SchedulesMixin:
 
         if not ordered:
             raise ValueError("ASSIGNEE_REQUIRED")
-        if len(ordered) > self.TASK_MAX_ASSIGNEES:
+        if len(ordered) > (self.TASK_MAX_ASSIGNEES if limit is None else int(limit)):
             raise ValueError("TOO_MANY_ASSIGNEES")
         return ordered
 

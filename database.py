@@ -1149,7 +1149,10 @@ class Database(CoreMixin, SchemaMixin, ShiftAuctionMixin, ShiftSwapsMixin, Break
 
     # Потолок состава. Держится и во фронте (src/components/tasks/taskAssignees.js):
     # задача на пятнадцать человек — это рассылка, а не задача, и такой список
-    # уже не читается ни в карточке, ни в выгрузке.
+    # уже не читается ни в карточке, ни в выгрузке. Сверх него — только
+    # исполнители доски задачи: «поставить всем исполнителям» (владелец
+    # 24.11.2026), см. _require_task_project_assignees_tx и
+    # TASK_MAX_ASSIGNEES_PROJECT в db/tasks.py.
     TASK_MAX_ASSIGNEES = 10
 
     # Участие в задаче одним предикатом на весь файл. Именно EXISTS, а не JOIN:

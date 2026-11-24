@@ -83,17 +83,22 @@ import { stripTechnicalQueryParams } from '../../utils/urlHygiene';
 import {
   TASK_PROJECT_ALL,
   TASK_SECTION_ALL,
+  allExecutorIds,
+  assigneesAfterProjectChange,
   buildProjectOptions,
   buildSectionOptions,
   composerProjectStorageKey,
   creatableProjects,
   findProject,
   hasProjectBoards,
+  isAllExecutorsSelection,
+  keepAssigneesForProject,
   keepWatchersForProject,
   mergeSelectedProject,
   normalizeTaskKey,
   projectLabel,
   projectQueryParams,
+  projectExecutors,
   projectStorageKey,
   resolveComposerProject,
   resolveInitialProject,
@@ -541,6 +546,27 @@ styleTag.textContent = `
   .tv-composer-self:hover:not(:disabled) { border-color: var(--border-strong); color: var(--ink); }
   .tv-composer-self.is-active { background: var(--ink); border-color: var(--ink); color: #fff; }
   .tv-composer-self:disabled { opacity: .5; cursor: not-allowed; }
+  /* Строка исполнителей: поле и «Себе» в линию. У доски со своими исполнителями
+     (24.11.2026) над ними — выбор «Все / Конкретные люди», подпись — на уровне
+     сегментов, а не посередине двух строк. */
+  .tv-composer-assignee-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+  .tv-composer-assignee-line { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .tv-composer-assignee-scope { display: flex; align-items: center; gap: 6px; align-self: flex-start; }
+  .tv-composer-assignee.has-scope { align-items: flex-start; }
+  .tv-composer-assignee.has-scope > label { min-height: 29px; display: inline-flex; align-items: center; }
+  .tv-composer-segment-count {
+    margin-left: 5px; font-weight: 400; color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+  /* «Все»: кому уйдёт задача — не поле выбора, а сводка высотой с селектор. */
+  .tv-assignee-all {
+    flex: 1; min-width: 0;
+    display: flex; align-items: center; gap: 8px;
+    min-height: 37px; padding: 0 12px;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    font-size: 13px; color: var(--ink);
+  }
 
   .tv-composer-chips {
     display: flex; flex-wrap: wrap; gap: 5px;
@@ -4659,6 +4685,10 @@ const EMPTY_TASK_FORM = {
   tag: 'task',
   priority: 'normal',
   assigneeIds: [],
+  /* «Все исполнители доски» (владелец 24.11.2026): состав держит сама форма —
+     каждый исполнитель выбранной доски, кроме постановщика (себя — «Себе»). На
+     сервер уходит тем же списком assignee_ids; false — люди выбраны поштучно. */
+  assignAll: false,
   /* Дедлайн — днём и временем, строкой поля «ГГГГ-ММ-ДДTЧЧ:ММ» по часам Алматы
      (так же их отдаёт и принимает сервер); '' — без срока. initial* — с чем
      задача пришла в правку: срок и напоминание уходят, только если их меняли. */
@@ -5330,6 +5360,35 @@ const AssigneeField = ({
       searchable
       searchPlaceholder="Поиск по имени…"
     />
+  );
+};
+
+/* «Все исполнители доски» в форме: кому именно уйдёт задача — лица и имя первого,
+   весь список — в подсказке. Это не поле выбора: состав держит сама форма, а
+   поменять его — сегментом «Конкретные люди». Высотой с селектор рядом, чтобы
+   строка не прыгала при переключении. */
+const AllAssigneesSummary = ({ people = [] }) => {
+  const list = (people || []).filter(Boolean);
+  const names = list.map((person) => person?.name || '—').join(', ');
+  const shown = list.slice(0, 4);
+  const rest = list.length - shown.length;
+  return (
+    <div className="tv-assignee-all" title={names} aria-label={`Исполнители: ${names}`}>
+      <span className="tv-avatar-stack" aria-hidden="true">
+        {shown.map((person, index) => (
+          <AvatarCircle
+            key={person?.id ?? index}
+            className="tv-avatar-xs tv-avatar-stacked"
+            name={person?.name || '—'}
+            avatarUrl={person?.avatar_url || ''}
+          />
+        ))}
+        {rest > 0 && <span className="tv-avatar-xs tv-avatar-stacked tv-avatar-rest">+{rest}</span>}
+      </span>
+      <span className="tv-assignee-value-text">
+        {list.length > 1 ? `${list[0]?.name || '—'} и ещё ${list.length - 1}` : (list[0]?.name || '—')}
+      </span>
+    </div>
   );
 };
 
@@ -6166,25 +6225,52 @@ const TaskComposerForm = ({
       ? [{ value: '', label: 'Без раздела' }, ...list.map((section) => ({ value: String(section.id), label: section.name }))]
       : [];
   }, [selectedProject]);
+  /* Исполнители доски (владелец 24.11.2026): у доски, где их отметили, задачу
+     поручают только им — всем разом («Все») или поштучно. Без привязки поле
+     прежнее: все, кому вы вправе поручать. */
+  const executors = useMemo(() => projectExecutors(selectedProject), [selectedProject]);
+  const hasBinding = executors.length > 0;
+  /* Продакшн (задача #354) виден в «Типе» всегда, а исполнители у него — только
+     сотрудники маркетинга (уточнение владельца 16.10.2026): при этом типе в
+     выборе исполнителя остаются одни маркетологи. Маркетолога узнаём и среди
+     исполнителей доски: в ваших получателях их может не быть. */
+  const isProduction = values.tag === PRODUCTION_TAG;
+  const marketingIds = useMemo(() => productionPersonIds([...recipients, ...executors]), [recipients, executors]);
+  // Пока получатели грузятся (список пуст), при смене доски никого не выкидываем.
+  const recipientIds = useMemo(
+    () => (recipients.length ? new Set(recipients.map((person) => String(person.id))) : null),
+    [recipients]
+  );
+  const me = String(currentUserId || '');
+  const everyoneIds = useMemo(
+    () => allExecutorIds(selectedProject, { currentUserId, allowedIds: isProduction ? marketingIds : null }),
+    [selectedProject, currentUserId, isProduction, marketingIds]
+  );
+  // Выбор «Все / Конкретные люди» — когда исполнителей хотя бы двое: «все» из одного — не выбор.
+  const offersAll = hasBinding && everyoneIds.length >= 2;
+  const isAll = offersAll && Boolean(values.assignAll);
   const pickProject = (next) => {
     const projectId = String(next ?? '');
+    const nextProject = findProject(projects, projectId);
+    const sameProject = projectId === String(values.projectId || '');
     // Сменили доску — остаются наблюдатели, у кого есть доступ к новой, а раздел
-    // сбрасывается: разделы у каждой доски свои. Выбор человека форма больше не
-    // подменяет своей подсказкой.
+    // сбрасывается: разделы у каждой доски свои. Исполнители — те, кто исполнитель
+    // и новой доски; «Все» — все исполнители уже новой доски. Выбор человека форма
+    // больше не подменяет своей подсказкой.
     onChange({
       projectId,
       projectAuto: false,
-      sectionId: projectId === String(values.projectId || '') ? values.sectionId : '',
-      watcherIds: keepWatchersForProject(watcherIds, findProject(projects, projectId)),
+      sectionId: sameProject ? values.sectionId : '',
+      watcherIds: keepWatchersForProject(watcherIds, nextProject),
+      ...(sameProject ? {} : assigneesAfterProjectChange(values, nextProject, {
+        currentUserId,
+        allowedIds: isProduction ? productionPersonIds([...recipients, ...projectExecutors(nextProject)]) : null,
+        recipientIds,
+      })),
     });
   };
   // Раздел, выбранный человеком, — тоже его решение о месте задачи.
   const pickSection = (next) => onChange({ sectionId: String(next ?? ''), projectAuto: false });
-  /* Продакшн (задача #354) виден в «Типе» всегда, а исполнители у него — только
-     сотрудники маркетинга (уточнение владельца 16.10.2026): при этом типе в
-     выборе исполнителя остаются одни маркетологи. */
-  const isProduction = values.tag === PRODUCTION_TAG;
-  const marketingIds = useMemo(() => productionPersonIds(recipients), [recipients]);
   const supportsFiles = typeof onFilesChange === 'function';
   const isRepeatCopy = Boolean(values.regulationParentId);
   const sections = useMemo(
@@ -6196,16 +6282,35 @@ const TaskComposerForm = ({
   );
   const sectionCtx = useMemo(() => ({ recipients }), [recipients]);
   const assigneeSelectId = useId();
+  /* Кому можно поручить: у доски с привязкой — её исполнители, иначе — все
+     получатели. Уже выбранные остаются в списке, даже если они не исполнители
+     (задачу поставили до привязки): их можно снять, а правка не выкинет их молча. */
+  const assignablePeople = useMemo(() => {
+    if (!hasBinding) return recipients;
+    const byId = new Map(executors.map((person) => [String(person.id), person]));
+    assigneeIds.forEach((id) => {
+      const key = String(id);
+      if (byId.has(key)) return;
+      const known = recipients.find((person) => String(person.id) === key);
+      if (known) byId.set(key, known);
+    });
+    return [...byId.values()];
+  }, [hasBinding, executors, recipients, assigneeIds]);
+  // Имена и лица в кнопке поля — и исполнителей доски, и получателей.
+  const fieldPeople = useMemo(
+    () => (hasBinding ? [...recipients, ...assignablePeople] : recipients),
+    [hasBinding, recipients, assignablePeople]
+  );
   /* В получателях — все админы и супервайзеры компании: в нативном списке
      нужного человека приходилось искать глазами, поэтому здесь селектор с поиском. */
   const recipientOptions = useMemo(
-    () => recipients.map((person) => ({
+    () => assignablePeople.map((person) => ({
       value: String(person.id),
       label: person.role
         ? `${person.name} (${recipientRoleLabel(person)})`
         : person.name,
     })),
-    [recipients]
+    [assignablePeople]
   );
   // «Кто поручил» — тот же список без роли: строка вспомогательная, роль в ней лишняя.
   const requesterOptions = useMemo(
@@ -6221,10 +6326,61 @@ const TaskComposerForm = ({
       : recipientOptions),
     [isProduction, recipientOptions, marketingIds, assigneeIds]
   );
+  // «Себе» — если вам можно поручить: у доски с привязкой — только её исполнителю.
   const canAssignSelf = Number(currentUserId) > 0
-    && recipients.some((person) => Number(person.id) === Number(currentUserId))
+    && assignablePeople.some((person) => Number(person.id) === Number(currentUserId))
     && (!isProduction || marketingIds.has(String(currentUserId)));
-  const isSelfAssigned = assigneeIds.some((id) => String(id) === String(currentUserId || ''));
+  const isSelfAssigned = assigneeIds.some((id) => String(id) === me);
+
+  /* «Все» держит состав в согласии с доской: сменили тип или обновился состав
+     доски — исполнители следуют за ними, «Себе» остаётся. Доска перестала
+     предлагать «Все» (исполнителей меньше двух) — поле возвращается к выбору
+     людей. Пока доску не нашли (проекты ещё грузятся), ничего не трогаем. */
+  useEffect(() => {
+    if (!values.assignAll || !selectedProject) return;
+    if (!offersAll) {
+      onChange({
+        assignAll: false,
+        assigneeIds: assigneeIds.filter((id) => !isProduction || marketingIds.has(String(id))),
+      });
+      return;
+    }
+    const keepMe = canAssignSelf && isSelfAssigned;
+    const wanted = keepMe ? [...everyoneIds, me] : everyoneIds;
+    if (!sameIdSet(wanted, assigneeIds)) onChange({ assigneeIds: wanted });
+  }, [values.assignAll, selectedProject, offersAll, everyoneIds, canAssignSelf, isSelfAssigned,
+    assigneeIds, isProduction, marketingIds, me, onChange]);
+
+  /* Кого выбирали поштучно до «Все»: вернулись к «Конкретным людям» — они на
+     месте, а не пустое поле. */
+  const manualPicksRef = useRef([]);
+  const pickScope = (scope) => {
+    if (disabled) return;
+    if (scope === 'all') {
+      if (isAll) return;
+      manualPicksRef.current = assigneeIds.map(String).filter((id) => id !== me);
+      onChange({ assignAll: true, assigneeIds: canAssignSelf && isSelfAssigned ? [...everyoneIds, me] : everyoneIds });
+      return;
+    }
+    if (!isAll) return;
+    const restored = keepAssigneesForProject(manualPicksRef.current, selectedProject)
+      .filter((id) => id !== me && (!isProduction || marketingIds.has(id)));
+    onChange({ assignAll: false, assigneeIds: isSelfAssigned ? [...restored, me] : restored });
+  };
+  // Кому уйдёт задача при «Все» — по порядку состава, для строки с лицами.
+  const allPeople = useMemo(() => {
+    if (!isAll) return [];
+    const byId = new Map(fieldPeople.map((person) => [String(person.id), person]));
+    return assigneeIds.map((id) => byId.get(String(id))).filter(Boolean);
+  }, [isAll, fieldPeople, assigneeIds]);
+  const iAmExecutor = executors.some((person) => String(person.id) === me);
+  /* Под «i» у выбора — зачем он и по строке на вариант (правило владельца для
+     выбора сегментами). Без выбора строка поля прежняя, без «i». */
+  const assigneeHint = [
+    'У этой доски свои исполнители — поручить её задачу можно только им. Кто исполнитель, решают админы раздела в окне «Проекты».',
+    `«Все» — одна задача на всех исполнителей доски: взять и сдать её может любой из них.${iAmExecutor ? ' Себя «Все» не включает — для этого кнопка «Себе».' : ''}`,
+    `«Конкретные люди» — только отмеченные, до ${TASK_MAX_ASSIGNEES} человек.`,
+  ].join(' ');
 
   /* Выбрали «Продакшн» — из исполнителей уходят все, кто не из маркетинга:
      поставить им этот тип нельзя, и оставлять их в поле значило бы отказ при
@@ -6330,44 +6486,85 @@ const TaskComposerForm = ({
         </div>
       )}
 
-      <div className="tv-composer-assignee">
-        <label htmlFor={assigneeSelectId}>
-          {assigneeIds.length > 1 ? 'Исполнители' : 'Исполнитель'}
+      {/* Исполнители. У доски со своими исполнителями (24.11.2026) — только они:
+          всем разом («Все») или поштучно. Без привязки строка прежняя. */}
+      <div className={`tv-composer-assignee${offersAll ? ' has-scope' : ''}`}>
+        <label htmlFor={isAll ? undefined : assigneeSelectId}>
+          {isAll || assigneeIds.length > 1 ? 'Исполнители' : 'Исполнитель'}
         </label>
-        <AssigneeField
-          id={assigneeSelectId}
-          value={assigneeIds}
-          options={assigneeOptions}
-          people={recipients}
-          onChange={(next) => onChange({ assigneeIds: next })}
-          disabled={disabled}
-          isLoading={isRecipientsLoading}
-          placeholder={isProduction ? 'Сотрудник маркетинга' : 'Выберите сотрудника'}
-        />
-        {canAssignSelf && (
-          <button
-            type="button"
-            className={`tv-composer-self ${isSelfAssigned ? 'is-active' : ''}`}
-            disabled={disabled || (!isSelfAssigned && assigneeIds.length >= TASK_MAX_ASSIGNEES)}
-            title={isSelfAssigned
-              ? 'Убрать себя из исполнителей'
-              : (assigneeIds.length >= TASK_MAX_ASSIGNEES
-                  ? `Больше ${TASK_MAX_ASSIGNEES} исполнителей у задачи не бывает`
-                  : 'Добавить себя в исполнители')}
-            onClick={() => {
-              if (isSelfAssigned) {
-                onChange({ assigneeIds: assigneeIds.filter((id) => String(id) !== String(currentUserId)) });
-                return;
-              }
-              // Потолок тот же, что у списка: иначе кнопка добавляла бы
-              // одиннадцатого, и сохранение падало бы ошибкой сервера.
-              if (assigneeIds.length >= TASK_MAX_ASSIGNEES) return;
-              onChange({ assigneeIds: [...assigneeIds, String(currentUserId)] });
-            }}
-          >
-            Себе
-          </button>
-        )}
+        <div className="tv-composer-assignee-body">
+          {/* «i» — у выбора, а не у подписи: подпись шире не становится, и поле
+              стоит в одной колонке с «Проектом» и «Разделом». */}
+          {offersAll && (
+            <div className="tv-composer-assignee-scope">
+              <div className="tv-composer-segmented" role="group" aria-label="Кому поручить задачу">
+                <button
+                  type="button"
+                  className={isAll ? 'is-active' : ''}
+                  aria-pressed={isAll}
+                  disabled={disabled}
+                  onClick={() => pickScope('all')}
+                >
+                  Все
+                  <span className="tv-composer-segment-count">{everyoneIds.length}</span>
+                </button>
+                <button
+                  type="button"
+                  className={isAll ? '' : 'is-active'}
+                  aria-pressed={!isAll}
+                  disabled={disabled}
+                  onClick={() => pickScope('people')}
+                >
+                  Конкретные люди
+                </button>
+              </div>
+              <InfoHint side="left" text={assigneeHint} />
+            </div>
+          )}
+          <div className="tv-composer-assignee-line">
+            {isAll ? (
+              <AllAssigneesSummary people={allPeople} />
+            ) : (
+              <AssigneeField
+                id={assigneeSelectId}
+                value={assigneeIds}
+                options={assigneeOptions}
+                people={fieldPeople}
+                onChange={(next) => onChange({ assigneeIds: next })}
+                disabled={disabled}
+                isLoading={isRecipientsLoading}
+                placeholder={isProduction
+                  ? 'Сотрудник маркетинга'
+                  : (hasBinding ? 'Исполнитель доски' : 'Выберите сотрудника')}
+              />
+            )}
+            {canAssignSelf && (
+              <button
+                type="button"
+                className={`tv-composer-self ${isSelfAssigned ? 'is-active' : ''}`}
+                disabled={disabled || (!isSelfAssigned && !isAll && assigneeIds.length >= TASK_MAX_ASSIGNEES)}
+                title={isSelfAssigned
+                  ? 'Убрать себя из исполнителей'
+                  : (!isAll && assigneeIds.length >= TASK_MAX_ASSIGNEES
+                      ? `Больше ${TASK_MAX_ASSIGNEES} исполнителей у задачи не бывает`
+                      : 'Добавить себя в исполнители')}
+                onClick={() => {
+                  if (isSelfAssigned) {
+                    onChange({ assigneeIds: assigneeIds.filter((id) => String(id) !== String(currentUserId)) });
+                    return;
+                  }
+                  // Потолок тот же, что у списка: иначе кнопка добавляла бы
+                  // одиннадцатого, и сохранение падало бы ошибкой сервера.
+                  // У «Все» потолка нет — задача на всех исполнителей доски.
+                  if (!isAll && assigneeIds.length >= TASK_MAX_ASSIGNEES) return;
+                  onChange({ assigneeIds: [...assigneeIds, String(currentUserId)] });
+                }}
+              >
+                Себе
+              </button>
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="tv-composer-chips">
@@ -10146,12 +10343,14 @@ const TasksView = ({
       ? productionBriefIssues(values.productionBrief, values.description, {
         productionAllowed: productionAllowedFor(
           values.assigneeIds,
-          recipients,
+          // Исполнители доски — тоже люди, которым можно поручить (24.11.2026):
+          // маркетолога среди них узнаём по отделу, даже если его нет в получателях.
+          [...recipients, ...projectExecutors(findProject(projects, values.projectId))],
           modal ? { tag: modal.initialTag, assigneeIds: modal.initialAssigneeIds } : null
         ),
       })
       : []
-  ), [recipients]);
+  ), [recipients, projects]);
   /* Проект обязателен, когда выбирать есть из чего: задача без доски у
      человека с досками — это задача, которую никто из отдела не увидит. */
   const composerProjects = useMemo(() => creatableProjects(projects), [projects]);
@@ -10186,15 +10385,26 @@ const TasksView = ({
     setForm((prev) => {
       if (prev.projectId && !prev.projectAuto) return prev;
       if (prev.projectId === composerDefaultProject && (prev.sectionId || '') === composerDefaultSection) return prev;
+      const nextProject = findProject(projects, composerDefaultProject);
       return {
         ...prev,
         projectId: composerDefaultProject,
         projectAuto: true,
         sectionId: composerDefaultSection,
-        watcherIds: keepWatchersForProject(prev.watcherIds, findProject(projects, composerDefaultProject)),
+        watcherIds: keepWatchersForProject(prev.watcherIds, nextProject),
+        // Исполнители — как при выборе доски руками: у доски с привязкой только её
+        // исполнители (24.11.2026). Та же доска — состав не трогаем.
+        ...(prev.projectId === composerDefaultProject ? {} : assigneesAfterProjectChange(prev, nextProject, {
+          currentUserId,
+          allowedIds: prev.tag === PRODUCTION_TAG
+            ? productionPersonIds([...recipients, ...projectExecutors(nextProject)])
+            : null,
+          // Пока получатели грузятся (список пуст), никого не выкидываем.
+          recipientIds: recipients.length ? new Set(recipients.map((person) => String(person.id))) : null,
+        })),
       };
     });
-  }, [createOpen, composerDefaultProject, composerDefaultSection, projects]);
+  }, [createOpen, composerDefaultProject, composerDefaultSection, projects, currentUserId, recipients]);
   useEffect(() => { if (!editModal.open) setEditIssuesShown(false); }, [editModal.open]);
 
   /* ── Create ── */
@@ -10236,7 +10446,16 @@ const TasksView = ({
   /* ── Edit / Delete ── */
   const openEditModal = useCallback((task) => {
     if (!task?.id) return;
-    setEditForm(taskToTaskForm(task));
+    const nextForm = taskToTaskForm(task);
+    // Задача поставлена всем исполнителям доски — правка открывается на «Все» (24.11.2026).
+    const taskProject = findProject(projects, nextForm.projectId);
+    const productionIds = nextForm.tag === PRODUCTION_TAG
+      ? productionPersonIds([...recipients, ...projectExecutors(taskProject)])
+      : null;
+    setEditForm({
+      ...nextForm,
+      assignAll: isAllExecutorsSelection(nextForm.assigneeIds, taskProject, { currentUserId, allowedIds: productionIds }),
+    });
     setEditModal({
       open: true,
       taskId: task.id,
@@ -10246,7 +10465,7 @@ const TasksView = ({
       initialTag: task.tag || 'task',
       initialAssigneeIds: taskAssigneeIds(task).map(String),
     });
-  }, []);
+  }, [projects, recipients, currentUserId]);
 
   const closeEditModal = useCallback(() => {
     setEditModal({ open: false, taskId: null, taskSubject: '' });

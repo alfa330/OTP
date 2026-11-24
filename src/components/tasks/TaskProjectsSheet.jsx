@@ -23,6 +23,9 @@ import { PROJECT_CODE_RE, projectCodeIssue } from './taskProjects';
  *   Участник — видит все задачи проекта (сотрудник маркетинга — кроме задач
  *              своего руководителя, где сам не участвует: решает сервер);
  *   Доска    — ставит задачи в проект и видит свои и те, где он наблюдатель.
+ * Исполнители доски (владелец 24.11.2026) — кому ставят её задачи: отметка у
+ * людей из состава. Отметили хоть одного — в форме задачи этой доски исполнителем
+ * можно выбрать только их (и всех разом); пока никто не отмечен — как раньше.
  * Разделы доски («регулируемый набор разделов» из постановки) — свой список у
  * каждой доски: переименовать на месте, переставить стрелками, убрать.
  * Сохраняется целиком одним запросом: состав и разделы уходят полными списками.
@@ -77,6 +80,8 @@ const draftOf = (project) => ({
     role: person.role,
     department: person.department,
     access_level: person.access_level === 'board' ? 'board' : 'member',
+    // Исполнитель доски — кому ставят её задачи (24.11.2026).
+    is_executor: Boolean(person.is_executor),
   })),
   sections: (Array.isArray(project?.sections) ? project.sections : []).map((section) => ({
     key: `id-${section.id}`,
@@ -126,10 +131,12 @@ const ProjectList = ({ projects, onOpen, onCreate }) => (
         const boardCount = members.length - memberCount;
         const taskCount = Number(project.task_count || 0);
         const sectionCount = Array.isArray(project.sections) ? project.sections.length : 0;
+        const executorCount = members.filter((person) => person.is_executor).length;
         const facts = [
           project.department_name || 'Без отдела',
           memberCount ? `${memberCount} ${pluralRu(memberCount, 'участник', 'участника', 'участников')}` : 'нет участников',
           boardCount ? `${boardCount} с доступом к доске` : '',
+          executorCount ? `${executorCount} ${pluralRu(executorCount, 'исполнитель', 'исполнителя', 'исполнителей')}` : '',
           sectionCount ? `${sectionCount} ${pluralRu(sectionCount, 'раздел', 'раздела', 'разделов')}` : '',
           taskCount ? `${taskCount} ${pluralRu(taskCount, 'задача', 'задачи', 'задач')}` : '',
         ].filter(Boolean);
@@ -182,6 +189,32 @@ const MemberRow = ({ person, roleLabels, onLevel, onRemove, disabled }) => (
       className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
       aria-label={`Убрать: ${person.name}`}
       title="Убрать с доски"
+    >
+      <X size={15} />
+    </button>
+  </li>
+);
+
+/* Строка исполнителя доски — как строка состава, но без уровня: уровень доступа
+   живёт в составе, здесь только «ставят ли ему задачи доски». */
+const ExecutorRow = ({ person, roleLabels, onRemove, disabled }) => (
+  <li className="flex items-center gap-3 px-3.5 py-2">
+    <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-500">
+      {initials(person.name)}
+    </span>
+    <span className="min-w-0 grow basis-0">
+      <span className="block truncate text-[13.5px] font-medium text-slate-800">{person.name}</span>
+      <span className="block truncate text-[12px] text-slate-500">
+        {[roleLabels?.[person.role], person.department].filter(Boolean).join(' · ') || '—'}
+      </span>
+    </span>
+    <button
+      type="button"
+      onClick={() => onRemove(person.id)}
+      disabled={disabled}
+      className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+      aria-label={`Не исполнитель: ${person.name}`}
+      title="Убрать из исполнителей — в составе доски человек останется"
     >
       <X size={15} />
     </button>
@@ -277,6 +310,7 @@ const ProjectEditor = ({ draft, setDraft, isCreate, issues, people, roleLabels, 
         role: person.role,
         department: person.department || '',
         access_level: 'member',
+        is_executor: false,
       }],
     });
   };
@@ -298,8 +332,33 @@ const ProjectEditor = ({ draft, setDraft, isCreate, issues, people, roleLabels, 
       role: person.role,
       department: person.department || '',
       access_level: 'member',
+      is_executor: false,
     }))],
   });
+
+  /* Исполнители доски — из её состава: сначала человека добавляют выше, потом
+     отмечают здесь. Убрали из состава — исполнителем он быть перестаёт сам. */
+  const executors = useMemo(
+    () => draft.members.filter((person) => person.is_executor),
+    [draft.members]
+  );
+  const notExecutors = useMemo(
+    () => draft.members.filter((person) => !person.is_executor),
+    [draft.members]
+  );
+  const executorOptions = useMemo(() => notExecutors.map((person) => ({
+    value: String(person.id),
+    label: candidateLabel(person, roleLabels),
+  })), [notExecutors, roleLabels]);
+  const setExecutor = (personIds, isExecutor) => {
+    const ids = new Set(personIds.map(Number));
+    patch({
+      members: draft.members.map((person) => (ids.has(Number(person.id)) ? { ...person, is_executor: isExecutor } : person)),
+    });
+  };
+  const addExecutor = (value) => setExecutor([value], true);
+  const removeExecutor = (personId) => setExecutor([personId], false);
+  const addAllExecutors = () => setExecutor(notExecutors.map((person) => person.id), true);
 
   const renameSection = (key, name) => patch({
     sections: draft.sections.map((section) => (section.key === key ? { ...section, name } : section)),
@@ -424,6 +483,61 @@ const ProjectEditor = ({ draft, setDraft, isCreate, issues, people, roleLabels, 
           ) : (
             <p className="border-t border-slate-100 px-4 py-6 text-center text-[12.5px] text-slate-500">
               Пока задачи проекта видят только их участники и админы раздела.
+            </p>
+          )}
+        </div>
+      </section>
+
+      <section className="space-y-1.5">
+        <div className="flex items-center gap-1.5">
+          <span className={iosGroupLabel}>Исполнители доски</span>
+          <InfoHint
+            side="left"
+            text="Кому ставят задачи этой доски. Отметили хотя бы одного — при постановке задачи исполнителем можно выбрать только их, всех сразу или конкретных людей. Пока никто не отмечен, задачу поручают как раньше. Исполнитель — из состава доски: сначала добавьте человека выше. Уже поставленные задачи отметка не меняет."
+          />
+        </div>
+        <div className={`${iosCard} overflow-hidden`}>
+          <div className="p-3">
+            <CustomSelect
+              variant="ios"
+              ariaLabel="Добавить исполнителя доски"
+              value=""
+              options={executorOptions}
+              onChange={addExecutor}
+              disabled={saving || !executorOptions.length}
+              placeholder={!draft.members.length
+                ? 'Сначала добавьте людей в состав доски'
+                : (executorOptions.length ? 'Добавить исполнителя…' : 'Весь состав — исполнители')}
+              searchable
+              searchPlaceholder="Поиск по имени…"
+            />
+            {notExecutors.length > 1 && (
+              <button
+                type="button"
+                onClick={addAllExecutors}
+                disabled={saving}
+                className="mt-2 inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[#2563eb] transition hover:bg-[#eef4ff] active:scale-[0.98]"
+              >
+                <Plus size={14} strokeWidth={2.2} />
+                Весь состав доски ({notExecutors.length})
+              </button>
+            )}
+          </div>
+          {executors.length > 0 ? (
+            <ul className="divide-y divide-slate-100 border-t border-slate-100">
+              {executors.map((person) => (
+                <ExecutorRow
+                  key={person.id}
+                  person={{ ...person, department: person.department || peopleById.get(person.id)?.department || '' }}
+                  roleLabels={roleLabels}
+                  onRemove={removeExecutor}
+                  disabled={saving}
+                />
+              ))}
+            </ul>
+          ) : (
+            <p className="border-t border-slate-100 px-4 py-6 text-center text-[12.5px] text-slate-500">
+              Пока никто не отмечен — задачу этой доски можно поручить любому, как раньше.
             </p>
           )}
         </div>
@@ -589,7 +703,11 @@ const TaskProjectsSheet = ({
     const payload = {
       name,
       department_id: draft.departmentId ? Number(draft.departmentId) : null,
-      members: draft.members.map((person) => ({ user_id: person.id, access_level: person.access_level })),
+      members: draft.members.map((person) => ({
+        user_id: person.id,
+        access_level: person.access_level,
+        is_executor: Boolean(person.is_executor),
+      })),
       sections: draft.sections.map((section) => (
         section.id ? { id: section.id, name: section.name.trim() } : { name: section.name.trim() }
       )),
@@ -639,7 +757,7 @@ const TaskProjectsSheet = ({
       onClose={onClose}
       onBack={view === 'list' ? null : back}
       title={view === 'list' ? 'Проекты' : (isCreate ? 'Новый проект' : `${draft.originalCode} · ${draft.name || 'Проект'}`)}
-      subtitle={view === 'list' ? 'Доски отделов и кто их видит' : (isCreate ? 'Доска, ключ, состав и разделы' : 'Название, ключ, отдел, состав и разделы доски')}
+      subtitle={view === 'list' ? 'Доски отделов и кто их видит' : (isCreate ? 'Доска, ключ, состав, исполнители и разделы' : 'Название, ключ, отдел, состав, исполнители и разделы доски')}
       maxWidth="max-w-2xl"
       footer={footer}
       sizeKey={view}

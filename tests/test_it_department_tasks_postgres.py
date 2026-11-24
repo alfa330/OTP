@@ -54,8 +54,10 @@ BASE_DDL = f'''
                                  position integer NOT NULL DEFAULT 0);
     CREATE TABLE task_projects (id integer PRIMARY KEY, code text NOT NULL, name text NOT NULL,
                                 department_id integer, is_archived boolean NOT NULL DEFAULT FALSE);
+    -- is_executor — «исполнитель доски» (24.11.2026): список досок отдаёт отметку.
     CREATE TABLE task_project_members (project_id integer NOT NULL, user_id integer NOT NULL,
                                        access_level text NOT NULL, added_by integer,
+                                       is_executor boolean NOT NULL DEFAULT FALSE,
                                        PRIMARY KEY (project_id, user_id));
     CREATE TABLE task_project_sections (id integer PRIMARY KEY, project_id integer NOT NULL,
                                         name text NOT NULL, position integer NOT NULL DEFAULT 0);

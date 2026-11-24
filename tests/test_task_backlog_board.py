@@ -614,7 +614,8 @@ class TaskComposerTests(unittest.TestCase):
         # Тема, описание и исполнитель — вне раскрываемых секций.
         self.assertIn('className="tv-composer-title"', block)
         self.assertIn('className="tv-composer-description"', block)
-        self.assertIn('className="tv-composer-assignee"', block)
+        # У доски со своими исполнителями (24.11.2026) у строки есть ещё и has-scope.
+        self.assertIn("className={`tv-composer-assignee${offersAll ? ' has-scope' : ''}`}", block)
         for gated in ("isOpen('priority')", "isOpen('tag')", "isOpen('deadline')",
                       "isOpen('estimate')", "isOpen('origin')", "isOpen('checklist')",
                       "isOpen('recurrence')"):
@@ -741,8 +742,9 @@ class TaskOriginTests(unittest.TestCase):
         self.assertIn('className={`tv-composer-self', src)
         self.assertIn("assigneeIds: assigneeIds.filter((id) => String(id) !== String(currentUserId))", src)
         self.assertIn("assigneeIds: [...assigneeIds, String(currentUserId)]", src)
-        # И потолок состава кнопка обходить не должна.
-        self.assertIn("if (assigneeIds.length >= TASK_MAX_ASSIGNEES) return;", src)
+        # И потолок состава кнопка обходить не должна — кроме «Все исполнители
+        # доски» (24.11.2026): у задачи на всех исполнителей потолка нет.
+        self.assertIn("if (!isAll && assigneeIds.length >= TASK_MAX_ASSIGNEES) return;", src)
 
     def test_self_task_without_origin_reads_as_initiative(self):
         src = _read(TASKS_VIEW_PATH)

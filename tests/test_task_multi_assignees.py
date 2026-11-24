@@ -449,7 +449,8 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("body.append('assignee_ids', payload.assignee_ids.join(','));", self.VIEW)
 
     def test_label_switches_to_plural_only_with_two_or_more(self):
-        self.assertIn("{assigneeIds.length > 1 ? 'Исполнители' : 'Исполнитель'}", self.VIEW)
+        # «Все исполнители доски» (24.11.2026) — тоже несколько человек.
+        self.assertIn("{isAll || assigneeIds.length > 1 ? 'Исполнители' : 'Исполнитель'}", self.VIEW)
 
     def test_card_shows_a_stack_and_the_picker_is_shared(self):
         self.assertIn("<AssigneeStack people={assigneePeople} />", self.VIEW)
