@@ -1077,6 +1077,7 @@ def _views_namespace(departments, heads=(), personal=None):
         'PERSONAL_VIEW_ALLOWLIST': personal if personal is not None else _module_literal('PERSONAL_VIEW_ALLOWLIST'),
         'PERSONAL_VIEW_BASE_ROLES': _module_literal('PERSONAL_VIEW_BASE_ROLES'),
         'DEPARTMENT_ONLY_VIEWS': _module_literal('DEPARTMENT_ONLY_VIEWS'),
+        'DEPARTMENT_PERSONAL_EXTRA_VIEWS': _module_literal('DEPARTMENT_PERSONAL_EXTRA_VIEWS'),
         'BACK_OFFICE_EMPLOYEE_ROLES': frozenset(
             _module_literal('BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE').values()),
         '_headed_department_id': lambda requester_id: 1954 if requester_id in heads else None,

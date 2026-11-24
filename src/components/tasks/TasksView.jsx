@@ -4262,6 +4262,8 @@ const ROLE_LABELS = {
    тогда «Сотрудник», но не сырое «operator». */
 const RECIPIENT_DEPARTMENT_LABELS = {
   it: 'IT',
+  // Рядовой отдела разработки с «Задачами» поимённо (TASK_EMPLOYEE_USER_GRANTS).
+  development: 'Разработка',
   // Старые учётки бэк-офиса на 'operator' (заведены до своих должностей) —
   // тем же словом, что их коллеги по должности в ROLE_LABELS.
   hr: 'HR',

@@ -72,10 +72,12 @@ class AccessRuleMirrorTests(unittest.TestCase):
             '_headed_department_id': lambda requester_id: 7 if requester_id in heads else None,
         }
         for name in ('ROLE_HIERARCHY', 'BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE', 'BACK_OFFICE_EMPLOYEE_ROLES',
-                     'BACK_OFFICE_TASK_EMPLOYEE_ROLES', 'TASK_EMPLOYEE_DEPARTMENT_CODES'):
+                     'BACK_OFFICE_TASK_EMPLOYEE_ROLES', 'TASK_EMPLOYEE_DEPARTMENT_CODES',
+                     'TASK_EMPLOYEE_USER_GRANTS'):
             exec(_assignment_source(BOT_PATH, name), namespace)
         for name in ('_normalize_user_role', '_get_role_level', '_has_min_role', '_is_admin_role',
-                     '_back_office_task_employee_role', '_can_access_tasks', '_task_access_for_people'):
+                     '_task_employee_user_granted', '_back_office_task_employee_role',
+                     '_can_access_tasks', '_task_access_for_people'):
             exec(_function_source(BOT_PATH, name), namespace)
         return namespace['_can_access_tasks'], namespace['_task_access_for_people']
 
@@ -116,10 +118,11 @@ class AccessRuleMirrorTests(unittest.TestCase):
 
         namespace = {'db': _Broken(), 'logging': logging}
         for name in ('ROLE_HIERARCHY', 'BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE', 'BACK_OFFICE_EMPLOYEE_ROLES',
-                     'BACK_OFFICE_TASK_EMPLOYEE_ROLES', 'TASK_EMPLOYEE_DEPARTMENT_CODES'):
+                     'BACK_OFFICE_TASK_EMPLOYEE_ROLES', 'TASK_EMPLOYEE_DEPARTMENT_CODES',
+                     'TASK_EMPLOYEE_USER_GRANTS'):
             exec(_assignment_source(BOT_PATH, name), namespace)
         for name in ('_normalize_user_role', '_get_role_level', '_has_min_role', '_is_admin_role',
-                     '_task_access_for_people'):
+                     '_task_employee_user_granted', '_task_access_for_people'):
             exec(_function_source(BOT_PATH, name), namespace)
         logging.disable(logging.CRITICAL)
         try:

@@ -189,21 +189,29 @@ const AHO_HEAD_VIEWS = ['manage_operators', 'work_schedules', 'tasks'];
    оставляет одни «Рассылки». Ключ — код отдела, внутри users.id; ФИО в
    публичный репозиторий не кладём.
 
-   Добавка дописывается к набору отдела по роли и потому действует, пока
-   человек числится в этом отделе рядовым: у главы ООЗ, супервайзера и админа
-   набора нет вовсе (ключей 'head' и 'sv' в карте отдела нет). Переведут в
-   другой отдел — меню соберёт карта нового отдела, и раздел отсюда за
-   человеком не поедет.
+   Добавка дописывается к набору отдела по роли — к карте разделов
+   (DEPARTMENT_VIEW_ALLOWLIST) или к набору «только это» (DEPARTMENT_ONLY_VIEWS),
+   смотря что у отдела есть, — и потому действует, пока человек числится в этом
+   отделе рядовым: у главы ООЗ, супервайзера и админа набора нет вовсе (ключей
+   'head' и 'sv' в карте отдела нет). Переведут в другой отдел — меню соберёт
+   набор нового отдела, и раздел отсюда за человеком не поедет.
 
    Встаёт в ХВОСТ набора отдела: firstAllowedView берёт allow[0], и после
    входа человек по-прежнему попадает в «Рассылки». Доступа добавка не
    выдаёт — только пункт меню и место в гардах: свои смены сервер отдаёт
-   любому оператору (/api/work_schedules/my), а «Рассылки» открывает именной
-   список driver_mailings/access.py. */
+   любому оператору (/api/work_schedules/my), «Рассылки» открывает именной
+   список driver_mailings/access.py, а «Задачи» рядовому — поимённый допуск
+   TASK_EMPLOYEE_USER_GRANTS (bot_schedule2.py и db/core.py; тест сверяет их
+   с 'tasks' здесь). Зеркало ради колокола — одноимённый набор в
+   bot_schedule2.py. */
 const DEPARTMENT_PERSONAL_EXTRA_VIEWS = {
     request_processing_department: {
         619: ['work_schedules'],
         620: ['work_schedules'],
+    },
+    // Отдел разработки: «Задачи» сотруднику — решение владельца 24.11.2026.
+    development: {
+        667: ['tasks'],
     },
 };
 
@@ -375,7 +383,8 @@ const DEPARTMENT_ONLY_VIEWS = {
     },
     // Отделы-проекты и АХО (09.11.2026): «Профиль» и свои смены — график им и
     // заводили. «Задач» у рядового нет: ручки раздела пускают оператора только
-    // из бэк-офиса (_can_access_tasks), и пункт открывал бы отказ.
+    // из бэк-офиса (_can_access_tasks), и пункт открывал бы отказ. Выданные
+    // поимённо — DEPARTMENT_PERSONAL_EXTRA_VIEWS вместе с допуском на сервере.
     tez_project: {
         operator: ['profile', 'work_schedules'],
         trainee: ['profile', 'work_schedules'],
@@ -423,7 +432,12 @@ const personalViewsApplyTo = (user) => {
 const departmentOnlyViewsOf = (user) => {
     const code = normalizeDepartmentCodeValue(departmentCodeOf(user));
     const byRole = code ? DEPARTMENT_ONLY_VIEWS[code] : null;
-    return byRole ? byRole[normalizeRole(user?.role)] : null;
+    const allow = byRole ? byRole[normalizeRole(user?.role)] : null;
+    if (!Array.isArray(allow)) return allow;
+    // Поимённая добавка — в хвост набора отдела (DEPARTMENT_PERSONAL_EXTRA_VIEWS),
+    // как и у карты разделов в allowlistFor.
+    const extra = DEPARTMENT_PERSONAL_EXTRA_VIEWS[code]?.[Number(user?.id)];
+    return Array.isArray(extra) ? [...allow, ...extra] : allow;
 };
 
 // Набор «только это» пользователя — личный, а без него набор его отдела, —
@@ -845,6 +859,9 @@ const TASK_EMPLOYEE_ROLES = ['operator', 'trainee'];
        бы пункт, который бэкенд ему закрывает (_can_access_tasks);
      - отдел из TASK_EMPLOYEE_DEPARTMENTS: карта его не ограничивает, и раздел
        выдаёт набор выше — рядовому, как и на сервере.
+   Поимённый допуск (рядовой отдела-проекта) идёт первым путём: 'tasks' ему
+   дописывает к набору отдела DEPARTMENT_PERSONAL_EXTRA_VIEWS, сервер пускает
+   по TASK_EMPLOYEE_USER_GRANTS.
    Набор «только это» сильнее обоих путей: раздела в нём нет — нет и пункта. */
 export const rankAndFileTasksAllowed = (user) => {
     if (!departmentAllowsView(user, 'tasks')) return false;

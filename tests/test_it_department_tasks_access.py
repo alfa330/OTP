@@ -36,6 +36,7 @@ GUARD_CHAIN = (
     "BACK_OFFICE_EMPLOYEE_ROLES",
     "BACK_OFFICE_TASK_EMPLOYEE_ROLES",
     "TASK_EMPLOYEE_DEPARTMENT_CODES",
+    "TASK_EMPLOYEE_USER_GRANTS",
     "TASKS_FULL_ACCESS_USER_IDS",
     "_normalize_user_role",
     "_get_role_level",
@@ -44,6 +45,7 @@ GUARD_CHAIN = (
     "_is_super_admin_role",
     "_is_global_admin_requester",
     "_back_office_employee_role",
+    "_task_employee_user_granted",
     "_back_office_task_employee_role",
     "_can_access_tasks",
     "_effective_scoped_manager_role",
@@ -243,10 +245,13 @@ class ItDepartmentMirrorTests(unittest.TestCase):
     def test_employee_fragment_is_built_from_the_constants(self):
         namespace = {}
         for name in ("TASK_EMPLOYEE_DEPARTMENT_CODES", "TASK_EMPLOYEE_ROLES",
-                     "_TASK_EMPLOYEE_SQL"):
+                     "TASK_EMPLOYEE_USER_GRANTS", "_TASK_EMPLOYEE_SQL"):
             exec(_segment(name, DB_CORE_PATH), namespace)
+        # Отдел IT целиком и поимённые допуски (tests/test_task_employee_user_grants.py)
+        # — одним фрагментом, роль сверяется для обоих.
         self.assertEqual(
-            "(u.role IN ('operator', 'trainee') AND LOWER(BTRIM(d.code)) IN ('it'))",
+            "(u.role IN ('operator', 'trainee') AND (LOWER(BTRIM(d.code)) IN ('it')"
+            " OR (LOWER(BTRIM(d.code)) = 'development' AND u.id IN (667))))",
             namespace["_TASK_EMPLOYEE_SQL"],
         )
         # Фрагмент стоит в обоих списках людей: кому поручить задачу и кого

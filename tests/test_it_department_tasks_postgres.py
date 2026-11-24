@@ -104,6 +104,7 @@ NAMES = [
 MODULE_NAMES = {
     'normalize_role_value', 'role_has_min', 'ROLE_ALIASES', 'ROLE_HIERARCHY', '_UNSET',
     'BACK_OFFICE_EMPLOYEE_ROLES', 'TASK_EMPLOYEE_DEPARTMENT_CODES', 'TASK_EMPLOYEE_ROLES',
+    'TASK_EMPLOYEE_USER_GRANTS',
     'TASK_PERSONAL_SCOPE_ROLES', 'TASK_RECIPIENT_ROLES', '_TASK_RECIPIENT_ROLES_SQL',
     '_TASK_EMPLOYEE_SQL', 'TASK_MANAGER_PRIVATE_DEPARTMENT_CODES', '_TASK_MANAGER_PRIVATE_SQL',
     'TASK_OPEN_ASSIGNEE_DEPARTMENT_CODES', '_TASK_OPEN_ASSIGNEE_SQL',
@@ -259,3 +260,47 @@ def test_supervisor_path_does_not_reach_it_staff(cur):
     line_scope = DB._task_assignee_scope_tx(cur, 205)
     assert line_scope == [(LINE_OPERATOR, 'operator', LINE_SV)]
     assert DB._task_visible_for_requester('sv', LINE_SV, ADMIN, line_scope) is True
+
+
+# Поимённый допуск (24.11.2026): «Задачи» сотруднику отдела разработки, а не всему
+# отделу (TASK_EMPLOYEE_USER_GRANTS). 667 — сам допуск, 668 — коллега без него.
+DEVELOPMENT, GRANTED, DEV_COLLEAGUE = 2587, 667, 668
+
+
+def _seed_named_grant(cur):
+    cur.execute(f'''
+        INSERT INTO departments (id, code, name, head_user_id) VALUES
+            ({DEVELOPMENT}, 'development', 'Отдел разработки', NULL);
+        INSERT INTO users (id, name, role, department_id, supervisor_id, status) VALUES
+            ({GRANTED}, 'К Разработчик', 'operator', {DEVELOPMENT}, {LINE_SV}, 'working'),
+            ({DEV_COLLEAGUE}, 'Л Разработчик', 'operator', {DEVELOPMENT}, NULL, 'working');
+        INSERT INTO tasks (id, created_by, assigned_to, requested_by_id, project_id, project_number) VALUES
+            (206, {ADMIN}, {GRANTED}, NULL, NULL, NULL);
+        INSERT INTO task_assignees (task_id, user_id) VALUES (206, {GRANTED});
+    ''')
+
+
+def test_named_grant_is_a_recipient_only_for_himself(cur):
+    _seed_named_grant(cur)
+    # Админ поручает ему, но не коллеге по отделу; граница чужого отдела цела —
+    # СВ линии его не видит (отдел разработки не открыт всем, как IT).
+    assert GRANTED in _recipients(ADMIN, 'admin', None)
+    assert DEV_COLLEAGUE not in _recipients(ADMIN, 'admin', None)
+    assert GRANTED not in _recipients(LINE_SV, 'sv', SZOV)
+    # Сам он, как рядовой IT, ставит задачи админам, себе и людям IT.
+    assert _recipients(GRANTED, 'operator', DEVELOPMENT) == [
+        IT_HEAD, IT_OPERATOR, IT_TRAINEE, ADMIN, IT_UNTRIMMED_OPERATOR, GRANTED,
+    ]
+    # Видит поручённое ему.
+    assert _visible(cur, GRANTED, 'operator') == [206]
+
+
+def test_named_grant_on_boards_and_outside_supervisor_path(cur):
+    _seed_named_grant(cur)
+    candidates = {person['id'] for person in DB.get_task_projects(ADMIN, 'admin')['candidates']}
+    assert GRANTED in candidates
+    assert DEV_COLLEAGUE not in candidates
+    # СВ из его карточки задачу по ссылке не открывает — как у рядового IT.
+    scope = DB._task_assignee_scope_tx(cur, 206)
+    assert scope == [(GRANTED, 'operator', None)]
+    assert DB._task_visible_for_requester('sv', LINE_SV, ADMIN, scope) is False

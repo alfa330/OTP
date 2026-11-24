@@ -39,6 +39,10 @@ test('рядовой IT получает «Задачи», оператор ли
         [person('operator', 'remote_cc'), false, 'удалённый КЦ'],
         [person('operator', 'request_processing_department'), false, 'ООЗ'],
         [person('operator', 'development'), false, 'отдел-проект'],
+        // Поимённый допуск (24.11.2026): пункт — ему, не коллегам по отделу и не в чужом отделе.
+        [person('operator', 'development', 667), true, 'поимённо в отделе разработки'],
+        [person('trainee', 'development', '667'), true, 'поимённо, id строкой'],
+        [person('operator', 'szov', 667), false, 'поимённый допуск не едет в другой отдел'],
         [person('operator', null), false, 'без отдела'],
         // Личный набор «только это» сильнее отдела.
         [person('operator', 'analytik', 540), false, 'личный набор «только Байга»'],
@@ -96,6 +100,8 @@ const { recipientRoleLabel } = new Function(
 test('исполнитель из IT подписан отделом, а не сырой ролью', () => {
     assert.equal(recipientRoleLabel({ role: 'operator', department_code: 'it' }), 'IT');
     assert.equal(recipientRoleLabel({ role: 'trainee', department_code: 'IT' }), 'IT');
+    // Рядовой отдела разработки с поимённым допуском — тоже отделом.
+    assert.equal(recipientRoleLabel({ role: 'operator', department_code: 'development' }), 'Разработка');
     // Отдела нет (исполнитель взят из самой задачи) — не «operator».
     assert.equal(recipientRoleLabel({ role: 'operator' }), 'Сотрудник');
     // Старая учётка бэк-офиса на 'operator' — тем же словом, что коллеги по должности.

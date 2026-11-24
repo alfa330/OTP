@@ -781,6 +781,18 @@ BACK_OFFICE_EMPLOYEE_ROLES = frozenset({'hr_manager', 'accounting_manager', 'mar
 TASK_EMPLOYEE_DEPARTMENT_CODES = frozenset({'it'})
 TASK_EMPLOYEE_ROLES = frozenset({'operator', 'trainee'})
 
+# Тот же допуск рядовому, но поимённо — человеку, а не всему отделу. Ключ — код
+# отдела, внутри users.id; ФИО в публичный репозиторий не кладём. Действует, пока
+# человек числится в этом отделе: переведут — исполнителем его здесь больше не
+# предложат, как и раздел за ним не поедет. Охват и получатели — как у рядового
+# IT (_TASK_EMPLOYEE_SQL ниже).
+#   development 667 — решение владельца 24.11.2026 (сотрудник отдела разработки).
+# Зеркалит одноимённый набор в bot_schedule2.py; совпадение держит
+# tests/test_task_employee_user_grants.py.
+TASK_EMPLOYEE_USER_GRANTS = {
+    'development': frozenset({667}),
+}
+
 # Роли с ЛИЧНЫМ охватом задач: человек видит только то, где он сам постановщик,
 # поручитель или исполнитель, и не принимает работу за других. Набор один на три
 # места (_task_scope_filters, get_task_recipients, get_task_board_people) — до
@@ -803,16 +815,23 @@ TASK_RECIPIENT_ROLES = ('super_admin', 'admin', 'sv', *sorted(BACK_OFFICE_EMPLOY
 # как литералы, отдельными плейсхолдерами их не сделать (список ролей меняет
 # длину, а параметры этого запроса считаются по позициям).
 _TASK_RECIPIENT_ROLES_SQL = ", ".join(f"'{role}'" for role in TASK_RECIPIENT_ROLES)
-# «u — рядовой отдела из TASK_EMPLOYEE_DEPARTMENT_CODES» — по РОЛИ И ОТДЕЛУ сразу:
-# роль у него та же, что у оператора линии, которому задачи не поручают. Стоит в
-# получателях задач, в кандидатах на доску и в составе исполнителей
-# (_task_assignee_scope_tx). Тоже литерал из констант модуля; в выборке, куда он
+# «u — рядовой отдела из TASK_EMPLOYEE_DEPARTMENT_CODES или выданный поимённо
+# (TASK_EMPLOYEE_USER_GRANTS)» — по РОЛИ И ОТДЕЛУ сразу: роль у него та же, что у
+# оператора линии, которому задачи не поручают. Стоит в получателях задач, в
+# кандидатах на доску и в составе исполнителей (_task_assignee_scope_tx). Тоже
+# литерал из констант модуля (id — числами через int); в выборке, куда он
 # подставляется, departments присоединена как d. Код отдела — как его читает
 # гард: без регистра и пробелов по краям.
 _TASK_EMPLOYEE_SQL = (
     "(u.role IN (" + ", ".join(f"'{role}'" for role in sorted(TASK_EMPLOYEE_ROLES)) + ")"
-    " AND LOWER(BTRIM(d.code)) IN ("
-    + ", ".join(f"'{code}'" for code in sorted(TASK_EMPLOYEE_DEPARTMENT_CODES)) + "))"
+    " AND (LOWER(BTRIM(d.code)) IN ("
+    + ", ".join(f"'{code}'" for code in sorted(TASK_EMPLOYEE_DEPARTMENT_CODES)) + ")"
+    + "".join(
+        f" OR (LOWER(BTRIM(d.code)) = '{code}' AND u.id IN ("
+        + ", ".join(str(int(user_id)) for user_id in sorted(user_ids)) + "))"
+        for code, user_ids in sorted(TASK_EMPLOYEE_USER_GRANTS.items()) if user_ids
+    )
+    + "))"
 )
 
 # Отделы, которым задачу ставит ЛЮБОЙ отдел, а не только свой: граница «админы +

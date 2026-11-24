@@ -4209,7 +4209,8 @@ def _back_office_task_employee_role(requester_id, role):
 
     У IT (TASK_EMPLOYEE_DEPARTMENT_CODES) своей должности нет: рядовой там так и
     остаётся 'operator' или 'trainee', и под этой же ролью слой данных его знает
-    (TASK_PERSONAL_SCOPE_ROLES в db/core.py) — она и возвращается.
+    (TASK_PERSONAL_SCOPE_ROLES в db/core.py) — она и возвращается. Так же —
+    рядовому, которому раздел выдан поимённо (TASK_EMPLOYEE_USER_GRANTS).
 
     Отдел и его код — одним запросом: функцию зовёт и колокол каждого рядового,
     а раньше это были два (id отдела, затем сам отдел).
@@ -4225,6 +4226,10 @@ def _back_office_task_employee_role(requester_id, role):
     if own_role is not None:
         return own_role
     if role in ('operator', 'trainee') and code in TASK_EMPLOYEE_DEPARTMENT_CODES:
+        return role
+    # Поимённый допуск рядового (TASK_EMPLOYEE_USER_GRANTS) — под той же ролью и
+    # с тем же личным охватом, что у рядового IT.
+    if role in ('operator', 'trainee') and _task_employee_user_granted(requester_id, code):
         return role
     return None
 
@@ -4288,6 +4293,8 @@ def _task_access_for_people(role_by_id):
         if BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE.get(code) is not None:
             allowed.add(person_id)
         elif role in ('operator', 'trainee') and code in TASK_EMPLOYEE_DEPARTMENT_CODES:
+            allowed.add(person_id)
+        elif role in ('operator', 'trainee') and _task_employee_user_granted(person_id, code):
             allowed.add(person_id)
     return allowed
 
@@ -21724,6 +21731,33 @@ BACK_OFFICE_TASK_EMPLOYEE_ROLES = BACK_OFFICE_EMPLOYEE_ROLES | {'operator', 'tra
 # и сам раздел); совпадение держит tests/test_it_department_tasks_access.py
 # (ItDepartmentMirrorTests).
 TASK_EMPLOYEE_DEPARTMENT_CODES = frozenset({'it'})
+
+# «Задачи» рядовому ('operator', 'trainee') поимённо — человеку, а не всему
+# отделу, как набор выше. Ключ — код отдела, внутри users.id; ФИО в публичный
+# репозиторий не кладём. Допуск действует, пока человек числится в этом отделе
+# рядовым: переведут — раздел за ним не поедет, как и пункт меню
+# (DEPARTMENT_PERSONAL_EXTRA_VIEWS в src/utils/departmentViews.js). Охват тот
+# же, что у рядового IT: свои задачи и доски, в состав которых его добавили.
+#   development 667 — решение владельца 24.11.2026: сотруднику отдела
+#   разработки «открыть доступ для раздела Задачи».
+# Зеркалит одноимённый набор в db/core.py (охват и получатели); совпадение с ним
+# и с пунктом меню держит tests/test_task_employee_user_grants.py.
+TASK_EMPLOYEE_USER_GRANTS = {
+    'development': frozenset({667}),
+}
+
+
+def _task_employee_user_granted(user_id, department_code):
+    """Выданы ли «Задачи» человеку поимённо (TASK_EMPLOYEE_USER_GRANTS).
+
+    department_code — уже приведённый код отдела (strip().lower()), как его
+    читают гард и пакетная проверка. id сравниваем числом: в профиле он бывает
+    строкой.
+    """
+    try:
+        return int(user_id) in TASK_EMPLOYEE_USER_GRANTS.get(department_code, ())
+    except (TypeError, ValueError):
+        return False
 
 
 def _back_office_employee_role(department_id):
@@ -56549,6 +56583,23 @@ DEPARTMENT_ONLY_VIEWS = {
     },
 }
 
+# Разделы СВЕРХ набора отдела — поимённо. Смысл и правила — в
+# src/utils/departmentViews.js (DEPARTMENT_PERSONAL_EXTRA_VIEWS); здесь зеркало
+# ради колокола: добавка дописывается в хвост набора «только это»
+# (DEPARTMENT_ONLY_VIEWS выше), и о добавленном разделе колокол говорит. Зеркало
+# целиком: у отделов без такого набора (ООЗ) добавке здесь дописываться не к
+# чему. Ключ — код отдела, внутри users.id. Тест сверяет оба места.
+DEPARTMENT_PERSONAL_EXTRA_VIEWS = {
+    'request_processing_department': {
+        619: ('work_schedules',),
+        620: ('work_schedules',),
+    },
+    # «Задачи» поимённо — пункт меню к допуску TASK_EMPLOYEE_USER_GRANTS.
+    'development': {
+        667: ('tasks',),
+    },
+}
+
 
 def _personal_views_for(requester_id, role):
     """Набор разделов «только это» человека или None.
@@ -56577,8 +56628,12 @@ def _personal_views_for(requester_id, role):
         _department_id, department_code = db.get_user_department(user_id)
     except Exception:
         return None
-    views = DEPARTMENT_ONLY_VIEWS.get(str(department_code or '').strip().lower(), {}).get(role)
-    return views or None
+    code = str(department_code or '').strip().lower()
+    views = DEPARTMENT_ONLY_VIEWS.get(code, {}).get(role)
+    if not views:
+        return None
+    # Поимённая добавка — в хвост набора, как во фронте (departmentOnlyViewsOf).
+    return tuple(views) + tuple(DEPARTMENT_PERSONAL_EXTRA_VIEWS.get(code, {}).get(user_id, ()))
 
 
 def _notifications_viewer_context(requester_id, requester):

@@ -1352,8 +1352,9 @@ class TasksSectionForBackOfficeTests(unittest.TestCase):
         exec("BACK_OFFICE_TASK_EMPLOYEE_ROLES = "
              "BACK_OFFICE_EMPLOYEE_ROLES | {'operator', 'trainee'}", namespace)
         exec(_assignment_source(BOT_PATH, "TASK_EMPLOYEE_DEPARTMENT_CODES"), namespace)
+        exec(_assignment_source(BOT_PATH, "TASK_EMPLOYEE_USER_GRANTS"), namespace)
         for name in ("_normalize_user_role", "_get_role_level", "_has_min_role",
-                     "_is_admin_role", "_back_office_employee_role",
+                     "_is_admin_role", "_back_office_employee_role", "_task_employee_user_granted",
                      "_back_office_task_employee_role", "_can_access_tasks"):
             exec(_function_source(BOT_PATH, name), namespace)
         return namespace["_can_access_tasks"]
