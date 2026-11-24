@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     ArrowRight, CalendarClock, Check, ChevronDown, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone,
     PhoneIncoming, PhoneMissed, PhoneOutgoing, Play, Repeat, UserCog, X,
@@ -737,11 +737,19 @@ const CardSheet = ({
     // Касание звонка, с которым рекрутер работает сейчас (панель в ленте).
     const [activeCallId, setActiveCallId] = useState(null);
 
+    // Ответ по карточке, которую уже закрыли или сменили другой, отбрасывается: иначе лист показал бы чужие данные, а перенос
+    // даты или звонок, открытые с доски, ушли бы в чужую карточку (разбор 24.11.2026).
+    const shownCardId = useRef(cardId);
+    shownCardId.current = cardId;
     const load = useCallback(() => {
         if (!cardId) return undefined;
         return api.get(`/cards/${cardId}`)
-            .then(({ data: payload }) => { setData(payload); setError(''); })
-            .catch((requestError) => setError(errorOf(requestError, 'Карточка не открылась')));
+            .then(({ data: payload }) => {
+                if (shownCardId.current !== cardId) return;
+                setData(payload);
+                setError('');
+            })
+            .catch((requestError) => { if (shownCardId.current === cardId) setError(errorOf(requestError, 'Карточка не открылась')); });
     }, [api, cardId]);
 
     useEffect(() => {
@@ -797,11 +805,13 @@ const CardSheet = ({
     );
     // Перенос даты визита или обучения — с причиной (владелец 24.11.2026); с доски карточка открывается сразу с окном.
     const reschedulable = canReschedule(card, isOwnerOrLead);
+    // Окно переноса и звонок с доски — только по данным той карточки, что открыли: пока они не пришли, просьба ждёт.
+    const loadedHere = Boolean(data?.card) && Number(data.card.id) === Number(cardId);
     useEffect(() => {
-        if (!initialReschedule || !data?.card) return;
+        if (!initialReschedule || !loadedHere) return;
         onRescheduleConsumed?.();
         if (canReschedule(data.card, (data.actor || []).some((kind) => kind === 'owner' || kind === 'lead'))) setRescheduling(true);
-    }, [initialReschedule, data, onRescheduleConsumed]);
+    }, [initialReschedule, loadedHere, data, onRescheduleConsumed]);
 
     // Сам вызов уже ушёл в iCore Phone (кнопкой здесь или со стола/доски). В ленте появляется касание
     // «ждём исход из телефонии», а панель над лентой — для комментария и следующего контакта.
@@ -818,8 +828,8 @@ const CardSheet = ({
         }
     }, [api, card, changed, toast]);
     useEffect(() => {
-        if (initialCall && data?.card) { onCallConsumed?.(); startCall(); }
-    }, [initialCall, data?.card, onCallConsumed, startCall]);
+        if (initialCall && loadedHere) { onCallConsumed?.(); startCall(); }
+    }, [initialCall, loadedHere, onCallConsumed, startCall]);
 
     const activeTouch = useMemo(() => (data?.touches || []).find((t) => t.id === activeCallId) || null, [data, activeCallId]);
     const activeCall = useMemo(() => (activeTouch?.call_id ? (data?.calls || []).find((c) => c.id === activeTouch.call_id) || null : null), [data, activeTouch]);

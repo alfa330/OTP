@@ -770,7 +770,9 @@ class HiringService:
                 after = _parse_date(payload.get('when'), 'дату обучения')
                 if not after:
                     raise HiringError('HIRING_NEED_TRAINING_DATE', 'Укажите новую дату обучения')
-                fields = {'training_date': after}
+                # Вернули на старт группы — снова «как у группы» (NULL), а не своя дата, равная ему: сдвинет тренер старт —
+                # кандидат поедет вместе с группой (разбор 24.11.2026).
+                fields = {'training_date': None if after == card.get('group_start_date') else after}
             if after == before:
                 raise HiringError('HIRING_SAME_DATE', 'Это та же дата — выберите новую', 409)
             queries.update_card(cursor, card_id, updated_at=now, **fields)

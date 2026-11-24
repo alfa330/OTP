@@ -2173,9 +2173,17 @@ def test_reschedule_office_visit_and_training_with_a_reason(world):
     card = service.reschedule(me, card['id'], {'when': '2026-10-23', 'reason': 'force_majeure'})
     with world['db']._get_cursor() as cur:
         assert queries.card_touches(cur, card['id'])[-1]['body'] == 'Обучение перенесено: 22.10 → 23.10 · Форс-мажор'
+    # Вернули на старт группы — снова «как у группы» (разбор 24.11.2026): сдвинул тренер старт — кандидат едет с группой.
+    card = service.reschedule(me, card['id'], {'when': '2026-10-20', 'reason': 'plans'})
+    assert card['training_date'] is None
+    with world['db']._get_cursor() as cur:
+        assert queries.card_touches(cur, card['id'])[-1]['body'] == 'Обучение перенесено: 23.10 → 20.10 · Поменялись планы'
+        queries.update_group(cur, world['group_id'], NOW, start_date=date(2026, 10, 21))
+        assert queries.board_days(cur, {'lead': True}, LEAD_GRANT, {})['invited_training'] == {date(2026, 10, 21): 1}
     with pytest.raises(HiringError) as caught:                       # тренер группы дату не переносит — он отмечает выход
         service.reschedule(trainer, card['id'], {'when': '2026-10-24', 'reason': 'plans'})
     assert caught.value.code == 'HIRING_FORBIDDEN'
+    card = service.reschedule(me, card['id'], {'when': '2026-10-23', 'reason': 'study'})
     assert service.move(trainer, card['id'], 'on_training', {})['training_started_at'] == date(2026, 10, 23)
     with pytest.raises(HiringError) as caught:                       # вышел на обучение — переносить нечего
         service.reschedule(me, card['id'], {'when': '2026-10-25', 'reason': 'plans'})
@@ -2184,7 +2192,7 @@ def test_reschedule_office_visit_and_training_with_a_reason(world):
     # Возврат в пул снимает и группу, и свою дату обучения: новое приглашение начнётся со старта новой группы.
     again = take_and_touch(world, REC1, '8 705 810 00 02')
     again = service.move(me, again['id'], 'invited_training', {'group_id': world['group_id']})
-    service.reschedule(me, again['id'], {'when': '2026-10-21', 'reason': 'plans'})
+    assert service.reschedule(me, again['id'], {'when': '2026-10-24', 'reason': 'plans'})['training_date'] == date(2026, 10, 24)
     released = service.reassign(lead, again['id'], None, 'Кандидат передумал, вернём в пул')
     assert (released['stage'], released['group_id'], released['training_date']) == ('responses', None, None)
 

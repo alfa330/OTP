@@ -368,6 +368,12 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertIn('reschedulable={canMoveDate(card)}', self.board)
         self.assertIn('setOpenReschedule(Boolean(options?.reschedule));', self.view)
         self.assertIn('initialReschedule={openReschedule}', self.view)
+        # Разбор 24.11.2026: опоздавший ответ по прежней карточке отбрасывается, а перенос и звонок с доски ждут данных именно
+        # открытой карточки — иначе они ушли бы в чужую.
+        self.assertIn('if (shownCardId.current !== cardId) return;', self.sheet)
+        self.assertIn('const loadedHere = Boolean(data?.card) && Number(data.card.id) === Number(cardId);', self.sheet)
+        self.assertIn('if (!initialReschedule || !loadedHere) return;', self.sheet)
+        self.assertIn('if (initialCall && loadedHere) { onCallConsumed?.(); startCall(); }', self.sheet)
 
     def test_chat_handled_button_under_last_candidate_message(self):
         """Владелец 20.11.2026: «Ответ не нужен» — снизу под последним сообщением кандидата, как в «Чатах ОП», а не в
