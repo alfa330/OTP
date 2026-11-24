@@ -166,29 +166,19 @@ export const keepWatchersForProject = (watcherIds, project) => {
 
 /* ─── Люди доски для постановки (владелец 24.11.2026) ───
    «По каждой доске должна быть своя привязка» и «если человека нет в данном
-   проекте, зачем выводить его в исполнителях». Задачу доски поручают её людям:
-   отмеченным исполнителям, а если их не отметили — любому из состава доски.
-   Доска совсем без людей — как раньше, все, кому вы вправе поручать: иначе на неё
-   не поставить ни одной задачи. Сервер держит то же правило
-   (task_projects.py, _task_project_assignable_ids_tx). */
+   проекте, зачем выводить его в исполнителях». Задачу доски поручают только
+   людям из её состава, любого уровня; отдельную отметку исполнителей владелец
+   убрал («отдельно выбирать не нужно»). Доска совсем без людей — как раньше, все,
+   кому вы вправе поручать: иначе на неё не поставить ни одной задачи. Сервер
+   держит то же правило (task_projects.py, _task_project_assignable_ids_tx). */
 
 const byName = (left, right) => String(left?.name || '').localeCompare(String(right?.name || ''), 'ru');
 
-/** Отмеченные исполнители доски по имени. */
-export const projectExecutors = (project) => (Array.isArray(project?.members) ? project.members : [])
-  .filter((person) => person?.is_executor && Number(person?.id) > 0)
+/** Кому ставят задачи доски: её состав по имени. Пусто — у доски нет людей. */
+export const boardAssignees = (project) => (Array.isArray(project?.members) ? project.members : [])
+  .filter((person) => Number(person?.id) > 0)
   .slice()
   .sort(byName);
-
-/** Кому ставят задачи доски: исполнители, а без отметок — весь состав. Пусто — у доски нет людей. */
-export const boardAssignees = (project) => {
-  const executors = projectExecutors(project);
-  if (executors.length) return executors;
-  return (Array.isArray(project?.members) ? project.members : [])
-    .filter((person) => Number(person?.id) > 0)
-    .slice()
-    .sort(byName);
-};
 
 /** Поручить задачу доски можно только её людям. */
 export const hasBoardAssignees = (project) => boardAssignees(project).length > 0;

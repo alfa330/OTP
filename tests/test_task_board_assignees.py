@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """Люди доски (владелец 24.11.2026): у каждой доски своя привязка исполнителей.
 
-«По каждой доске должна быть своя привязка: если там два человека как исполнители,
-при постановке задачи можно выбрать только тех, кто есть в проекте как исполнитель»,
-«выбрать всех либо конкретных людей» — всех одной задачей, без потолка в десять, — и
-«если человека нет в данном проекте, зачем выводить его в исполнителях»: люди доски —
-отмеченные исполнители, а без отметок весь состав; доска без людей — как раньше.
+«По каждой доске должна быть своя привязка», «выбрать всех либо конкретных людей» —
+всех одной задачей, без потолка в десять, — и «если человека нет в данном проекте,
+зачем выводить его в исполнителях»: люди доски — весь её состав (отдельную отметку
+исполнителей владелец убрал в тот же день); доска без людей — как раньше.
 
 Правила гоняем исполнением, без базы: настоящие методы Database (AST'ом из склейки,
 как в test_task_projects.py) на подставленном курсоре, настоящая сверка «кому вправе
-поручить» и настоящая рассылка из tasks/routes.py. Что значит SQL — исполнители
-доски, отметка в составе — в tests/test_task_projects_postgres.py.
+поручить» и настоящая рассылка из tasks/routes.py. Что значит SQL — люди доски и
+сверка правила — в tests/test_task_board_assignees_postgres.py.
 """
 import ast
 import concurrent.futures
@@ -29,7 +28,6 @@ ROOT = Path(__file__).resolve().parents[1]
 DATABASE_SOURCE = source_cache.database_flat_path().read_text(encoding="utf-8-sig")
 ROUTES_PATH = ROOT / "tasks" / "routes.py"
 ROUTES_SOURCE = ROUTES_PATH.read_text(encoding="utf-8")
-SCHEMA_SOURCE = (ROOT / "db" / "schema.py").read_text(encoding="utf-8")
 TASKS_VIEW = (ROOT / "src" / "components" / "tasks" / "TasksView.jsx").read_text(encoding="utf-8")
 PROJECTS_SHEET = (ROOT / "src" / "components" / "tasks" / "TaskProjectsSheet.jsx").read_text(encoding="utf-8")
 
@@ -45,10 +43,9 @@ NAMES = [
     "get_task_extra_assignable_ids",
 ]
 
-# Люди выдуманы: 1 — постановщик, 2..19 — исполнители доски 10 (и 60 — в её составе без
-# отметки), 70..81 — состав доски 20 без отметок, 50+ — посторонние. Доска 30 — без людей.
+# Люди выдуманы: 1 — постановщик, 2..19 — состав доски 10, 70..81 — состав доски 20,
+# 50+ — посторонние. Доска 30 — без людей.
 EXECUTORS = set(range(2, 20))
-ROSTER_ONLY = 60
 TEAM_20 = set(range(70, 82))
 OUTSIDER, OTHER = 50, 51
 
@@ -103,9 +100,9 @@ FakeDatabase = _build_database()
 
 
 class _ExecutorCursor:
-    """Курсор поверх «состава доски»: люди доски с отметками, доступ к ней, состав задачи.
+    """Курсор поверх «состава доски»: люди доски, доступ к ней, состав задачи.
 
-    members_by_project: {доска: {человек: отмечен ли исполнителем}}."""
+    members_by_project: {доска: {человек, ...}}."""
 
     def __init__(self, members_by_project=None, task_projects_by_id=None, access=None, crews=None,
                  archived=()):
@@ -120,9 +117,8 @@ class _ExecutorCursor:
     def execute(self, query, params=None):
         sql = " ".join(query.split())
         self.queries.append((sql, params))
-        if sql.startswith("SELECT pm.user_id, pm.is_executor FROM task_project_members pm"):
-            members = self.members_by_project.get(params[0], {})
-            self._rows = [(person_id, flag) for person_id, flag in sorted(members.items())]
+        if sql.startswith("SELECT pm.user_id FROM task_project_members pm"):
+            self._rows = [(person_id,) for person_id in sorted(self.members_by_project.get(params[0], ()))]
         elif sql.startswith("SELECT project_id FROM tasks"):
             project_id = self.task_projects_by_id.get(params[0])
             self._rows = [(project_id,)] if params[0] in self.task_projects_by_id else []
@@ -148,25 +144,13 @@ class AssigneeRuleTests(unittest.TestCase):
 
     def setUp(self):
         self.db = FakeDatabase()
-        # Доска 10 — с исполнителями (и 60 без отметки), 20 — состав без отметок, 30 — без людей.
-        self.cursor = _ExecutorCursor({
-            10: {**{person_id: True for person_id in EXECUTORS}, ROSTER_ONLY: False},
-            20: {person_id: False for person_id in TEAM_20},
-            30: {},
-        })
+        # Доски 10 и 20 — со своим составом, 30 — без людей.
+        self.cursor = _ExecutorCursor({10: set(EXECUTORS), 20: set(TEAM_20), 30: set()})
 
     def _check(self, project_id, ids, current=(), recheck_all=False):
         self.db._require_task_project_assignees_tx(self.cursor, project_id, ids, current, recheck_all=recheck_all)
 
-    def test_board_with_executors_takes_only_them(self):
-        self._check(10, [2, 3])
-        with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
-            self._check(10, [2, OUTSIDER])
-        # В составе, но не отмечен исполнителем — тоже нельзя.
-        with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
-            self._check(10, [2, ROSTER_ONLY])
-
-    def test_board_without_marks_takes_its_roster(self):
+    def test_board_takes_only_its_roster(self):
         """«Если человека нет в данном проекте, зачем выводить его в исполнителях»."""
         self._check(20, [70, 71])
         with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
@@ -204,7 +188,7 @@ class AssigneeRuleTests(unittest.TestCase):
 
     def test_task_for_everyone_keeps_editing_after_the_board_shrinks(self):
         everyone = sorted(EXECUTORS)
-        self.cursor.members_by_project[10] = {2: True, 3: True}
+        self.cursor.members_by_project[10] = {2, 3}
         self._check(10, everyone, current=everyone)           # правка без смены состава
         self._check(10, everyone[:-1], current=everyone)      # убрали одного
         with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
@@ -227,7 +211,7 @@ class AssigneeRuleTests(unittest.TestCase):
     def test_board_people_query_skips_fired_and_needs_a_board(self):
         self.assertEqual(self.db._task_project_assignable_ids_tx(self.cursor, None), set())
         self.assertEqual(self.cursor.queries, [])
-        # Отмеченные исполнители — только они; без отметок — весь состав; без людей — пусто.
+        # Весь состав доски; без людей — пусто.
         self.assertEqual(self.db._task_project_assignable_ids_tx(self.cursor, 10), EXECUTORS)
         self.assertEqual(self.db._task_project_assignable_ids_tx(self.cursor, 20), TEAM_20)
         self.assertEqual(self.db._task_project_assignable_ids_tx(self.cursor, 30), set())
@@ -263,7 +247,7 @@ class ExtraAssignableTests(unittest.TestCase):
         return db
 
     def test_board_executors_only_for_who_may_post_there(self):
-        cursor = _ExecutorCursor({10: {2: True, 3: True, 9: False}}, access={(10, 40): "board"})
+        cursor = _ExecutorCursor({10: {2, 3}}, access={(10, 40): "board"})
         db = self._db(cursor)
         self.assertEqual(db.get_task_extra_assignable_ids(40, "sv", project_id=10), {2, 3})
         # Не в составе доски — обхода нет; админ раздела ставит на любую доску.
@@ -275,7 +259,7 @@ class ExtraAssignableTests(unittest.TestCase):
 
     def test_edit_keeps_the_current_crew_and_takes_the_task_board(self):
         """Снятый с исполнителей доски человек правку задачи не запирает (находка разбора)."""
-        cursor = _ExecutorCursor({10: {2: True}}, task_projects_by_id={77: 10, 78: None},
+        cursor = _ExecutorCursor({10: {2}}, task_projects_by_id={77: 10, 78: None},
                                  access={(10, 40): "board"}, crews={77: [9, 2], 78: [5]})
         db = self._db(cursor)
         self.assertEqual(db.get_task_extra_assignable_ids(40, "sv", task_id=77), {9, 2})
@@ -285,22 +269,9 @@ class ExtraAssignableTests(unittest.TestCase):
 
 
 class ModuleTests(unittest.TestCase):
-    def test_flags_only_where_sent(self):
-        """Вкладка, открытая до отметки, шлёт состав без неё — исполнителей она не снимает."""
-        flags = task_projects.member_executor_flags([
-            {"user_id": 5, "access_level": "member", "is_executor": True},
-            {"user_id": 6, "access_level": "board"},
-            {"user_id": 7, "is_executor": "0"},
-            {"id": 8, "is_executor": 1},
-            9,
-            {"user_id": 5, "is_executor": False},
-        ])
-        self.assertEqual(flags, {5: False, 7: False, 8: True})
-        self.assertEqual(task_projects.member_executor_flags(None), {})
-
     def test_refusal_has_a_russian_text(self):
         text = task_projects.error_message("ASSIGNEE_NOT_PROJECT_EXECUTOR")
-        self.assertIn("исполнители", text)
+        self.assertIn("состава", text)
 
 
 def _outside_scope_function():
@@ -434,9 +405,6 @@ class FanoutTests(unittest.TestCase):
 class WiringTests(unittest.TestCase):
     """Проводка, которую исполнением здесь не проверить: маркеры на своих местах."""
 
-    def test_schema_adds_the_flag_idempotently(self):
-        self.assertIn("ADD COLUMN IF NOT EXISTS is_executor BOOLEAN NOT NULL DEFAULT FALSE", SCHEMA_SOURCE)
-
     def test_create_and_edit_run_the_rule(self):
         create = DATABASE_SOURCE[DATABASE_SOURCE.index("    def create_task(\n"):]
         create = create[:create.index("\n    def ", 10)]
@@ -455,11 +423,10 @@ class WiringTests(unittest.TestCase):
         self.assertIn("project_id=data.get('project_id') if has_project else None,", ROUTES_SOURCE)
         self.assertIn("_send_same_task_message(\n                        _send_telegram_text_message,", ROUTES_SOURCE)
 
-    def test_board_list_carries_the_flag_and_settings_save_it(self):
-        self.assertIn('"is_executor": bool(row[8]),', DATABASE_SOURCE)
-        self.assertIn("task_projects.member_executor_flags(members)", DATABASE_SOURCE)
-        self.assertIn("is_executor: Boolean(person.is_executor),", PROJECTS_SHEET)
-        self.assertIn("<span className={iosGroupLabel}>Исполнители доски</span>", PROJECTS_SHEET)
+    def test_board_list_carries_the_department_code_and_the_rule_is_explained(self):
+        # Код отдела людей доски — маркетолога для «Продакшна» форма узнаёт и вне получателей.
+        self.assertIn('"department_code": row[8],', DATABASE_SOURCE)
+        self.assertIn("Поручить задачу доски можно только людям из её состава.", PROJECTS_SHEET)
 
     def test_composer_offers_everyone_or_specific_people(self):
         start = TASKS_VIEW.index("const TaskComposerForm = ({")

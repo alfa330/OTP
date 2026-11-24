@@ -494,32 +494,30 @@ class TasksMixin:
         """Люди доски — кому ставят её задачи (владелец 24.11.2026).
 
         «По каждой доске своя привязка» и «если человека нет в данном проекте, зачем
-        выводить его в исполнителях»: отмеченные исполнители доски, а если их не
-        отметили — весь её состав. Уволенных не считаем: в форме их нет. Пусто — у
-        доски нет людей вовсе (или задача без проекта): задачу поручают как раньше,
-        по списку получателей, иначе на доску без состава не поставить ни одной задачи.
+        выводить его в исполнителях»: весь состав доски, любого уровня. Отдельную
+        отметку исполнителей владелец убрал («отдельно выбирать не нужно»). Уволенных
+        не считаем: в форме их нет. Пусто — у доски нет людей вовсе (или задача без
+        проекта): задачу поручают как раньше, по списку получателей, иначе на доску
+        без состава не поставить ни одной задачи.
         """
         if project_id is None:
             return set()
         cursor.execute("""
-            SELECT pm.user_id, pm.is_executor
+            SELECT pm.user_id
               FROM task_project_members pm
               JOIN users u ON u.id = pm.user_id
              WHERE pm.project_id = %s
                AND COALESCE(u.status, 'working') <> 'fired'
         """, (int(project_id),))
-        rows = cursor.fetchall()
-        executors = {int(row[0]) for row in rows if row[1]}
-        return executors or {int(row[0]) for row in rows}
+        return {int(row[0]) for row in cursor.fetchall()}
 
     def _require_task_project_assignees_tx(self, cursor, project_id, assignee_ids,
                                            current_ids=(), recheck_all=False):
         """Кого можно сделать исполнителем задачи доски и сколько их бывает.
 
         Два правила владельца от 24.11.2026, один поход в базу:
-          * у доски есть люди — новым в составе может быть только человек этой
-            доски: отмеченный исполнитель, а без отметок — любой из состава
-            (ASSIGNEE_NOT_PROJECT_EXECUTOR);
+          * у доски есть люди — новым в составе может быть только человек из
+            состава этой доски (ASSIGNEE_NOT_PROJECT_EXECUTOR);
           * больше TASK_MAX_ASSIGNEES — только когда каждый новый в составе — из
             людей доски: так задачу ставят всем разом («Все»), а рассылку на кого
             попало потолок по-прежнему не пускает.
@@ -549,8 +547,8 @@ class TasksMixin:
             уже в составе: человека могли перевести в другой отдел или снять с
             исполнителей доски, а правка темы или срока не должна запираться
             (то же правило в _require_task_project_assignees_tx);
-          * люди доски (исполнители, а без отметок — состав) — только если
-            смотрящий вправе ставить задачи на эту доску (_require_task_project_tx:
+          * люди доски (её состав) — только если смотрящий вправе ставить задачи
+            на эту доску (_require_task_project_tx:
             доска не в архиве, он в составе или админ раздела). Снятый с доски
             постановщик обходом больше не пользуется.
         Доска — project_id, а без него — доска задачи task_id (правка без переноса).
@@ -659,7 +657,7 @@ class TasksMixin:
             if member_project_ids:
                 cursor.execute("""
                     SELECT pm.project_id, u.id, u.name, u.role, pm.access_level, d.name,
-                           u.avatar_bucket, u.avatar_blob_path, pm.is_executor, d.code
+                           u.avatar_bucket, u.avatar_blob_path, d.code
                       FROM task_project_members pm
                       JOIN users u ON u.id = pm.user_id
                       LEFT JOIN departments d ON d.id = u.department_id
@@ -678,12 +676,10 @@ class TasksMixin:
                         "department": row[5],
                         "avatar_bucket": row[6],
                         "avatar_blob_path": row[7],
-                        # Исполнитель доски: форма задачи предлагает в исполнители
-                        # только их, если у доски они отмечены (24.11.2026).
-                        "is_executor": bool(row[8]),
                         # Код отдела — как у получателей: по нему форма узнаёт
-                        # маркетолога для «Продакшна» и подписывает рядового IT.
-                        "department_code": row[9],
+                        # маркетолога для «Продакшна» и подписывает рядового IT
+                        # (исполнителями задачи доски форма предлагает её состав).
+                        "department_code": row[8],
                     })
 
             # Кого админ может поставить на доску: всех, кто ходит в «Задачи», — и
@@ -765,20 +761,6 @@ class TasksMixin:
                 ON CONFLICT (project_id, user_id) DO UPDATE
                     SET access_level = EXCLUDED.access_level
             """, (int(project_id), added_by, user_ids, [level for _person_id, level in ordered]))
-            # Отметка «исполнитель доски» — только у строк, где её прислали: вкладка,
-            # открытая до её появления, шлёт состав без неё и исполнителей не снимает.
-            # Новый человек без отметки — не исполнитель (DEFAULT FALSE).
-            flags = task_projects.member_executor_flags(members)
-            flagged = [person_id for person_id in user_ids if person_id in flags]
-            if flagged:
-                cursor.execute("""
-                    UPDATE task_project_members pm
-                       SET is_executor = src.is_executor
-                      FROM unnest(%s::int[], %s::boolean[]) AS src(user_id, is_executor)
-                     WHERE pm.project_id = %s
-                       AND pm.user_id = src.user_id
-                       AND pm.is_executor IS DISTINCT FROM src.is_executor
-                """, (flagged, [flags[person_id] for person_id in flagged], int(project_id)))
         return ordered
 
     def create_task_project(self, requester_id, requester_role, code, name,
