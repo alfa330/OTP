@@ -308,7 +308,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
                               is_super_admin_role=None, is_supervisor_role=None,
                               department_code_of=None, service=None, tez_leads_mirror=None,
                               is_global_admin=None, excel_text_warning=None, informer_service=None,
-                              qr_locked=None):
+                              qr_locked=None, qr_granted=None):
     """resolve_requester() -> (requester_id, requester_row, error|None);
     is_admin_role(role) -> bool; headed_department_ids(requester_id) -> iterable[int];
     is_global_admin(requester_id, role) -> bool — администратор всей компании, а не глава отдела
@@ -328,7 +328,10 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     informer_service — informer.service.InformerService: вкладка «Автоинформатор» (не передан —
     её ручки отвечают 503);
     qr_locked(user_id) -> bool — сессия запроса не подтверждена QR, а роль его требует (как у вики
-    и обращений): телефон автообзвона Тез тогда закрыт (_operator_data); не передан — замка нет."""
+    и обращений): телефон автообзвона Тез тогда закрыт (_operator_data); не передан — замка нет;
+    qr_granted(user_id) -> bool | None — сессия запроса (телефона) подтверждена сканом QR руководителя: True —
+    телефону удалённого КЦ звонки прямые, False — нет, но роль QR показывает (телефону кнопка QR), None — роль без
+    QR (_qr_extra, владелец 24.11.2026); не передан — у удалённого КЦ все звонки через АТС, кнопки нет."""
     bp = Blueprint('dial_list', __name__)
     svc = service or DialListService(db)
     bp.service = svc  # для тестов и для /api/operator/sip_settings
@@ -369,6 +372,21 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             message = TEZ_QR_LOCKED if phone_shows_qr_lock(_phone_version()) else TEZ_QR_LOCKED_UPDATE
             raise DialListError(message, 403, kind=QR_LOCKED_KIND)
         return user_id, requester
+
+    def _qr_extra(user_id):
+        """Прямой звонок удалённого КЦ по QR (владелец 24.11.2026: «если оператору отсканируют QR, его звонки
+        переводятся на прямые… а если не отсканировали — как обычно»): сервису {"qr_granted": True} — сессию
+        телефона подтвердил скан руководителя, решает он (dials_direct: телефон 3.22.66+, рубильник); False — не
+        подтверждена, но роль QR показывает (телефону кнопка QR). Роль без QR (СВ, админ), Тез (его прямой звонок
+        от QR не зависит) и сбой проверки — пусто: вызов сервиса прежний, звонок через АТС, кнопки нет."""
+        if qr_granted is None or _operator_is_tez(user_id):
+            return {}
+        try:
+            granted = qr_granted(user_id)
+        except Exception:
+            log.exception("dial_list: QR сессии оператора %s не проверен — звонок через АТС", user_id)
+            return {}
+        return {} if granted is None else {"qr_granted": bool(granted)}
 
     def _supervisor_department_code(requester_id, role):
         """Код отдела, где числится запросивший, — только у супервайзера (правило —
@@ -491,7 +509,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @_guard
     def operator_state():
         user_id, _ = _operator_data()
-        return jsonify({"status": "success", **svc.get_state(user_id, phone_version=_phone_version())}), 200
+        return jsonify({"status": "success", **svc.get_state(user_id, phone_version=_phone_version(),
+                                                             **_qr_extra(user_id))}), 200
 
     @bp.route('/api/operator/dial_list/mode', methods=['POST', 'OPTIONS'])
     @require_api_key
@@ -557,7 +576,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         # Ответ — то же состояние, что у GET: версия телефона нужна и здесь (ring_timeout_sec).
         user_id, _ = _operator_data()
         return jsonify({"status": "success",
-                        **svc.issue_next_portion(user_id, phone_version=_phone_version())}), 200
+                        **svc.issue_next_portion(user_id, phone_version=_phone_version(),
+                                                 **_qr_extra(user_id))}), 200
 
     @bp.route('/api/operator/dial_list/items/<assignment_id>/call', methods=['POST', 'OPTIONS'])
     @require_api_key
@@ -572,9 +592,11 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         if 'auto' in payload or 'status' in payload:
             extra = {"auto": payload.get('auto') is True, "operator_status": payload.get('status')}
         # Прямой звонок Тез (06.11.2026) — только телефону, который умеет набирать сам (версия в заголовке).
+        # Удалённому КЦ (24.11.2026) — ещё и только сессии, подтверждённой сканом QR (_qr_extra).
         version = _phone_version()
         if version:
             extra["phone_version"] = version
+        extra.update(_qr_extra(user_id))
         return jsonify({"status": "success", "attempt": svc.start_call(user_id, assignment_id, **extra)}), 200
 
     @bp.route('/api/operator/dial_list/auto/next', methods=['POST', 'OPTIONS'])
@@ -620,7 +642,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         списке оператора; в ответе — состояние и assignment_id строки, по которой телефон звонит."""
         user_id, _ = _operator_data()
         return jsonify({"status": "success",
-                        **svc.recall_lead(user_id, lead_id, phone_version=_phone_version())}), 200
+                        **svc.recall_lead(user_id, lead_id, phone_version=_phone_version(),
+                                          **_qr_extra(user_id))}), 200
 
     @bp.route('/api/operator/dial_list/leads/<lead_id>/sign_check', methods=['POST', 'OPTIONS'])
     @require_api_key

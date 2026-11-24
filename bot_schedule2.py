@@ -55892,6 +55892,22 @@ def _dial_list_qr_locked(user_id):
         return True
 
 
+def _dial_list_qr_granted(user_id):
+    """Сессия запроса — сессия самого телефона — подтверждена сканом QR руководителя (тот же флаг, что
+    открывает вики и обращения; кнопка «Открыть доступ» в «Сессиях» — тоже): удалённому КЦ звонки тогда
+    прямые (владелец 24.11.2026). True/False — для ролей, которым QR выдаётся (SENSITIVE_QR_GATED_ROLES, как
+    у замка Тез и /api/sensitive-access/qr/request); None — роль без QR (СВ, админ): QR ей не выдаётся вовсе,
+    кнопки в телефоне нет, звонки через АТС. Сбой проверки — None: звонок пойдёт через АТС, как всегда."""
+    try:
+        user = db.get_user(id=int(user_id))
+        if not user or _normalize_user_role(user[3]) not in SENSITIVE_QR_GATED_ROLES:
+            return None
+        return bool(_sensitive_access_granted_for_user(int(user_id)))
+    except Exception:
+        logging.exception("dial_list: QR сессии %s не проверен — звонок через АТС", user_id)
+        return None
+
+
 try:
     from dial_list.routes import build_dial_list_blueprint  # noqa: E402
     from dial_list.service import DialListService  # noqa: E402
@@ -55922,6 +55938,8 @@ try:
         # Телефон автообзвона Тез закрыт до QR (владелец 06.11.2026): номера и база водителей — только
         # сессии телефона, которую подтвердил руководитель сканом в «QR доступ».
         qr_locked=_dial_list_qr_locked,
+        # Удалённый КЦ (24.11.2026): сессии телефона, подтверждённой сканом QR, звонки прямые.
+        qr_granted=_dial_list_qr_granted,
         # Перевод отдела между разделами (профиль) — только администратору компании: у глав
         # отделов роль админская, но зона — свой отдел (_is_global_admin_requester).
         is_global_admin=lambda requester_id, role: _is_global_admin_requester(role, requester_id),

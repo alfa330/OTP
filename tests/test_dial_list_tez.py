@@ -18,7 +18,7 @@ TEZ, RCC = 560, 1954
 
 
 def _client(svc, role='operator', heads=(), supervisor_code=None, mirror=None, user_id=7, global_admin=None,
-            qr_locked=None):
+            qr_locked=None, qr_granted=None):
     import flask
     requester = (user_id, 'Сотрудник', 'x', role, None, None, None, f'user{user_id}')
     bp = dial_routes.build_dial_list_blueprint(
@@ -28,7 +28,7 @@ def _client(svc, role='operator', heads=(), supervisor_code=None, mirror=None, u
         is_supervisor_role=lambda r: r == 'sv', department_code_of=lambda uid: supervisor_code,
         service=svc, tez_leads_mirror=mirror,
         is_global_admin=(lambda rid, r: global_admin) if global_admin is not None else None,
-        qr_locked=qr_locked)
+        qr_locked=qr_locked, qr_granted=qr_granted)
     app = flask.Flask(f'dial_list_tez_{id(svc)}')
     app.register_blueprint(bp)
     return app.test_client()
@@ -248,6 +248,76 @@ class OperatorRoutesTests(unittest.TestCase):
         self.assertIn('not in SENSITIVE_QR_GATED_ROLES', lock)
         self.assertIn('return not _sensitive_access_granted_for_user(', lock)
         self.assertIn('return True', lock)   # сбой проверки — закрыт
+
+    def test_remote_cc_qr_session_flag_reaches_the_service(self):
+        """Владелец 24.11.2026: удалённому КЦ звонки прямые, если сессию телефона подтвердил скан QR. Флаг сессии
+        уходит сервису как есть (True — прямые, False — кнопка QR); роль без QR (None) и сбой проверки — вызов
+        прежний, без флага (через АТС, кнопки нет); Тез его не спрашивает вовсе: прямой звонок у Тез от QR не
+        зависит."""
+        class _QrSvc(_Svc):
+            def get_state(self, user_id, phone_version=None, **extra):
+                self.calls.append(('state', user_id, extra))
+                return {"enabled": True, "portion": None}
+
+            def issue_next_portion(self, user_id, phone_version=None, **extra):
+                self.calls.append(('next', user_id, extra))
+                return {"enabled": True, "portion": None}
+
+            def recall_lead(self, user_id, lead_id, phone_version=None, **extra):
+                self.calls.append(('recall', lead_id, extra))
+                return {"assignment_id": "asg-2", "enabled": True}
+
+        asked = []
+
+        def granted(value):
+            def check(uid):
+                asked.append(uid)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+            return check
+
+        def flags(svc):
+            return [c[-1] for c in svc.calls if c[0] in ('state', 'next', 'recall', 'call')]
+
+        # Удалённый КЦ (оператор 8), сессия подтверждена — флаг во всех четырёх ручках.
+        svc = _QrSvc()
+        client = _client(svc, user_id=8, qr_granted=granted(True))
+        self.assertEqual(client.get('/api/operator/dial_list').status_code, 200)
+        self.assertEqual(client.post('/api/operator/dial_list/next', json={}).status_code, 200)
+        self.assertEqual(client.post('/api/operator/dial_list/leads/lead-1/recall', json={}).status_code, 200)
+        self.assertEqual(client.post('/api/operator/dial_list/items/asg-1/call', json={},
+                                     headers={'X-ICore-Phone-Version': '3.22.66'}).status_code, 200)
+        self.assertEqual(flags(svc), [{"qr_granted": True}] * 3 + [{"phone_version": '3.22.66', "qr_granted": True}])
+        self.assertEqual(asked, [8, 8, 8, 8])
+        # Не подтверждена — флаг False (телефону кнопка QR); роль без QR или проверка упала — вызов прежний.
+        for value, expected in ((False, {"qr_granted": False}), (None, {}), (RuntimeError('база'), {})):
+            svc = _QrSvc()
+            client = _client(svc, user_id=8, qr_granted=granted(value))
+            self.assertEqual(client.get('/api/operator/dial_list').status_code, 200, value)
+            self.assertEqual(client.post('/api/operator/dial_list/items/asg-1/call', json={}).status_code, 200, value)
+            self.assertEqual(flags(svc), [expected, expected], value)
+        # Тез: флаг сессии не спрашиваем — ни в состоянии, ни у звонка.
+        asked.clear()
+        svc = _QrSvc()
+        client = _client(svc, user_id=7, qr_granted=granted(True))
+        client.get('/api/operator/dial_list')
+        client.post('/api/operator/dial_list/items/asg-1/call', json={})
+        self.assertEqual((asked, flags(svc)), ([], [{}, {}]))
+
+    def test_qr_granted_helper_is_defined_before_the_blueprint_is_built(self):
+        """Флаг сессии для удалённого КЦ — функция монолита выше блюпринта (иначе NameError и раздел обзвона не
+        подключился бы вовсе); роль без QR (тот же список, что у замка Тез) и сбой — None: через АТС, кнопки нет."""
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bot_schedule2.py'),
+                   encoding='utf-8').read()
+        head = 'def _dial_list_qr_granted(user_id):'
+        self.assertLess(src.index(head), src.index('_dial_list_bp = build_dial_list_blueprint('))
+        self.assertIn('qr_granted=_dial_list_qr_granted,', src)
+        body = src[src.index(head):src.index('\ntry:\n    from dial_list.routes', src.index(head))]
+        self.assertIn('return bool(_sensitive_access_granted_for_user(int(user_id)))', body)
+        self.assertIn('not in SENSITIVE_QR_GATED_ROLES:\n            return None', body)
+        self.assertNotIn('return False', body)
+        self.assertEqual(body.count('return None'), 2)   # роль без QR и сбой проверки — через АТС
 
     def test_route_call_reaches_the_service_without_the_qr_lock(self):
         """#451: звонок с префиксом — ручной набор, а не данные обзвона: замок до QR его не держит, prefix и
@@ -576,6 +646,31 @@ class RulesTests(unittest.TestCase):
         self.assertEqual([disp(False, 503), disp(False, '503'), disp(True, 503), disp(False, 502), disp(False, 500)],
                          ['CONGESTION', 'CONGESTION', 'ANSWER', 'FAILED', 'FAILED'])
         self.assertIn('CONGESTION', dial_service.NETWORK_REFUSAL_DISPOSITIONS)
+
+    def test_remote_cc_direct_call_only_with_qr(self):
+        """Удалённый КЦ (владелец 24.11.2026): прямой звонок — только сессии телефона, подтверждённой QR, на
+        телефоне 3.22.66+ и при включённом рубильнике; Тез — как раньше, от QR и рубильника не зависит."""
+        from unittest import mock
+        dials = dial_service.dials_direct
+        offered = dial_service.remote_direct_offered
+        with mock.patch.dict(os.environ, {dial_service.REMOTE_DIRECT_QR_ENV: ''}):
+            self.assertEqual([dials(True, v, qr) for v, qr in (('3.22.45', True), ('3.22.46', False), ('3.22.46', True))],
+                             [False, True, True])
+            self.assertEqual([dials(False, v, qr) for v, qr in ((None, True), ('3.22.65', True), ('3.22.66', False),
+                                                                 ('3.22.66', None), ('3.22.66', True), ('3.22.66.1', True),
+                                                                 ('3.23', True), ('мусор', True))],
+                             [False, False, False, False, True, True, True, False])
+            self.assertEqual([dial_service.qr_state_kw(v) for v in (None, False, True)],
+                             [{}, {"qr_granted": False}, {"qr_granted": True}])
+            self.assertEqual([offered(False, '3.22.65'), offered(False, '3.22.66'), offered(True, '3.22.66')],
+                             [False, True, False])
+        for off in ('0', 'false', 'no', 'off', ' OFF '):
+            with mock.patch.dict(os.environ, {dial_service.REMOTE_DIRECT_QR_ENV: off}):
+                self.assertFalse(dials(False, '3.22.66', True), off)
+                self.assertFalse(offered(False, '3.22.66'), off)
+                self.assertTrue(dials(True, '3.22.66', False), off)   # Тез рубильник не трогает
+        with mock.patch.dict(os.environ, {dial_service.REMOTE_DIRECT_QR_ENV: '1'}):
+            self.assertTrue(dials(False, '3.22.66', True))
 
     def test_whatsapp_file_type_is_read_from_the_bytes(self):
         kind = dial_service.wa_media_type

@@ -1165,6 +1165,98 @@ def test_direct_call_is_only_for_tez(env):
     assert "dial" not in attempt and attempt["general_call_id"]
 
 
+REMOTE_DIRECT = '3.22.66'
+
+
+def test_remote_cc_dials_directly_only_when_qr_confirmed_and_never_shows_the_number(env, monkeypatch):
+    """Владелец 24.11.2026: «если оператору отсканируют QR, его звонки переводятся на прямые звонки именно в
+    удалённом КЦ, а если не отсканировали — как обычно». Сессия телефона подтверждена QR и телефон 3.22.66+ —
+    «Позвонить» отдаёт номер только для набора: ни в строках пачки, ни у идущего звонка, ни для показа его нет.
+    Исход — по тому, что видел телефон; вебхук кабинета удалённого КЦ дописывает generalCallID — по нему
+    запись разговора (ИИ-оценка удалённого КЦ берёт её отсюда). Без QR, на старом телефоне и с выключенным
+    рубильником — через АТС, как всегда."""
+    from werkzeug.datastructures import ImmutableMultiDict
+    svc = env.svc
+    env.enroll()
+    svc.operator_context = lambda uid: {
+        "user_id": int(uid), "name": 'Айгерим', "department_id": RCC, "internal_number": '601',
+        "settings": svc.department_settings(RCC)}
+    period = svc.department_settings(RCC)["_period"]
+    for i in range(1, 5):
+        env.q("INSERT INTO dial_list_leads (department_id, phone_norm, full_name, iin, period) "
+              "VALUES (%s, %s, %s, %s, %s)", (RCC, f'7702000000{i}', f'Водитель РКЦ {i}', f'90010130000{i}', period))
+
+    def phone_of(item):
+        return env.one("SELECT phone_norm FROM dial_list_leads WHERE id = %s", (item["lead_id"],))[0]
+
+    def no_numbers(payload):
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+        return '7702000000' not in text and '7701999999' not in text
+
+    # Роль без QR (СВ, админ — qr_granted None): ни кнопки, ни прямого звонка.
+    assert not {"qr_direct", "direct_dial"} & set(svc.get_state(OPERATOR, phone_version=REMOTE_DIRECT))
+    # Телефон 3.22.66 без QR: кнопка QR (qr_direct.granted false), звонок через АТС, номеров нет.
+    state = svc.issue_next_portion(OPERATOR, phone_version=REMOTE_DIRECT, qr_granted=False)
+    assert state["qr_direct"] == {"granted": False} and state["direct_dial"] is False
+    assert "line_guard" in state and no_numbers(state)
+    # В пачке и водитель удалённого КЦ из окружения (77019999999) — звоним своим четырём.
+    items = [i for i in state["portion"]["items"] if phone_of(i).startswith('7702')]
+    assert len(items) == 4
+    first = svc.start_call(OPERATOR, items[0]["assignment_id"], phone_version=REMOTE_DIRECT, qr_granted=False)
+    assert first["general_call_id"] and "dial" not in first and no_numbers(first)
+    assert env.binotel.originated[-1] == ('601', phone_of(items[0]))
+    env.finish(first, 'NOANSWER')
+    originated = len(env.binotel.originated)
+
+    # QR подтверждён: прямой звонок, номер — только для набора; защиты линии нет (плеча от АТС не будет).
+    state = svc.get_state(OPERATOR, phone_version=REMOTE_DIRECT, qr_granted=True)
+    assert state["qr_direct"] == {"granted": True} and state["direct_dial"] is True
+    assert "line_guard" not in state and no_numbers(state)
+    assert state["ring_timeout_sec"] == svc._ring_timeout_sec(RCC, lead_in=dial_service.DIRECT_RING_LEAD_IN_SEC)
+    direct = svc.start_call(OPERATOR, items[1]["assignment_id"], phone_version=REMOTE_DIRECT, qr_granted=True)
+    assert (direct["direct"], direct["dial"], direct["general_call_id"]) == (True, {"number": phone_of(items[1])}, None)
+    assert "phone" not in direct and len(env.binotel.originated) == originated
+    attempt = direct["attempt_id"]
+    active = svc.get_state(OPERATOR, phone_version=REMOTE_DIRECT, qr_granted=True)["active_attempt"]
+    assert active["attempt_id"] == attempt and "phone" not in active and no_numbers(active)
+    # Исход — по событиям телефона: ответ водителя и разговор 30 с.
+    svc.phone_event(OPERATOR, attempt, 'answered', phone_version=REMOTE_DIRECT)
+    res = svc.phone_event(OPERATOR, attempt, 'ended', phone_version=REMOTE_DIRECT, by_operator=True, leg_sec=30,
+                          talk_detected=True, sip_code=200)
+    assert res["final"] is True and res["cancelled"] is False
+    assert env.one("SELECT state, disposition, billsec, direct, sip_code FROM dial_list_attempts WHERE id = %s",
+                   (attempt,)) == ('finished', 'ANSWER', 30, True, 200)
+    # Вебхук кабинета удалённого КЦ о прямом звонке: попытку находит по линии, номеру и времени.
+    start = int(env.one("SELECT extract(epoch FROM requested_at) FROM dial_list_attempts WHERE id = %s", (attempt,))[0])
+    form = ImmutableMultiDict({
+        'requestType': 'apiCallCompleted', 'callDetails[generalCallID]': '701522094',
+        'callDetails[internalNumber]': '601', 'callDetails[externalNumber]': phone_of(items[1]),
+        'callDetails[startTime]': str(start + 3), 'callDetails[disposition]': 'ANSWER',
+        'callDetails[billsec]': '31', 'callDetails[waitsec]': '7'})
+    assert svc.handle_webhook(form, '194.88.218.116')["matched"] is True
+    assert env.one("SELECT general_call_id, billsec FROM dial_list_attempts WHERE id = %s",
+                   (attempt,)) == ('701522094', 31)
+    # Был разговор — итог нужен, как при звонке через АТС: без него следующего звонка нет.
+    assert res["outcome_required"] is True
+    outcome = str(env.one("SELECT id FROM dial_list_outcomes WHERE department_id = %s ORDER BY position LIMIT 1",
+                          (RCC,))[0])
+    svc.set_attempt_outcome(OPERATOR, attempt, outcome)
+
+    # Старый телефон и с QR — через АТС: ни блока QR, ни прямого звонка.
+    old = svc.get_state(OPERATOR, phone_version='3.22.65', qr_granted=True)
+    assert "qr_direct" not in old and "direct_dial" not in old
+    legacy = svc.start_call(OPERATOR, items[2]["assignment_id"], phone_version='3.22.65', qr_granted=True)
+    assert legacy["general_call_id"] and "dial" not in legacy
+    env.finish(legacy, 'NOANSWER')
+    # Рубильник выключен — все звонки удалённого КЦ через АТС, кнопки QR нет.
+    monkeypatch.setenv(dial_service.REMOTE_DIRECT_QR_ENV, '0')
+    off = svc.get_state(OPERATOR, phone_version=REMOTE_DIRECT, qr_granted=True)
+    assert "qr_direct" not in off and "direct_dial" not in off and "line_guard" in off
+    switched = svc.start_call(OPERATOR, items[3]["assignment_id"], phone_version=REMOTE_DIRECT, qr_granted=True)
+    assert switched["general_call_id"] and "dial" not in switched
+    assert env.binotel.originated[-1] == ('601', phone_of(items[3]))
+
+
 def test_webhook_of_a_non_dial_call_keeps_no_number(env):
     # У компании Тез вебхук «API Call Completed» приходит по всем звонкам линии: чужой звонок
     # обзвон не трогает, а в журнал вебхука его номер не попадает.

@@ -4181,6 +4181,30 @@ class PhoneVersionGateTests(unittest.TestCase):
         svc.recall_lead(7, recall.LEAD)
         self.assertEqual(seen, ['3.22.34', None, '3.23.0', None])
 
+    def test_next_and_recall_pass_the_qr_flag_to_the_state(self):
+        # Прямой звонок удалённого КЦ по QR (24.11.2026): «Ещё» и «Позвонить ещё раз» отвечают состоянием —
+        # флаг сессии QR обязан дойти и туда (иначе после «Ещё» телефон снова звонил бы через АТС и рисовал кнопку
+        # QR); неизвестен (роль без QR) — вызов прежний, без флага.
+        seen = []
+
+        def spy(uid, phone_version=None, **extra):
+            seen.append(extra)
+            return {"portion": None}
+
+        helper = SignedDriversNeverIssuedTests('test_due_rule')
+        svc, _, _, _ = helper._next()
+        svc.get_state = spy
+        with helper._now():
+            svc.issue_next_portion(7, phone_version='3.22.66', qr_granted=True)
+            svc.issue_next_portion(7, phone_version='3.22.66')
+        recall = RecallTests('test_verdict_rules')
+        svc, _, _ = recall._svc()
+        svc.get_state = spy
+        svc.recall_lead(7, recall.LEAD, phone_version='3.22.66', qr_granted=True)
+        svc.recall_lead(7, recall.LEAD, qr_granted=False)
+        svc.recall_lead(7, recall.LEAD)
+        self.assertEqual(seen, [{"qr_granted": True}, {}, {"qr_granted": True}, {"qr_granted": False}, {}])
+
     # ── событие ring_timeout ────────────────────────────────────────────────
     def _no_db_svc(self):
         """Сервис, у которого нет ни базы, ни Binotel, ни контекста оператора: любое

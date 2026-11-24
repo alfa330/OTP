@@ -260,6 +260,19 @@ TLS_MIN_VERSION = (3, 22, 38)
 # только дописывает generalCallID (запись разговора) и уточняет длительность. Умеет — iCORE Phone
 # 3.22.46 и новее: старому номер не отдаём, он звонит через АТС, как раньше.
 DIRECT_DIAL_MIN_VERSION = (3, 22, 46)
+# Прямой звонок удалённого КЦ по QR (владелец 24.11.2026: «если оператору отсканируют QR, его звонки
+# переводятся на прямые звонки именно в удалённом КЦ, а если не отсканировали — как обычно»). Обычный путь
+# удалённого КЦ — через АТС: Binotel сначала звонит на линию оператора, потом водителю, и номер водителя в
+# телефон не попадает вовсе (требование раздела с 23.09.2026). Сессию телефона, которую руководитель
+# подтвердил сканом QR (тот же флаг сессии, что открывает вики и обращения; кнопка «Открыть доступ» в
+# «Сессиях» — тоже), удалённый КЦ отпускает на прямой звонок, как у Тез: номер приходит телефону в ответе
+# на «Позвонить» (dial.number) только для набора — в строках пачки, у идущего звонка и на вкладках итогов
+# его нет, а в окне звонка, истории и поле набора телефон показывает ФИО (hide_numbers). Умеет — iCORE
+# Phone 3.22.66 и новее: прежний прямой звонок телефон включал только у Тез и начинал лишь в статусе с
+# исходящими, а QR по кнопке не показывал. Рубильник — DIAL_REMOTE_DIRECT_QR=0: все звонки удалённого КЦ
+# снова через АТС, кнопки QR в телефоне нет (читается на каждый запрос).
+REMOTE_DIRECT_MIN_VERSION = (3, 22, 66)
+REMOTE_DIRECT_QR_ENV = "DIAL_REMOTE_DIRECT_QR"
 # Телефон, который на 403 qr_locked рисует QR своей сессии (замок Тез до QR, владелец 06.11.2026). Отказ
 # получают все версии — старой сервер лишь пишет «обновите телефон»: показать QR ей нечем.
 QR_LOCK_MIN_VERSION = (3, 22, 47)
@@ -1362,6 +1375,43 @@ def phone_dials_direct(value):
     не покажет и не наберёт, а ждёт плечо от АТС."""
     version = parse_phone_version(value)
     return version is not None and version >= DIRECT_DIAL_MIN_VERSION
+
+
+def phone_dials_direct_remote(value):
+    """Телефон умеет прямой звонок удалённого КЦ по QR (кнопка QR, прямой звонок не только у Тез и в любом
+    статусе, где удалённому КЦ можно звонить) — версия в заголовке не ниже REMOTE_DIRECT_MIN_VERSION
+    (3.22.66). Заголовка нет или он неразборчив — нет."""
+    version = parse_phone_version(value)
+    return version is not None and version >= REMOTE_DIRECT_MIN_VERSION
+
+
+def remote_direct_qr_enabled():
+    """Рубильник прямого звонка удалённого КЦ по QR (REMOTE_DIRECT_QR_ENV, по умолчанию включён)."""
+    return (os.getenv(REMOTE_DIRECT_QR_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def remote_direct_offered(tez, phone_version):
+    """Удалённому КЦ на этом телефоне прямой звонок по QR вообще предлагается: не Тез, рубильник включён,
+    телефон 3.22.66+. Тогда в состоянии есть блок qr_direct (телефон рисует кнопку QR, пока сессия не
+    подтверждена)."""
+    return not tez and remote_direct_qr_enabled() and phone_dials_direct_remote(phone_version)
+
+
+def dials_direct(tez, phone_version, qr_granted=None):
+    """Звонит ли телефон водителю сам (прямой звонок) вместо звонка через АТС. Автообзвон Тез — телефон
+    3.22.46+ (06.11.2026). Удалённый КЦ — только сессия телефона, подтверждённая сканом QR руководителя
+    (qr_granted True), на телефоне 3.22.66+ и при включённом рубильнике (24.11.2026); иначе — как всегда, через
+    АТС: номер водителя в телефон не попадает. qr_granted: True — подтверждена; False — не подтверждена, но
+    роль QR показывает (телефону кнопка QR); None — роль без QR или неизвестно (кнопки нет)."""
+    if tez:
+        return phone_dials_direct(phone_version)
+    return bool(qr_granted) and remote_direct_offered(tez, phone_version)
+
+
+def qr_state_kw(qr_granted):
+    """Флаг QR для get_state из ответов «Ещё» и «Позвонить ещё раз»: передаём, только когда он известен
+    (True/False), — без него вызов прежний (так его и ждут подмены get_state в тестах)."""
+    return {} if qr_granted is None else {"qr_granted": bool(qr_granted)}
 
 
 def phone_shows_qr_lock(value):
@@ -5639,13 +5689,16 @@ class DialListService:
                       department_id, exc, RING_TIMEOUT_RINGS_DEFAULT)
         return lead_in + rings * RING_SECONDS_PER_RING if rings > 0 else 0
 
-    def get_state(self, user_id, phone_version=None):
+    def get_state(self, user_id, phone_version=None, qr_granted=None):
         """Состояние обзвона для телефона. phone_version — заголовок X-ICore-Phone-Version
         запроса: автосброс на гудках (ring_timeout_sec) получает только телефон с простым
         таймером (phone_has_ring_timer, 3.22.35 и новее); остальным — 0, «не класть».
         Выпущенному 3.22.33 (заголовка нет) — ещё и active_attempt в прежнем смысле, с
         кончившимся плечом (_active_attempt). Автообзвону Тез с телефоном 3.22.46+ — прямой
-        звонок (direct_dial): номер водителя в строках пачки и у идущего звонка (phone)."""
+        звонок (direct_dial): номер водителя в строках пачки и у идущего звонка (phone).
+        Удалённому КЦ с телефоном 3.22.66+ — блок qr_direct {granted}, если роль показывает QR (qr_granted не
+        None): True — сессия телефона подтверждена сканом QR, тогда и direct_dial (номер придёт только в ответе на
+        «Позвонить», dials_direct); False — не подтверждена, телефон рисует кнопку QR."""
         ctx = self.operator_context(user_id)
         self.reconcile(ctx)
         # Строки без обработки 8 ч — в общий список (24.11.2026); не чаще раза в IDLE_ROW_SWEEP_SEC на отдел.
@@ -5654,13 +5707,15 @@ class DialListService:
         today = _today()
         guarded = phone_guards_speech(phone_version)
         tez = is_tez(settings)
-        direct = tez and phone_dials_direct(phone_version)
+        direct = dials_direct(tez, phone_version, qr_granted)
         with self.db._get_cursor() as cur:
             # Открытая выдача либо последняя закрытая: обработанная пачка остаётся на
-            # экране с итогами, пока оператор не возьмёт следующую («Ещё»).
+            # экране с итогами, пока оператор не возьмёт следующую («Ещё»). Номер в строках — только
+            # Тез: прямому звонку удалённого КЦ номер нужен лишь для набора, на экран он не идёт.
             portion = self._last_portion(cur, user_id)
             base = self._dial_base(settings)
-            items = (self._portion_items(cur, portion["id"], today, tez=tez, with_phone=direct, period=base)
+            items = (self._portion_items(cur, portion["id"], today, tez=tez, with_phone=direct and tez,
+                                         period=base)
                      if portion else [])
             if portion and base and not items:
                 # Пачка целиком из прошлой базы месяца (_dial_base) — на экране её нет: оператор
@@ -5743,6 +5798,12 @@ class DialListService:
             state["whatsapp"] = self._wa_phone_block(settings, ctx["name"])
             # Прямой звонок (06.11.2026): «Позвонить» отдаст номер, телефон наберёт его сам — плечо от
             # АТС не ждать. Старому телефону ключа нет: он звонит через АТС, как раньше.
+            state["direct_dial"] = direct
+        elif qr_granted is not None and remote_direct_offered(tez, phone_version):
+            # Удалённый КЦ, прямой звонок по QR (24.11.2026): granted — сессию телефона подтвердил руководитель,
+            # звонки прямые (direct_dial); нет — звонки через АТС, как всегда, а телефон рисует кнопку QR.
+            # Телефону до 3.22.66 и роли без QR (СВ, админ: QR им не выдаётся) обоих ключей нет — звонки через АТС.
+            state["qr_direct"] = {"granted": bool(qr_granted)}
             state["direct_dial"] = direct
         if not direct:
             # Звонок через АТС: правила защиты линии (LINE_CLAIM_ENV и соседи) — телефону 3.22.59+.
@@ -6499,8 +6560,8 @@ class DialListService:
                  if totals["stopped"] else "")
         return totals
 
-    def issue_next_portion(self, user_id, phone_version=None):
-        """«Ещё»: следующая порция из пула.
+    def issue_next_portion(self, user_id, phone_version=None, qr_granted=None):
+        """«Ещё»: следующая порция из пула. phone_version и qr_granted — для состояния в ответе (get_state).
 
         Отказы — сначала, одним чтением: «Ещё», которому откажут, не ждёт Sapar. Затем,
         вне транзакций, проверка подписания тех, кто попадёт в порцию
@@ -6594,7 +6655,7 @@ class DialListService:
         log.info("dial_list: оператору %s выдано %d строк (порция %s)%s%s", ctx["user_id"], len(lead_ids), portion_id,
                  "" if repeats is None else f", повторов {repeats} (доля не больше {self._repeat_share(ctx)} %)",
                  f", из прошлой выдачи переехало {len(carried)} — ждут исхода от АТС" if carried else "")
-        return self.get_state(user_id, phone_version=phone_version)
+        return self.get_state(user_id, phone_version=phone_version, **qr_state_kw(qr_granted))
 
     # ------------------------------------------------------------ строка без обработки (24.11.2026)
     # Строки выдачи отдела, которые лежат у оператора без обработки дольше %(hours)s: выданы раньше, звонков по ним
@@ -6726,7 +6787,7 @@ class DialListService:
         head = {str(r[0]) for r in compose_portion(others, repeats, size, share, ctx["user_id"])}
         return [tuple(r[:1]) + tuple(r[5:9]) for r in rows], head
 
-    def recall_lead(self, user_id, lead_id, phone_version=None):
+    def recall_lead(self, user_id, lead_id, phone_version=None, qr_granted=None):
         """«Позвонить ещё раз» (владелец, 12.10.2026; с 11.10.2026 это был «Перезвонить»
         раньше срока — только по итогу «Перезвонить»): свой водитель снова в списке
         оператора, телефон тут же ему звонит. Свой — последним ему звонил этот оператор,
@@ -6782,7 +6843,8 @@ class DialListService:
         # оператор по своему «Перезвонить» раньше срока или просто ещё раз.
         log.info("dial_list: оператор %s звонит водителю %s %s — строка %s (%s)", ctx["user_id"], lead_id,
                  "по итогу «Перезвонить» раньше срока" if row[6] else "ещё раз", assignment_id, how)
-        return {"assignment_id": assignment_id, **self.get_state(user_id, phone_version=phone_version)}
+        return {"assignment_id": assignment_id,
+                **self.get_state(user_id, phone_version=phone_version, **qr_state_kw(qr_granted))}
 
     def _recall_row(self, cur, ctx, lead_id):
         """Строка для «Позвонить ещё раз» — в последней выдаче оператора (_last_portion, её
@@ -6858,12 +6920,16 @@ class DialListService:
                      summary["elapsed_sec"])
         return summary
 
-    def start_call(self, user_id, assignment_id, auto=False, operator_status=None, phone_version=None):
+    def start_call(self, user_id, assignment_id, auto=False, operator_status=None, phone_version=None,
+                   qr_granted=None):
         """Клик «Позвонить»: попытка + звонок через Binotel. Возвращает попытку.
 
         Прямой звонок (06.11.2026): у автообзвона Тез телефон 3.22.46+ (phone_version) набирает номер
         сам — Binotel не просим, попытка помечена direct, в ответе dial.number (номер для набора) и
         phone (для показа). Исход такой попытки — по событиям телефона (phone_event, sip_code).
+        Удалённый КЦ (24.11.2026) звонит так же, только когда сессия телефона подтверждена сканом QR
+        (qr_granted) и телефон 3.22.66+ (dials_direct); номер — только dial.number, для набора: phone для
+        показа ему не отдаём. Иначе — через АТС, как всегда.
 
         Подписавшему (и «на проверке у Яндекса» — водитель уже подписал) не звоним
         (владелец, 11.10.2026): строка снимается со списка, оператору — 409. Проверка
@@ -6879,7 +6945,7 @@ class DialListService:
         settings = ctx["settings"]
         assignment_id = str(assignment_id)
         tez = is_tez(settings)
-        direct = tez and phone_dials_direct(phone_version)
+        direct = dials_direct(tez, phone_version, qr_granted)
         operator_status = clean_operator_status(operator_status)
         if tez and operator_status is not None and operator_status not in OPERATOR_CALL_STATUSES:
             raise DialListError(CALL_STATUS_REFUSED, 409, kind=CALL_ERROR_STATUS)
@@ -6954,10 +7020,11 @@ class DialListService:
             raise DialListError(GOAL_ROW_CLOSED_TEZ if tez else SIGNED_ROW_CLOSED, 409, kind=CALL_ERROR_GOAL)
 
         if direct:
-            # Прямой звонок: номер — телефону, он набирает сам со своей линии. АТС не ждём ничего.
-            log.info("dial_list: оператор %s → строка %s: прямой звонок, попытка %s", ctx["user_id"],
-                     assignment_id, attempt_id)
-            return {
+            # Прямой звонок: номер — телефону, он набирает сам со своей линии. АТС не ждём ничего. Номер для
+            # показа (phone) — только Тез: удалённый КЦ по QR получает номер лишь для набора (dial.number).
+            log.info("dial_list: оператор %s → строка %s: прямой звонок%s, попытка %s", ctx["user_id"],
+                     assignment_id, "" if tez else " (удалённый КЦ, сессия подтверждена QR)", attempt_id)
+            direct_reply = {
                 "attempt_id": attempt_id,
                 "assignment_id": assignment_id,
                 "lead_id": lead_id,
@@ -6966,9 +7033,11 @@ class DialListService:
                 "requested_at": _iso(requested_at),
                 "direct": True,
                 "dial": {"number": phone_norm},
-                "phone": phone_display(phone_norm),
                 **last_comment,
             }
+            if tez:
+                direct_reply["phone"] = phone_display(phone_norm)
+            return direct_reply
 
         # Что линия оператора увидит во From. Без подмены Binotel ставит туда номер
         # водителя — и он виден в SIP-пакете (Wireshark), что и было главным
