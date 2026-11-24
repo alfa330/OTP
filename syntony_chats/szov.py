@@ -238,6 +238,22 @@ def _covered_error(state, start):
     return None if gap is None else 'Нет данных Syntony за эти сутки: ' + gap
 
 
+def feed_caught_up(state, moment, now, environ=None):
+    """Сторож дочитал ленту и снимки диалогов дальше moment и не стоит. Без сторожа (только
+    вебхук) судить не по чему — считается дочитанным."""
+    if not _puller_on(environ):
+        return True
+    marks = state.get('marks') or {}
+    for name in (sync.MARK_FEED, sync.MARK_CONVERSATIONS):
+        held = marks.get(name)
+        if held is None:
+            return False
+        mark, written_at = held
+        if mark < moment or (now - written_at).total_seconds() > STALE_SECONDS:
+            return False
+    return True
+
+
 def _statuses_live(state, now):
     """Статусы дочитаны до «сейчас» (отметка сторожа свежая) — им можно верить сейчас."""
     since = state.get('since')

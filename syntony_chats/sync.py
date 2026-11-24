@@ -86,11 +86,13 @@ def _day_start(now):
 
 
 class Stop(Exception):
-    """Отказ подключения целиком (ключ, лимит, сервис чатов, сеть): прогон дальше не идёт."""
+    """Отказ подключения целиком (ключ, лимит, сервис чатов, сеть): прогон дальше не идёт.
+    status — HTTP-статус отказа, если он был."""
 
-    def __init__(self, code):
+    def __init__(self, code, status=None):
         super().__init__(code)
         self.code = code
+        self.status = status
 
 
 def _call(fetch, sleep):
@@ -99,12 +101,12 @@ def _call(fetch, sleep):
         return fetch()
     except client.SyntonyHistoryError as exc:
         if exc.status != 429:
-            raise Stop(exc.code) from None
+            raise Stop(exc.code, exc.status) from None
         sleep(min(exc.retry_after or 60, RATE_LIMIT_WAIT_CAP_SECONDS))
     try:
         return fetch()
     except client.SyntonyHistoryError as exc:
-        raise Stop(exc.code) from None
+        raise Stop(exc.code, exc.status) from None
 
 
 def _items(page):
@@ -238,8 +240,10 @@ def night_due(mark, now):
     return mark is None or mark.astimezone(ALMATY).date() < local.date()
 
 
-# Отказы, после которых метод статусов не спрашиваем 15 минут: его нет или нет прав на него.
-# Сеть, лимит, сбой сервиса — повтор следующим прогоном.
+# Отказы, после которых метод статусов не спрашиваем 15 минут: его нет или нет прав на него —
+# по HTTP-статусу, каким бы ни было тело ответа, и по известным кодам Syntony. Сеть, лимит, сбой
+# сервиса — повтор следующим прогоном.
+_STATUSES_ABSENT_HTTP = (401, 403, 404, 405)
 _STATUSES_ABSENT = ('http_401', 'http_403', 'http_404', 'http_405', 'not_found', 'forbidden',
                     'insufficient_scope', 'invalid_key')
 
@@ -254,7 +258,7 @@ def pull_statuses(db, config, *, now, marks, sleep, session=None):
                              items_of=_items, utcnow=_utcnow, day_start=_day_start,
                              session=session)
     except Stop as stop:
-        if stop.code in _STATUSES_ABSENT:
+        if stop.status in _STATUSES_ABSENT_HTTP or stop.code in _STATUSES_ABSENT:
             with db._get_cursor() as cursor:
                 store.set_mark(cursor, MARK_STATUSES_RETRY, now + statuses.UNAVAILABLE_RETRY)
         raise

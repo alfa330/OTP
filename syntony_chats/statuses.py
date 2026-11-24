@@ -13,7 +13,12 @@ Chat2Desk; занят, тренинг, перерыв, техническая п
 Сторож (sync.py) зовёт pull() каждым своим прогоном: интервалы с последней отметки (и с начала
 самого раннего ещё открытого — пока он открыт, Syntony его переписывает), сутками-срезами, все
 страницы среза. Срез дочитан — открытые у нас интервалы этого среза, которых Syntony больше не
-отдала, закрываются: иначе ушедший человек висел бы на табло онлайн. Метода нет (404 — так было
+отдала, закрываются: иначе ушедший человек висел бы на табло онлайн. Срез без единого интервала
+ничего не закрывает: при живой Syntony интервалы, начатые в срезе, приходят всегда, и пустой
+ответ — сбой, а не «все ушли». Отметка «дочитано до» назад не ходит (перечитка с давнего
+открытого интервала её не трогает), а «статусы есть с» ставится один раз, когда первый забор
+догнал «сейчас», — по самому раннему полученному интервалу, а не по началу окна: история у
+Syntony может начинаться с выкладки метода, и часы до неё считаются по ответам, а не нулями. Метода нет (404 — так было
 24.11.2026: в документе он есть, на сервере ещё нет) — сторож пробует снова через 15 минут, а
 табло считает онлайн по ответам за 15 минут, как до статусов.
 
@@ -173,6 +178,12 @@ def close_absent(cursor, start, end, seen, closed_at):
     return cursor.rowcount
 
 
+def earliest_started(cursor):
+    cursor.execute('SELECT min(started_at) FROM syntony_operator_statuses')
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def oldest_open(cursor, since):
     cursor.execute("""
         SELECT min(started_at) FROM syntony_operator_statuses
@@ -238,7 +249,7 @@ def pull(db, config, *, now, marks, sleep, call, items_of, utcnow, day_start, se
     if open_since is not None:
         start = min(start, open_since)
     start = max(start, now - MAX_AGE)
-    first = mark is None
+    origin_known = marks.get(MARK_STATUSES_FROM) is not None
     written = pages = closed = slices = 0
     while start < now and slices < SLICES_PER_RUN:
         end = min(start + SLICE, now)
@@ -259,13 +270,19 @@ def pull(db, config, *, now, marks, sleep, call, items_of, utcnow, day_start, se
             # Срез не уместился в потолок страниц — отметку не двигаем, дочитает следующий.
             break
         with db._get_cursor() as cursor:
-            closed += close_absent(cursor, start, end, seen, end)
-            if first:
-                store.set_mark(cursor, MARK_STATUSES_FROM, start)
-                first = False
-            store.set_mark(cursor, MARK_STATUSES, end)
+            if seen:
+                closed += close_absent(cursor, start, end, seen, end)
+            # Перечитка с давнего открытого интервала идёт срезами из прошлого: отметка остаётся
+            # прежней, пока срезы её не догонят, — иначе сбой на втором срезе оставил бы её в
+            # прошлом, и табло на минуты потеряло бы статусы.
+            if mark is None or end > mark:
+                store.set_mark(cursor, MARK_STATUSES, end)
+                mark = end
         start = end
         slices += 1
+    if not origin_known and start >= now:
+        with db._get_cursor() as cursor:
+            store.set_mark(cursor, MARK_STATUSES_FROM, earliest_started(cursor) or now)
     return written, pages, closed
 
 

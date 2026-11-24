@@ -23,8 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from resource_fte import chat as billing_chat  # noqa: E402
 from syntony_chats import billing, client, statuses, store, szov  # noqa: E402
+from syntony_chats import rules, sync  # noqa: E402
 from test_szov_chat_syntony_postgres import (  # noqa: E402,F401
-    NOW, PORT, ROSTER, _ctx, _mark, _seed, db, utc)
+    NOW, PORT, ROSTER, SZOV_CHANNEL, _ctx, _mark, _seed, api_conversation, api_message, db, utc)
 
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (SYNTONY_CHATS_TEST_PORT)')
 
@@ -281,3 +282,62 @@ def test_no_kept_numbers_means_syntony_only_after_the_switch(db):
         report = billing_chat.get_chat_billing_report(db, date(2026, 11, 17), DAY)
     days = {item['date']: item['totals']['chats'] for item in report['days']}
     assert days == {'2026-11-17': 2, '2026-11-20': 2}
+
+
+def _add_conversation(db, cid, created, messages, phone):
+    with db._get_cursor() as cur:
+        store.upsert_conversation(cur, rules.conversation_row(
+            api_conversation(cid, created, SZOV_CHANNEL, phone=phone), NOW))
+        for mid, moment, kind, author in messages:
+            direction = 'inbound' if kind == 'driver' else 'outbound'
+            sender = {'driver': 'contact', 'human': 'human', 'ai': 'ai'}[kind]
+            store.upsert_message(cur, rules.message_row(
+                api_message(mid, cid, moment, direction=direction, sender=sender, author=author),
+                NOW, rules.VIA_API))
+
+
+def test_ai_only_chat_is_no_reply_and_yesterdays_dialog_has_no_first_reply(db):
+    _seed(db)
+    _chat2desk_tables(db)
+    # c3 — водитель в 13:00, ответил только ИИ: «без ответа», но новый — в базе SL.
+    _add_conversation(db, 'c3', '2026-11-20T08:00:00Z', [
+        ('c3a', '2026-11-20T08:00:00Z', 'driver', None),
+        ('c3b', '2026-11-20T08:01:00Z', 'ai', None),
+    ], '77010000005')
+    # c4 — начат вчера в 17:00, сегодня водитель пишет в 12:00, Бекова отвечает через 3 мин:
+    # обслужен, ответ внутри чата 3 мин, а первого ответа у него сегодня нет.
+    _add_conversation(db, 'c4', '2026-11-19T12:00:00Z', [
+        ('c4a', '2026-11-19T12:00:00Z', 'driver', None),
+        ('c4b', '2026-11-19T12:05:00Z', 'human', 'Бекова Динара'),
+        ('c4c', '2026-11-20T07:00:00Z', 'driver', None),
+        ('c4d', '2026-11-20T07:03:00Z', 'human', 'Бекова Динара'),
+    ], '77010000006')
+    with mock.patch.dict(os.environ, dict(KEY_ENV, CHAT_BILLING_C2D_KEEP_CHANNEL_IDS='')):
+        billing.build_day(db, _ctx(), DAY, now=NOW)
+        report = billing_chat.get_chat_billing_report(db, DAY, DAY, sl_seconds=120)
+        people = billing_chat.get_chat_billing_operators(db, DAY, DAY, sl_seconds=120)
+    rows = {row['conversation_id']: row for row in _rows(db, 'syntony_chat_billing_chats')}
+    assert (rows['c3']['is_new'], rows['c3']['answered'], rows['c3']['first_reply_seconds']) == (
+        True, False, None)
+    assert (rows['c4']['is_new'], rows['c4']['answered'], rows['c4']['first_reply_seconds'],
+            rows['c4']['inner_reply_seconds']) == (False, True, None, 180)
+    assert report['totals'] == {
+        'chats': 4, 'answered': 3, 'no_reply': 1, 'answered_sl': 1, 'first_reply_seconds': 660,
+        'first_replied': 2, 'sl_base': 3, 'inner_reply_seconds': 360, 'inner_replied': 2}
+    # Бековой засчитаны оба чата, где она отвечала сегодня; первый ответ — только по c1.
+    bekova = next(item for item in people['operators'] if item['operator'] == 'Бекова Динара')
+    assert (bekova['chats'], bekova['first_replied'], bekova['first_reply_seconds']) == (2, 1, 120)
+
+
+def test_day_is_not_complete_while_the_feed_is_behind(db):
+    # Сторож встал в 14:55 20.11, а сутки собираются 21.11 в 13:00 — запас прошёл, но лента
+    # дальше не дочитана: сутки остаются «не собраны целиком» и будут пересобраны.
+    _seed(db)
+    later = utc('2026-11-21T08:00:00Z')
+    with mock.patch.dict(os.environ, KEY_ENV):
+        assert billing.build_day(db, _ctx(), DAY, now=later)['complete'] is False
+        with db._get_cursor() as cur:
+            _mark(cur, sync.MARK_FEED, later - sync.OVERLAP, written_at=later)
+            _mark(cur, sync.MARK_CONVERSATIONS, later - sync.OVERLAP, written_at=later)
+        assert billing.build_day(db, _ctx(), DAY, now=later)['complete'] is True
+

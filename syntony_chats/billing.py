@@ -24,7 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from psycopg2.extras import execute_values
 
-from . import metrics, statuses
+from . import metrics, statuses, sync
 from . import szov
 
 logger = logging.getLogger(__name__)
@@ -317,7 +317,11 @@ def build_day(db, ctx, day, *, now):
                                                       until=until, window_seconds=ctx.window_seconds),
                            STAFF_FROM_REPLIES)
         source = STAFF_FROM_REPLIES
-    complete = now >= end + LOOKAHEAD
+    # Собраны целиком — когда запас после суток прошёл И сторож дочитал ленту дальше него: иначе
+    # сутки, собранные в час простоя Syntony или догрузки после перезапуска, остались бы с дырой
+    # навсегда (собранные целиком больше не пересобираются).
+    complete = (now >= end + LOOKAHEAD
+                and szov.feed_caught_up(state, end + LOOKAHEAD - sync.OVERLAP, now))
     with db._get_cursor() as cursor:
         save_day(cursor, day, chats, people, staff, complete=complete, staff_source=source)
     return {'day': day.isoformat(), 'chats': len(chats), 'complete': complete, 'staff_source': source}

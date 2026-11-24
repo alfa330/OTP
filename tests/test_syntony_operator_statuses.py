@@ -162,7 +162,8 @@ def test_first_pull_reads_week_back_then_follows_open_interval_until_closed(db):
     with db._get_cursor() as cur:
         marks = store.get_marks(cur)
     assert marks[statuses.MARK_STATUSES] == NOW
-    assert marks[statuses.MARK_STATUSES_FROM] == datetime(2025, 11, 9, 19, 0, tzinfo=UTC)
+    # «Статусы есть с» — по самому раннему полученному интервалу, а не по началу окна.
+    assert marks[statuses.MARK_STATUSES_FROM] == datetime(2025, 11, 17, 3, 58, 12, tzinfo=UTC)
 
     # Следующий прогон — с открытого перерыва (06:10:40), а не с отметки минус 5 минут: пока
     # интервал открыт, Syntony его переписывает. Перерыв закрылся.
@@ -186,12 +187,95 @@ def test_open_interval_missing_from_read_slice_is_closed(db):
     fake = FakeSyntony()
     fake.status_pages = {None: ([interval(1, 'available', '2025-11-17T09:00:00Z')], None)}
     sync.run_once(db, environ=ENV, now=NOW, sleep=lambda s: None, session=fake)
-    fake.status_pages = {None: ([], None)}
+    # Срез дочитан, в нём есть другие интервалы, а этого нет — человек из статуса ушёл.
+    fake.status_pages = {None: ([interval(2, 'break', '2025-11-17T09:58:00Z', name='Пётр Петров',
+                                          partner=())], None)}
     later = NOW + timedelta(minutes=3)
     summary = sync.run_once(db, environ=ENV, now=later, sleep=lambda s: None, session=fake)
     assert summary['statuses'][2] == 1
     row = db.one("SELECT ended_at, extra FROM syntony_operator_statuses WHERE id = 'st-0001'")
     assert row[0] == later and row[1] == {'closed_by': 'absent'}
+
+
+@needs_pg
+def test_empty_slice_closes_nothing(db):
+    # При живой Syntony интервалы, начатые в срезе, приходят всегда: пустой ответ — сбой, а не
+    # «все ушли». Иначе живой онлайн закрылся бы и при фильтре «по началу» не вернулся.
+    fake = FakeSyntony()
+    fake.status_pages = {None: ([interval(1, 'available', '2025-11-17T09:00:00Z')], None)}
+    sync.run_once(db, environ=ENV, now=NOW, sleep=lambda s: None, session=fake)
+    fake.status_pages = {None: ([], None)}
+    summary = sync.run_once(db, environ=ENV, now=NOW + timedelta(minutes=3), sleep=lambda s: None,
+                            session=fake)
+    assert summary['statuses'][2] == 0
+    assert db.one("SELECT ended_at FROM syntony_operator_statuses WHERE id = 'st-0001'")[0] is None
+
+
+@needs_pg
+def test_history_from_mid_day_does_not_claim_the_whole_week(db):
+    # Метод выложили в 14:00 — истории раньше нет. Часы до этого считаются по ответам, а не
+    # нулями: «статусы есть с» = первый полученный интервал.
+    from syntony_chats import szov
+    fake = FakeSyntony()
+    fake.status_pages = {None: ([interval(1, 'available', '2025-11-17T09:00:00Z')], None)}
+    sync.run_once(db, environ=ENV, now=NOW, sleep=lambda s: None, session=fake)
+    with db._get_cursor() as cur:
+        state = statuses.state(cur)
+    assert state['from'] == datetime(2025, 11, 17, 9, 0, tzinfo=UTC)
+    day_start = datetime(2025, 11, 16, 19, 0, tzinfo=UTC)
+    assert not szov.statuses_cover(state, day_start, NOW - timedelta(minutes=5))
+    assert szov.statuses_cover(state, datetime(2025, 11, 17, 9, 0, tzinfo=UTC), NOW)
+
+
+@needs_pg
+def test_first_pull_without_intervals_dates_statuses_from_now(db):
+    fake = FakeSyntony()
+    fake.status_pages = {None: ([], None)}
+    sync.run_once(db, environ=ENV, now=NOW, sleep=lambda s: None, session=fake)
+    with db._get_cursor() as cur:
+        assert statuses.state(cur)['from'] == NOW
+
+
+class _FailingSecondSlice(FakeSyntony):
+    """Первый срез отдаёт, второй — сбой Syntony."""
+
+    def get(self, url, params=None, **kwargs):
+        if url.endswith('/operator-statuses'):
+            self.status_calls = getattr(self, 'status_calls', 0) + 1
+            if self.status_calls == 2:
+                from test_syntony_chats_sync import _Response
+                return _Response(503, {'error': 'messaging_unavailable'})
+        return super().get(url, params=params, **kwargs)
+
+
+@needs_pg
+def test_mark_never_goes_back_when_reread_fails_midway(db):
+    # Открытый с позавчера интервал: прогон перечитывает его сутками-срезами из прошлого.
+    # Сбой на втором срезе не должен уводить отметку «дочитано до» назад — иначе табло
+    # до следующего прогона решило бы, что статусов нет.
+    with db._get_cursor() as cur:
+        statuses.upsert(cur, statuses.interval_row(
+            interval(1, 'offline_work', '2025-11-15T08:00:00Z'), NOW))
+        store.set_mark(cur, statuses.MARK_STATUSES, NOW - timedelta(minutes=3))
+        store.set_mark(cur, statuses.MARK_STATUSES_FROM, NOW - timedelta(days=5))
+    fake = _FailingSecondSlice()
+    fake.status_pages = {None: ([interval(1, 'offline_work', '2025-11-15T08:00:00Z')], None)}
+    summary = sync.run_once(db, environ=ENV, now=NOW, sleep=lambda s: None, session=fake)
+    assert summary['statuses_stopped'] == 'messaging_unavailable'
+    with db._get_cursor() as cur:
+        assert store.get_marks(cur)[statuses.MARK_STATUSES] == NOW - timedelta(minutes=3)
+
+
+@needs_pg
+def test_404_with_any_body_backs_off_for_15_minutes(db):
+    from test_syntony_chats_sync import _Response
+    fake = FakeSyntony()
+    fake.errors.append(('/operator-statuses',
+                        _Response(404, {'statusCode': 404, 'message': 'Cannot GET', 'error': 'Not Found'})))
+    summary = sync.run_once(db, environ=ENV, now=NOW, sleep=lambda s: None, session=fake)
+    assert summary['statuses_stopped'] == 'Not Found'
+    with db._get_cursor() as cur:
+        assert store.get_marks(cur)[sync.MARK_STATUSES_RETRY] == NOW + statuses.UNAVAILABLE_RETRY
 
 
 @needs_pg
