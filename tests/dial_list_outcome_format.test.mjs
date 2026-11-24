@@ -15,6 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 import {
     SUBTYPES_MAX,
@@ -371,4 +372,25 @@ test('OutcomeBadge: без типа — как раньше', () => {
     assert.match(html, /title="Отказ"/);
     assert.doesNotMatch(html, /·/);
     assert.equal(render({ outcome: null }), '');
+});
+
+test('«в счёт попыток» (24.11.2026): ключ — только когда сервер его прислал, без «перезвонить» — false, у Тез нет', () => {
+    const items = toEditable([
+        { id: 'o-1', name: 'Сброс', color: '#FF3B30', requeue: true, requeue_counts: true, is_active: true, subtypes: [] },
+        { id: 'o-2', name: 'Отказ', color: '#FF3B30', requeue: false, requeue_counts: true, is_active: true, subtypes: [] },
+        { id: 'o-3', name: 'Перезвонить позже', color: '#FF9F0A', requeue: true, is_active: true, subtypes: [] },
+    ]);
+    const payload = serializeOutcomes(items);
+    assert.equal(payload[0].requeue_counts, true);
+    assert.equal(payload[1].requeue_counts, false);
+    assert.equal('requeue_counts' in payload[2], false);
+    assert.equal('requeue_counts' in serializeOutcomes(items, { dueKinds: true })[0], false);
+    // Снимок видит правку флага: «изменено» и автосохранение.
+    const saved = outcomesSnapshot(items);
+    items[0].requeue_counts = false;
+    assert.notEqual(outcomesSnapshot(items), saved);
+    const panel = readFileSync(new URL('../src/components/dial_list/DialListOutcomesPanel.jsx', import.meta.url), 'utf8');
+    assert.match(panel, /\{!dueKinds && 'requeue_counts' in o && !!o\.requeue && \(/);
+    assert.match(panel, /onChange=\{\(v\) => patch\(idx, \{ requeue_counts: v \}\)\}/);
+    assert.match(panel, /в счёт попыток/);
 });

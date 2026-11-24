@@ -2365,9 +2365,9 @@ class RingTimeoutTests(unittest.TestCase):
         svc = dial_service.DialListService(db=_routed_db(cur))
         calls = []
         svc._cancel_attempt = lambda cur, aid, asg, late=False: calls.append(('cancel', asg, late)) or True
-        svc._close_assignment = (lambda cur, asg, lead, result, answered, count_attempt, requeue=False:
+        svc._close_assignment = (lambda cur, asg, lead, result, answered, count_attempt, requeue=False, requeue_counts=False:
                                  calls.append(('close', asg, lead, result, answered, count_attempt)))
-        svc._touch_lead = (lambda cur, lead, answered, count_attempt, requeue=False:
+        svc._touch_lead = (lambda cur, lead, answered, count_attempt, requeue=False, requeue_counts=False:
                            calls.append(('touch', lead, answered, count_attempt)))
         svc._finish_attempt('att-1', disposition, 0, 25, 'poll')
         return calls
@@ -4849,9 +4849,9 @@ class PhoneHeardTests(unittest.TestCase):
         svc = dial_service.DialListService(db=_routed_db(cur))
         calls = []
         svc._cancel_attempt = lambda cur, aid, asg, late=False: calls.append(('cancel', late)) or True
-        svc._close_assignment = (lambda cur, asg, lead, result, answered, count_attempt, requeue=False:
+        svc._close_assignment = (lambda cur, asg, lead, result, answered, count_attempt, requeue=False, requeue_counts=False:
                                  calls.append(('close', result, answered, count_attempt)))
-        svc._touch_lead = (lambda cur, lead, answered, count_attempt, requeue=False:
+        svc._touch_lead = (lambda cur, lead, answered, count_attempt, requeue=False, requeue_counts=False:
                            calls.append(('touch', answered, count_attempt)))
         svc._finish_attempt('att-1', disposition, billsec, 25, 'poll')
         return calls, cur
@@ -4893,9 +4893,9 @@ class PhoneHeardTests(unittest.TestCase):
         svc = dial_service.DialListService(db=_routed_db(cur))
         calls = []
         svc._cancel_attempt = lambda cur, aid, asg, late=False: calls.append(('cancel', late)) or True
-        svc._close_assignment = (lambda cur, asg, lead, result, answered, count_attempt, requeue=False:
+        svc._close_assignment = (lambda cur, asg, lead, result, answered, count_attempt, requeue=False, requeue_counts=False:
                                  calls.append(('close', result, answered, count_attempt)))
-        svc._touch_lead = (lambda cur, lead, answered, count_attempt, requeue=False:
+        svc._touch_lead = (lambda cur, lead, answered, count_attempt, requeue=False, requeue_counts=False:
                            calls.append(('touch', answered, count_attempt)))
         self.assertTrue(svc._finish_attempt('att-1', disposition, 0, 7, 'webhook'))
         return calls, cur

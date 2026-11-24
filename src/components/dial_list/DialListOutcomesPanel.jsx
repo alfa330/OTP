@@ -422,7 +422,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
         const id = tempId();
         return [...(list || []), {
             id, _key: id, name: '', color: OUTCOME_PALETTE[(list?.length || 0) % OUTCOME_PALETTE.length],
-            requeue: false, is_active: true, used: 0, subtypes: [], due_kind: '',
+            requeue: false, requeue_counts: false, is_active: true, used: 0, subtypes: [], due_kind: '',
         }];
     });
     const remove = (idx) => setItems((list) => list.filter((_, i) => i !== idx));
@@ -497,6 +497,19 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                                 />
                                                 перезвонить
                                             </label>
+                                            {!dueKinds && 'requeue_counts' in o && !!o.requeue && (
+                                                <label
+                                                    className="flex shrink-0 items-center gap-2 text-[12px] text-slate-600"
+                                                    title="Водитель возвращается в список, но каждый такой итог — попытка: когда попытки на номер кончились, ему больше не звонят. Выключено — попытки после итога с нуля."
+                                                >
+                                                    <IosToggle
+                                                        checked={!!o.requeue_counts}
+                                                        disabled={!canEdit}
+                                                        onChange={(v) => patch(idx, { requeue_counts: v })}
+                                                    />
+                                                    в счёт попыток
+                                                </label>
+                                            )}
                                             <label className="flex shrink-0 items-center gap-2 text-[12px] text-slate-600">
                                                 <IosToggle checked={o.is_active !== false} disabled={!canEdit} onChange={(v) => patch(idx, { is_active: v })} />
                                                 {o.is_active !== false ? 'включён' : 'выключен'}

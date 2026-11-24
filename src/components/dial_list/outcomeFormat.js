@@ -118,6 +118,11 @@ export const serializeOutcomes = (items, { dueKinds = false } = {}) => (Array.is
             requeue: !!o.requeue || dueKind !== '',
             is_active: o.is_active !== false,
             ...(dueKinds ? { due_kind: dueKind } : {}),
+            // «В счёт попыток» (владелец, 24.11.2026: «Сброс тоже нужно перевести на 3 попытки»): возврат в список без
+            // обнуления попыток. Ключ — только когда сервер его прислал (знает поле) и не у Тез (у Тез свои сроки);
+            // без «перезвонить» не имеет смысла и уходит false.
+            ...(!dueKinds && o && 'requeue_counts' in o
+                ? { requeue_counts: (!!o.requeue || dueKind !== '') && !!o.requeue_counts } : {}),
             subtypes: (Array.isArray(o.subtypes) ? o.subtypes : []).filter((s) => !isDraftSubtype(s)).map((s) => ({
                 id: isNewId(s.id) ? undefined : s.id,
                 name: cleanName(s.name),

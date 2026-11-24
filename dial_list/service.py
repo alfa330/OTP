@@ -3696,7 +3696,7 @@ class DialListService:
                            ORDER BY s.is_active DESC, s.position, s.created_at), '[]'::json)
                     FROM dial_list_outcome_subtypes s
                     WHERE s.outcome_id = o.id {sub_active}) AS subtypes,
-                   due_kind
+                   due_kind, requeue_counts
             FROM dial_list_outcomes o
             WHERE department_id = %s {active}
             ORDER BY is_active DESC, position, created_at
@@ -3712,7 +3712,9 @@ class DialListService:
         return [{"id": _sid(r[0]), "name": r[1], "color": r[2], "position": int(r[3]),
                  "requeue": bool(r[4]), "is_active": bool(r[5]), "used": int(r[6] or 0),
                  "subtypes": _subtypes_from_json(r[7]),
-                 "due_kind": ((r[8] if len(r) > 8 else "") or "")} for r in rows]
+                 "due_kind": ((r[8] if len(r) > 8 else "") or ""),
+                 # «Перезвонить» в счёт попыток (24.11.2026): возврат без обнуления попыток.
+                 "requeue_counts": bool(r[9]) if len(r) > 9 else False} for r in rows]
 
     def _seed_outcomes(self, cur, department_id, profile=None):
         """Стартовый набор итогов отдела. У отдела автообзвона Тез — свой, с датами (DEFAULT_TEZ_OUTCOMES);
@@ -3753,7 +3755,7 @@ class DialListService:
         полями, без числа использований (его меняют телефоны, а не руководитель). Одинаковое содержимое —
         одна версия, сохранение того же списка из двух вкладок не конфликтует."""
         cur.execute("""
-            SELECT o.id::text, o.name, o.color, o.position, o.requeue, o.is_active, o.due_kind,
+            SELECT o.id::text, o.name, o.color, o.position, o.requeue, o.is_active, o.due_kind, o.requeue_counts,
                    COALESCE((SELECT json_agg(json_build_array(s.id::text, s.name, s.position, s.is_active)
                                              ORDER BY s.id)
                              FROM dial_list_outcome_subtypes s WHERE s.outcome_id = o.id), '[]'::json)
@@ -3869,7 +3871,10 @@ class DialListService:
                 due_kind = str(raw.get("due_kind") or "").strip().lower()
                 if due_kind not in DUE_KINDS:
                     raise DialListError(f"Итог «{name}»: дата — нет, перезвон (callback) или выход на линию (online)")
+            # «В счёт попыток» (24.11.2026): ключа нет — не трогаем (сборка сайта без поля его не сбрасывает).
+            requeue_counts = bool(raw.get("requeue_counts")) if "requeue_counts" in raw else None
             cleaned.append({
+                "requeue_counts": requeue_counts,
                 "id": _sid(raw.get("id")) or None, "name": name, "color": color,
                 "requeue": bool(raw.get("requeue")) or bool(due_kind),
                 "is_active": raw.get("is_active", True) is not False,
@@ -3897,18 +3902,19 @@ class DialListService:
                         SET name = %s, color = %s, position = %s, is_active = %s,
                             due_kind = COALESCE(%s, due_kind),
                             requeue = %s OR COALESCE(%s, due_kind) <> '',
+                            requeue_counts = COALESCE(%s, requeue_counts),
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s AND department_id = %s
                     """, (c["name"], c["color"], position, c["is_active"], c["due_kind"], c["requeue"],
-                          c["due_kind"], c["id"], department_id))
+                          c["due_kind"], c["requeue_counts"], c["id"], department_id))
                     outcome_id = c["id"]
                 else:
                     cur.execute("""
                         INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue, is_active,
-                                                        due_kind)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
+                                                        due_kind, requeue_counts)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                     """, (department_id, c["name"], c["color"], position, c["requeue"], c["is_active"],
-                          c["due_kind"] or ""))
+                          c["due_kind"] or "", bool(c["requeue_counts"])))
                     outcome_id = str(cur.fetchone()[0])
                 kept.add(outcome_id)
                 if c["subtypes"] is not None:
@@ -4050,7 +4056,7 @@ class DialListService:
                 raise DialListError("Разговор не подтверждён: итог нужен, только если водитель "
                                     "ответил. Дождитесь исхода от АТС", 409)
             cur.execute("""
-                SELECT id, name, color, requeue, due_kind FROM dial_list_outcomes
+                SELECT id, name, color, requeue, due_kind, requeue_counts FROM dial_list_outcomes
                 WHERE id = %s AND department_id = %s AND is_active
             """, (outcome_id, ctx["department_id"]))
             outcome = cur.fetchone()
@@ -4100,7 +4106,18 @@ class DialListService:
                     outcome_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
             """, (outcome_id, _sid(subtype[0]) if subtype else None, comment, attempt_id))
-            if outcome[3]:
+            if outcome[3] and len(outcome) > 5 and outcome[5]:
+                # «Перезвонить» в счёт попыток (24.11.2026, «Сброс»): лид снова в работе, но попытки не обнуляются —
+                # пока не кончились. Исход от АТС, пришедший раньше, попытку уже засчитал (_touch_lead); пришедший
+                # позже — засчитает и решит сам (requeue_counts в _finish_attempt).
+                cur.execute("""
+                    UPDATE dial_list_leads
+                    SET status = CASE WHEN status = 'excluded' THEN status
+                                      WHEN attempts_total >= %s THEN 'done' ELSE 'in_progress' END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (int(ctx["settings"].get("max_attempts") or DEFAULT_MAX_ATTEMPTS), str(row[1])))
+            elif outcome[3]:
                 # «Перезвонить»: лид снова в работе, попытки с нуля. Если исход от АТС
                 # приедет позже, _touch_lead увидит этот итог и статус не перебьёт.
                 cur.execute("""
@@ -7787,20 +7804,22 @@ class DialListService:
             # Оператор мог успеть выбрать итог «перезвонить» раньше, чем приехал исход
             # от АТС: тогда лид не закрываем, а оставляем на повтор.
             cur.execute("""
-                SELECT COALESCE(o.requeue, FALSE) FROM dial_list_attempts t
+                SELECT COALESCE(o.requeue, FALSE), COALESCE(o.requeue_counts, FALSE) FROM dial_list_attempts t
                 LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id WHERE t.id = %s
             """, (str(attempt_id),))
             picked = cur.fetchone()
             requeue = bool(picked and picked[0])
+            requeue_counts = bool(picked and len(picked) > 1 and picked[1])
             cur.execute("SELECT lead_id, state FROM dial_list_assignments WHERE id = %s FOR UPDATE", (assignment_id,))
             a = cur.fetchone()
             if a and a[1] == "issued":
                 self._close_assignment(cur, assignment_id, str(a[0]), result,
-                                       answered=(result == "answered"), count_attempt=True, requeue=requeue)
+                                       answered=(result == "answered"), count_attempt=True, requeue=requeue,
+                                       requeue_counts=requeue_counts)
             elif a:
                 # Строка уже закрыта прошлой попыткой — лид всё равно учитывает звонок.
                 self._touch_lead(cur, str(a[0]), answered=(result == "answered"), count_attempt=True,
-                                 requeue=requeue)
+                                 requeue=requeue, requeue_counts=requeue_counts)
         return True
 
     @staticmethod
@@ -7817,14 +7836,16 @@ class DialListService:
         row = cur.fetchone()
         return bool(row) and bool(row[0]) and int(row[1] or 0) < NETWORK_REFUSALS_FREE_PER_ROW
 
-    def _close_assignment(self, cur, assignment_id, lead_id, result, answered, count_attempt, requeue=False):
+    def _close_assignment(self, cur, assignment_id, lead_id, result, answered, count_attempt, requeue=False,
+                          requeue_counts=False):
         cur.execute("""
             UPDATE dial_list_assignments
             SET state = 'done', result = %s, done_at = CURRENT_TIMESTAMP
             WHERE id = %s RETURNING portion_id
         """, (result, assignment_id))
         row = cur.fetchone()
-        self._touch_lead(cur, lead_id, answered=answered, count_attempt=count_attempt, requeue=requeue)
+        self._touch_lead(cur, lead_id, answered=answered, count_attempt=count_attempt, requeue=requeue,
+                         requeue_counts=requeue_counts)
         if row:
             portion_id = str(row[0])
             cur.execute("""
@@ -7834,7 +7855,7 @@ class DialListService:
                                   WHERE portion_id = %s AND state = 'issued')
             """, (portion_id, portion_id))
 
-    def _touch_lead(self, cur, lead_id, answered, count_attempt, requeue=False):
+    def _touch_lead(self, cur, lead_id, answered, count_attempt, requeue=False, requeue_counts=False):
         """Лид после исхода попытки, в транзакции вызывающего: попытка в счёте, время
         последней попытки, дозвон и статус.
 
@@ -7859,7 +7880,11 @@ class DialListService:
         max_attempts = int(s[0]) if s else DEFAULT_MAX_ATTEMPTS
         tez = bool(s) and str(s[1] or "").strip().lower() == PROFILE_TEZ
         attempts_total = int(row[1] or 0) + (1 if count_attempt else 0)
-        if requeue:
+        if requeue and requeue_counts:
+            # Итог «перезвонить» в счёт попыток (24.11.2026, «Сброс»): попытка засчитана, лид вернётся в пул, пока
+            # попытки не кончились; кончились — обработан, как после последнего недозвона.
+            status = "in_progress" if attempts_total < max_attempts else "done"
+        elif requeue:
             # Итог «перезвонить»: попытки с нуля, лид вернётся в пул через retry_after_hours.
             status, attempts_total = "in_progress", 0
         elif answered:
