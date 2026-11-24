@@ -87,15 +87,44 @@ export const groupKey = (group) => (group?.source_id === null || group?.source_i
 
 const GROUP_KEY_RE = /^(\d+|none)$/;
 
+/* «Приглашен в офис» и «Приглашен на обучение» на доске — по дням (владелец 24.11.2026: «разбивку по датам приглашения
+   начиная от сегодня… как в откликах раскрыть и посмотреть людей, которые приглашены к этому дню»; «прошлые дни должны
+   уходить вниз»). День в офисе — дата визита, на обучении — старт группы; порядок дней задаёт сервер (rules.day_order).
+   Дни свёрнуты, пока их не раскрыли, — как группы «Откликов». */
+export const DATED_STAGES = ['invited_office', 'invited_training'];
+const DAY_ARG = { invited_office: 'office', invited_training: 'training' };
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_KEY_RE = /^(\d{4}-\d{2}-\d{2}|none)$/;
+// Сколько раскрытых дней колонки помнит браузер: прошедшие дни иначе копились бы в нём без конца.
+const OPEN_DAYS_KEPT = 60;
+
+/** Ключ дня в списке раскрытых: «2026-11-24», у карточек без даты — 'none'. */
+export const dayKey = (group) => (group?.day ? String(group.day).slice(0, 10) : 'none');
+
+/** Раскрытые дни колонок, как их запомнил браузер: {этап: [ключи]}; чужое и мусор отбрасываются. */
+export const openDaysFrom = (raw) => Object.fromEntries(DATED_STAGES.map((stage) => [stage,
+    (raw && typeof raw === 'object' && Array.isArray(raw[stage]) ? raw[stage] : [])
+        .map(String).filter((key) => DAY_KEY_RE.test(key)).slice(-OPEN_DAYS_KEPT)]));
+
+/** «Показать ещё» у дня: дата добавляется в список один раз; у группы без даты раскрывать нечем. */
+export const withExpandedDay = (list, group) => {
+    const items = Array.isArray(list) ? list : [];
+    const key = dayKey(group);
+    return key === 'none' || items.includes(key) ? items : [...items, key];
+};
+
 /*
  * Запрос доски. Период — только «Откликам» (владелец 20.11.2026: «именно в отклики надо добавить возможность
  * фильтровать по периоду, остальные статусы не должны по периоду фильтроваться»): уходит отдельными
  * responses_from / responses_to, а не общими from / to, которые сервер применил бы ко всем колонкам. open — раскрытые
  * группы «Откликов» (группы свёрнуты по умолчанию — решение владельца 20.11.2026): карточки сервер отдаёт только им,
- * '-' — ни одной; без open сервер отдал бы карточки всем. expand — источники, где нажали «Показать ещё». Пустые отборы
- * не отправляются.
+ * '-' — ни одной; без open сервер отдал бы карточки всем. expand — источники, где нажали «Показать ещё». Так же дни
+ * колонок «Приглашен в офис / на обучение»: openDays и expandedDays — {этап: [дни]} → office_open, training_open
+ * (с openDays уходят оба, '-' — ни одного дня) и office_expand, training_expand. Пустые отборы не отправляются.
  */
-export const boardQuery = ({ mine = false, query = '', filters = {}, period = {}, expanded = [], open } = {}) => {
+export const boardQuery = ({
+    mine = false, query = '', filters = {}, period = {}, expanded = [], open, openDays, expandedDays,
+} = {}) => {
     const params = {
         mine: mine ? '1' : undefined,
         q: String(query || '').trim() || undefined,
@@ -108,6 +137,14 @@ export const boardQuery = ({ mine = false, query = '', filters = {}, period = {}
         open: Array.isArray(open) ? (open.filter((key) => GROUP_KEY_RE.test(String(key))).join(',') || '-') : undefined,
         expand: (expanded || []).filter((key) => /^\d+$/.test(String(key))).join(',') || undefined,
     };
+    DATED_STAGES.forEach((stage) => {
+        if (openDays && typeof openDays === 'object') {
+            const keys = (Array.isArray(openDays[stage]) ? openDays[stage] : []).filter((key) => DAY_KEY_RE.test(String(key)));
+            params[`${DAY_ARG[stage]}_open`] = keys.join(',') || '-';
+        }
+        const more = Array.isArray(expandedDays?.[stage]) ? expandedDays[stage] : [];
+        params[`${DAY_ARG[stage]}_expand`] = more.filter((key) => DAY_RE.test(String(key))).join(',') || undefined;
+    });
     return Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined));
 };
 
@@ -330,6 +367,33 @@ export const daysSince = (iso, today = todayIso()) => {
     const b = parts(today);
     if (!a || !b) return null;
     return Math.round((Date.UTC(b.year, b.month - 1, b.day) - Date.UTC(a.year, a.month - 1, a.day)) / 86400000);
+};
+
+const WEEKDAYS = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+
+/** Шапка дня в колонке доски: «Сегодня, 24 ноября», «Завтра, 25 ноября», «Вчера, 23 ноября», «Чт, 26 ноября»; другой
+ *  год — с годом. today — день сервера (Алматы): по нему же сервер расставил дни. */
+export const dayLabel = (day, today = todayIso()) => {
+    const p = parts(day);
+    if (!p) return 'Без даты';
+    const date = `${p.day} ${MONTHS[p.month - 1]}`;
+    const since = daysSince(day, today);
+    const ahead = since === null ? null : -since;
+    if (ahead === 0) return `Сегодня, ${date}`;
+    if (ahead === 1) return `Завтра, ${date}`;
+    if (ahead === -1) return `Вчера, ${date}`;
+    const year = parts(today)?.year === p.year ? '' : ` ${p.year}`;
+    return `${WEEKDAYS[new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay()]}, ${date}${year}`;
+};
+
+/** День уже прошёл — сервер ставит такие дни вниз колонки. */
+export const isPastDay = (day, today = todayIso()) => DAY_RE.test(String(day || '').slice(0, 10))
+    && String(day).slice(0, 10) < String(today).slice(0, 10);
+
+/** Время визита в офис «14:00» — на карточке внутри дня (сам день — в шапке группы). */
+export const visitTime = (card) => {
+    const p = parts(card?.office_visit_at);
+    return p?.hasTime ? `${p.hour}:${p.minute}` : '';
 };
 
 /*

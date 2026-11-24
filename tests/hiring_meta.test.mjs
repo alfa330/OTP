@@ -9,6 +9,7 @@ import {
     groupNameAfterStart, groupNameFor, groupRequestBody, groupSeats, groupWhen, hiringTabs, joinDateTime, longTime, markGroupFull,
     matchesQuery, monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, sourceChoices,
     sourceRequestBody, sourceTone, splitDateTime, stepCapacity, toggleInList, withExpanded, ARCHIVE_STAGE, columnCollapsed,
+    DATED_STAGES, dayKey, dayLabel, isPastDay, openDaysFrom, visitTime, withExpandedDay,
     HH_NO_ICORE, hhIcoreOptions, hhIcoreValue, hhSettingsBody, hhVacancyMeta,
     hhMoney, hhPeriod, hhResumeSummary, hhSpan,
 } from '../src/components/hiring/hiringMeta.js';
@@ -168,6 +169,51 @@ test('collapsed groups: open goes with every board request, «-» when nothing i
     assert.deepEqual(withExpanded(['4'], { source_id: 10 }), ['4', '10']);
     assert.deepEqual(withExpanded(['4'], { source_id: 4 }), ['4']);
     assert.deepEqual(withExpanded(['4'], { source_id: null }), ['4']);
+});
+
+test('invited columns by day: open and expanded days go with the board request', () => {
+    // Владелец 24.11.2026: «Приглашен в офис» и «Приглашен на обучение» — по дням, раскрываются как группы «Откликов».
+    assert.deepEqual(DATED_STAGES, ['invited_office', 'invited_training']);
+    assert.deepEqual(boardQuery({ openDays: { invited_office: ['2026-11-24', 'none', 'x', '24.11.2026'] } }),
+        { office_open: '2026-11-24,none', training_open: '-' });
+    assert.deepEqual(boardQuery({ openDays: {} }), { office_open: '-', training_open: '-' });
+    assert.ok(!('office_open' in boardQuery({})));                    // без openDays — сервер отдаёт карточки всем дням
+    assert.deepEqual(boardQuery({ expandedDays: { invited_training: ['2026-11-30', 'none'] } }), { training_expand: '2026-11-30' });
+    assert.equal(dayKey({ day: '2026-11-24' }), '2026-11-24');
+    assert.equal(dayKey({ day: null }), 'none');
+    assert.deepEqual(withExpandedDay(['2026-11-24'], { day: '2026-11-25' }), ['2026-11-24', '2026-11-25']);
+    assert.deepEqual(withExpandedDay(['2026-11-24'], { day: '2026-11-24' }), ['2026-11-24']);
+    assert.deepEqual(withExpandedDay(['2026-11-24'], { day: null }), ['2026-11-24']);   // без даты раскрывать нечем
+    assert.deepEqual(withExpandedDay(undefined, { day: '2026-11-25' }), ['2026-11-25']);
+    // Из браузера — только свои этапы и разборчивые ключи; прошедшие дни не копятся без конца.
+    assert.deepEqual(openDaysFrom({ invited_office: ['2026-11-24', 'none', 5, 'x'], responses: ['4'] }),
+        { invited_office: ['2026-11-24', 'none'], invited_training: [] });
+    assert.deepEqual(openDaysFrom(null), { invited_office: [], invited_training: [] });
+    assert.deepEqual(openDaysFrom('[]'), { invited_office: [], invited_training: [] });
+    const many = Array.from({ length: 70 }, (_, index) => addDays('2026-01-01', index));
+    assert.equal(openDaysFrom({ invited_office: many }).invited_office.length, 60);
+    assert.equal(openDaysFrom({ invited_office: many }).invited_office.at(-1), many.at(-1));
+});
+
+test('day headers: today, tomorrow, yesterday, weekday; past days; visit time on the card', () => {
+    const today = '2026-11-24';                                       // вторник
+    assert.equal(dayLabel('2026-11-24', today), 'Сегодня, 24 ноября');
+    assert.equal(dayLabel('2026-11-25', today), 'Завтра, 25 ноября');
+    assert.equal(dayLabel('2026-11-23', today), 'Вчера, 23 ноября');
+    assert.equal(dayLabel('2026-11-26', today), 'Чт, 26 ноября');
+    assert.equal(dayLabel('2026-11-30', today), 'Пн, 30 ноября');
+    assert.equal(dayLabel('2026-11-20', today), 'Пт, 20 ноября');
+    assert.equal(dayLabel('2027-01-05', today), 'Вт, 5 января 2027');  // другой год — с годом
+    assert.equal(dayLabel('2026-12-31', '2027-01-01'), 'Вчера, 31 декабря');
+    assert.equal(dayLabel(null, today), 'Без даты');
+    assert.equal(dayLabel('2026-11-26', 'мусор'), 'Чт, 26 ноября 2026');
+    assert.equal(isPastDay('2026-11-23', today), true);
+    assert.equal(isPastDay('2026-11-24', today), false);
+    assert.equal(isPastDay('2026-12-01', today), false);
+    assert.equal(isPastDay(null, today), false);
+    assert.equal(visitTime({ office_visit_at: '2026-11-24T14:00:00' }), '14:00');
+    assert.equal(visitTime({ office_visit_at: '2026-11-24' }), '');
+    assert.equal(visitTime({}), '');
 });
 
 test('source window body: new source has a kind, existing one sends only name and color', () => {

@@ -158,6 +158,36 @@ class StageTests(unittest.TestCase):
         self.assertEqual(routes._source_ids_arg('4, 10,abc,none,99999999999,-1'), ([4, 10], True))
         self.assertEqual(routes._source_ids_arg('-'), ([], False))
 
+    def test_invited_columns_by_day(self):
+        """Владелец 24.11.2026: «Приглашен в офис» и «Приглашен на обучение» — по дням «начиная от сегодня», «прошлые дни
+        должны уходить вниз». День — дата визита и старт группы; сегодня и дальше по порядку, ниже прошедшие от вчерашнего,
+        без даты — последней; число у дня — сколько всего, а не порция; карточки — номерами."""
+        from datetime import date
+        from hiring import routes
+        today = date(2026, 11, 24)
+        self.assertEqual(rules.DATED_STAGES, ('invited_office', 'invited_training'))
+        self.assertEqual(rules.board_day({'stage': 'invited_office', 'office_visit_at': datetime(2026, 11, 25, 14, 0)}),
+                         date(2026, 11, 25))
+        self.assertEqual(rules.board_day({'stage': 'invited_training', 'group_start_date': date(2026, 11, 30),
+                                          'office_visit_at': datetime(2026, 11, 20, 10, 0)}), date(2026, 11, 30))
+        self.assertIsNone(rules.board_day({'stage': 'invited_office', 'office_visit_at': None}))
+        self.assertIsNone(rules.board_day({'stage': 'invited_training', 'group_start_date': None}))
+        self.assertIsNone(rules.board_day({'stage': 'in_work', 'office_visit_at': datetime(2026, 11, 25, 14, 0)}))
+        days = [date(2026, 11, 20), None, date(2026, 11, 26), today, date(2026, 11, 23), date(2026, 11, 25)]
+        self.assertEqual(rules.day_order(days, today), [today, date(2026, 11, 25), date(2026, 11, 26), date(2026, 11, 23),
+                                                        date(2026, 11, 20), None])
+        self.assertEqual(rules.day_order([], today), [])
+        cards = [{'id': 1, 'stage': 'invited_office', 'office_visit_at': datetime(2026, 11, 24, 9, 30)},
+                 {'id': 2, 'stage': 'invited_office', 'office_visit_at': datetime(2026, 11, 23, 16, 0)},
+                 {'id': 3, 'stage': 'invited_office', 'office_visit_at': datetime(2026, 11, 24, 15, 0)}]
+        groups = routes.day_groups(cards, {date(2026, 11, 23): 1, today: 2, date(2026, 11, 27): 4, None: 1}, today)
+        self.assertEqual([(g['day'], g['total'], g['card_ids']) for g in groups],
+                         [('2026-11-24', 2, [1, 3]), ('2026-11-27', 4, []), ('2026-11-23', 1, [2]), (None, 1, [])])
+        self.assertEqual(routes._days_arg('2026-11-24, 2026-02-30,abc,none,2026-11-25'),
+                         ([date(2026, 11, 24), date(2026, 11, 25)], True))
+        self.assertEqual(routes._days_arg('-'), ([], False))
+        self.assertEqual(routes._days_arg(None), ([], False))
+
     def test_channels_are_gone_from_code(self):
         """Понятия «Канал» больше нет (владелец 20.11.2026): ни ручек, ни меток в карточке, ни раздела настроек."""
         ui = ROOT / 'src' / 'components' / 'hiring'
@@ -265,9 +295,10 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
     def test_board_and_card_wiring_for_sources(self):
         """Связки интерфейса правки 20.11.2026 (каналы → источники, «Отклики» группами, период только у них)."""
         # Доска перезагружается по периоду, раскрытым группам и «Показать ещё»; на доске — ответ на последний запрос.
-        self.assertIn("boardQuery({ mine: scope === 'mine', query: debounced, filters, period, expanded, open: openGroups })", self.board)
-        self.assertIn('}, [api, scope, debounced, filters, period, expanded, openGroups, toast]);', self.board)
-        self.assertIn('.then(({ data }) => { if (seq === requestSeq.current) setColumns(data.columns); })', self.board)
+        self.assertIn("mine: scope === 'mine', query: debounced, filters, period, expanded, open: openGroups, openDays, expandedDays,",
+                      self.board)
+        self.assertIn('}, [api, scope, debounced, filters, period, expanded, openGroups, openDays, expandedDays, toast]);', self.board)
+        self.assertIn('if (seq !== requestSeq.current) return;\n                setColumns(data.columns);', self.board)
         # Группы свёрнуты по умолчанию: раскрытые — список в браузере, карточки группы — по номерам из колонки.
         self.assertIn("const [openGroups, setOpenGroups] = useState(() => readList(OPEN_GROUPS_KEY).map(String));", self.board)
         self.assertIn('open={openGroups.includes(groupKey(group))} cards={cards}', self.board)
@@ -275,13 +306,27 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertIn('onExpand={() => onExpandGroup(group)}', self.board)
         self.assertIn('const expandGroup = (group) => setExpanded((prev) => withExpanded(prev, group));', self.board)
         # Внутри групп плашки источника нет — он в шапке группы; период — только у «Откликов».
-        self.assertIn('{cards.map((card) => tile(card, false))}', self.board)
+        self.assertIn('{cards.map((card) => tile(card, { showSource: false, inGroup: true }))}', self.board)
         self.assertIn("{...(column.stage === 'responses' ? {", self.board)
         # Карточка меняет источник полем source_id, у завершённой — только руководитель; окно источника — sourceRequestBody.
         self.assertIn('await api.patch(`/cards/${card.id}`, { source_id: sourceId });', self.sheet)
         self.assertIn('canEdit={isOwnerOrLead && (!card.is_closed || Boolean(caps.lead))}', self.sheet)
         self.assertIn('const body = sourceRequestBody(form, editing);', self.settings)
         self.assertNotIn("value: 'channels'", self.settings)
+
+    def test_board_invited_days_wiring(self):
+        """Владелец 24.11.2026: «Приглашен в офис / на обучение» по дням — раскрытые дни помнит браузер, они уходят с
+        запросом доски; подписи — по дню сервера; перед прошедшими — «Прошедшие дни»; в дне визита — время визита."""
+        self.assertIn("const OPEN_DAYS_KEY = 'hiring.board.openDays';", self.board)
+        self.assertIn('const [openDays, setOpenDays] = useState(readOpenDays);', self.board)
+        self.assertIn('if (data.today) setToday(data.today);', self.board)
+        self.assertIn('} : DATED_STAGES.includes(column.stage) ? {', self.board)
+        self.assertIn(': dated ? column.days.map(dayGroup) :', self.board)
+        self.assertIn('{past && !isPastDay(column.days[index - 1]?.day, today) && (', self.board)
+        self.assertIn('Прошедшие дни', self.board)
+        self.assertIn("visit: column.stage === 'invited_office' ? visitTime(card) : ''", self.board)
+        # «Показаны N из M» — только у колонок без групп: у дней свёрнутые группы — не «недогрузка».
+        self.assertIn('{!grouped && !dated && column.total > column.cards.length && (', self.board)
 
     def test_chat_handled_button_under_last_candidate_message(self):
         """Владелец 20.11.2026: «Ответ не нужен» — снизу под последним сообщением кандидата, как в «Чатах ОП», а не в

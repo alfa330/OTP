@@ -25,7 +25,8 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from collections import Counter
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -2034,6 +2035,77 @@ def test_board_responses_by_source_and_period(world):
         cur.execute("UPDATE hiring_cards SET source_id = NULL WHERE id = %s", (w1,))
         columns, _counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, responses_open=([], True))
         assert [c['id'] for c in columns['responses']] == [w1] and by_source[None] == 1
+
+
+def test_board_invited_by_day(world):
+    """Владелец 24.11.2026: «в поле приглашен в офис надо добавить разбивку по датам приглашения начиная от сегодня, чтобы
+    можно было, как в откликах, раскрыть и посмотреть людей, которые приглашены к этому дню», «приглашен на обучение тоже
+    можно поделить по датам». День — дата визита или старт группы; числа дней — с отборами доски; карточки — только
+    раскрытым дням, порция — на день, «Показать ещё» отдаёт день целиком; в офисе карточки дня — по времени визита."""
+    service = world['service']
+    me = ctx_of(world, REC1)
+
+    def office(phone, visit, **extra):
+        card = take_and_touch(world, REC1, phone, **extra)
+        return service.move(me, card['id'], 'invited_office', {'office_visit_at': visit})['id']
+
+    late = office('8 705 800 00 01', '2026-10-15T16:00')
+    early = office('8 705 800 00 02', '2026-10-15T09:30')
+    tomorrow = office('8 705 800 00 03', '2026-10-16T11:00')
+    yesterday = office('8 705 800 00 04', '2026-10-14T10:00')
+    astana = office('8 705 800 00 05', '2026-10-01T10:00', city='Астана')
+    with world['db']._get_cursor() as cur:
+        started = queries.create_group(cur, 'Группа идёт', date(2026, 10, 12), TRAINER, 367, world['vacancy_id'], SUPER, NOW)
+    upcoming = _invite(world, REC1, '8 705 800 00 06', world['group_id'])['id']         # старт 20.10
+    running = _invite(world, REC1, '8 705 800 00 07', started)['id']
+    lead = {'lead': True}
+
+    def day(number):
+        return date(2026, 10, number)
+
+    with world['db']._get_cursor() as cur:
+        days = queries.board_days(cur, lead, LEAD_GRANT, {})
+        assert days == {'invited_office': {day(15): 2, day(16): 1, day(14): 1, day(1): 1},
+                        'invited_training': {day(20): 1, day(12): 1}}
+        # Без раскрытых дней (старая страница во время выкладки) — карточки всем дням; в офисе — по времени визита.
+        columns, counts, _by_source = queries.board(cur, lead, LEAD_GRANT, {})
+        assert [c['id'] for c in columns['invited_office']] == [astana, yesterday, early, late, tomorrow]
+        assert {c['id'] for c in columns['invited_training']} == {upcoming, running}
+        assert counts['invited_office'] == 5 and counts['invited_training'] == 2
+        assert all('board_day' not in c for c in columns['invited_office'])
+        # День каждой карточки по rules.board_day — тот же, что посчитала база.
+        for stage in rules.DATED_STAGES:
+            assert Counter(rules.board_day(c) for c in columns[stage]) == Counter(days[stage])
+
+        # Раскрыт один день «в офис»: только его карточки, по времени; другие дни и обучение — одни числа.
+        columns, counts, _by_source = queries.board(cur, lead, LEAD_GRANT, {}, days_open={'invited_office': ([day(15)], False)})
+        assert [c['id'] for c in columns['invited_office']] == [early, late] and columns['invited_training'] == []
+        assert counts['invited_office'] == 5 and counts['invited_training'] == 2
+        columns, _counts, _by_source = queries.board(cur, lead, LEAD_GRANT, {}, days_open={})
+        assert columns['invited_office'] == [] and columns['invited_training'] == []
+        columns, _counts, _by_source = queries.board(cur, lead, LEAD_GRANT, {},
+                                                     days_open={'invited_training': ([day(12), day(20)], False)})
+        assert {c['id'] for c in columns['invited_training']} == {upcoming, running} and columns['invited_office'] == []
+
+        # Порция — на день: по одной карточке на день, «Показать ещё» у 15.10 отдаёт его целиком.
+        columns, _counts, _by_source = queries.board(cur, lead, LEAD_GRANT, {}, per_column=1)
+        assert [c['id'] for c in columns['invited_office']] == [astana, yesterday, early, tomorrow]
+        columns, _counts, _by_source = queries.board(cur, lead, LEAD_GRANT, {}, per_column=1,
+                                                     days_open={'invited_office': ([day(15)], False)},
+                                                     expand_days={'invited_office': [day(15)]})
+        assert [c['id'] for c in columns['invited_office']] == [early, late]
+
+        # Отборы доски режут и числа дней; рекрутер видит дни своих карточек, чужой рекрутер — ни одного.
+        assert queries.board_days(cur, lead, LEAD_GRANT, {'city': 'Астана'}) == {'invited_office': {day(1): 1},
+                                                                                'invited_training': {}}
+        assert sum(queries.board_days(cur, {'recruiter': True}, REC1, {})['invited_office'].values()) == 5
+        assert queries.board_days(cur, {'recruiter': True}, REC2, {}) == {'invited_office': {}, 'invited_training': {}}
+
+        # Визит без даты (старые данные) — своя группа, раскрывается своим признаком.
+        cur.execute("UPDATE hiring_cards SET office_visit_at = NULL WHERE id = %s", (astana,))
+        assert queries.board_days(cur, lead, LEAD_GRANT, {})['invited_office'][None] == 1
+        columns, _counts, _by_source = queries.board(cur, lead, LEAD_GRANT, {}, days_open={'invited_office': ([], True)})
+        assert [c['id'] for c in columns['invited_office']] == [astana]
 
 
 # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ────────────────────────

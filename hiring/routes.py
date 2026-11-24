@@ -9,7 +9,8 @@ Blueprint собирается фабрикой и получает зависи
     GET    ''                               экран: права, справочники, состояние интеграций
     GET    /desk                             рабочий стол: план найма, задачи на сегодня, моя воронка, мотивация
     GET    /board                            канбан: колонки с порцией карточек и счётчиками; «Отклики» — по источникам
-                                             (groups) и с периодом responses_from/responses_to, expand — «Показать все»
+                                             (groups) и с периодом responses_from/responses_to, expand — «Показать все»;
+                                             «Приглашен в офис / на обучение» — по дням (days), office_/training_open|expand
     GET    /cards                            список по фильтрам (и по ids — для клика по цифре дашборда)
     POST   /cards                            отклик вручную
     GET    /cards/<id>                       карточка целиком (гасит уведомления по ней)
@@ -125,6 +126,34 @@ def _source_ids_arg(value, limit=50):
     tokens = [part.strip() for part in str(value or '').split(',')[:limit]]
     ids = [number for number in (_int(token) for token in tokens) if number and 0 < number < 2 ** 31]
     return ids, 'none' in tokens
+
+
+def day_groups(cards, counts, today):
+    """«Приглашен в офис» / «Приглашен на обучение» по дням (владелец 24.11.2026: «разбивку по датам приглашения начиная
+    от сегодня… раскрыть и посмотреть людей, которые приглашены к этому дню»; «прошлые дни должны уходить вниз»): порядок —
+    rules.day_order. cards — порция колонки (строки базы), counts — {день: сколько всего с учётом отборов}; карточки
+    группы — номерами, как у групп «Откликов»."""
+    return [{'day': day.isoformat() if day else None, 'total': int(counts[day]),
+             'card_ids': [card['id'] for card in cards if rules.board_day(card) == day]}
+            for day in rules.day_order(counts, today)]
+
+
+def _days_arg(value, limit=100):
+    """«2026-11-24,2026-11-25,none» из строки запроса → ([даты], True): дни колонки и группа без даты; неразборчивое
+    отбрасывается."""
+    tokens = [part.strip() for part in str(value or '').split(',')[:limit]]
+    days = []
+    for token in tokens:
+        try:
+            days.append(datetime.strptime(token, '%Y-%m-%d').date())
+        except ValueError:
+            continue
+    return days, 'none' in tokens
+
+
+# Параметры доски для дней колонок: раскрытые дни и дни, где нажали «Показать ещё».
+DAY_ARGS = ((rules.INVITED_OFFICE, 'office_open', 'office_expand'),
+            (rules.INVITED_TRAINING, 'training_open', 'training_expand'))
 
 
 def public_card(card, ctx):
@@ -352,18 +381,30 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
         # Группы «Откликов» свёрнуты, пока их не раскрыли (решение владельца 20.11.2026): open — раскрытые, карточки
         # приходят только им. Без open — всем группам (старая страница во время выкладки).
         opened = _source_ids_arg(request.args.get('open')) if 'open' in request.args else None
+        # «Приглашен в офис / на обучение» по дням (владелец 24.11.2026) — свёрнуты так же: карточки только раскрытым дням.
+        # Без office_open / training_open — всем дням (старая страница во время выкладки).
+        days_open = ({stage: _days_arg(request.args.get(open_arg)) for stage, open_arg, _more in DAY_ARGS}
+                     if any(open_arg in request.args for _stage, open_arg, _more in DAY_ARGS) else None)
+        expand_days = {stage: _days_arg(request.args.get(more_arg))[0] for stage, _open, more_arg in DAY_ARGS}
         with db._get_cursor() as cursor:
             columns, counts, by_source = queries.board(cursor, caps, ctx['user_id'], filters, responses_period=period,
-                                                       expand_sources=expand, responses_open=opened)
+                                                       expand_sources=expand, responses_open=opened,
+                                                       days_open=days_open, expand_days=expand_days)
+            by_day = queries.board_days(cursor, caps, ctx['user_id'], filters)
             sources = queries.list_sources(cursor)
+        today = rules.now_almaty().date()
         payload = []
         for code, label in rules.BOARD_COLUMNS:
+            rows = columns.get(code, [])
             column = {'stage': code, 'label': label, 'total': counts.get(code, 0),
-                      'cards': [public_card(card, ctx) for card in columns.get(code, [])]}
+                      'cards': [public_card(card, ctx) for card in rows]}
             if code == rules.RESPONSES:
                 column['groups'] = response_groups(column['cards'], by_source, sources)
+            elif code in rules.DATED_STAGES:
+                column['days'] = day_groups(rows, by_day.get(code, {}), today)
             payload.append(column)
-        return jsonify({'columns': payload})
+        # День сервера (Алматы): по нему расставлены дни колонок, по нему же экран подписывает «Сегодня» и «Завтра».
+        return jsonify({'columns': payload, 'today': today.isoformat()})
 
     @hiring_route('/cards')
     def hiring_cards(ctx):

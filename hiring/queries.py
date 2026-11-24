@@ -6,6 +6,7 @@
 """
 
 import json
+from datetime import date
 
 from . import rules
 
@@ -27,6 +28,10 @@ def _one(cursor):
 
 def _ids(values):
     return sorted({int(x) for x in (values or ()) if x})
+
+
+def _days(values):
+    return sorted({value for value in (values or ()) if isinstance(value, date)})
 
 
 # ─── Профиль и права ──────────────────────────────────────────────────────────
@@ -1182,18 +1187,8 @@ def _filters(filters):
     return where, params
 
 
-def board(cursor, caps, user_id, filters, per_column=60, responses_period=None, expand_sources=(), expanded_limit=1000,
-          responses_open=None):
-    """Колонки доски: порция карточек на колонку и полное число. Пул — свежие сверху, остальные — по последнему
-    изменению.
-
-    «Отклики» поделены по источникам (владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и
-    кол-вом»): порция и число — у каждого источника своё; expand_sources — источники, у которых «Показать ещё»
-    (порция expanded_limit). Группы свёрнуты, пока их не раскрыли (решение владельца 20.11.2026): responses_open —
-    (id источников, раскрыта ли группа без источника) — карточки отдаются только раскрытым группам, остальным — одно
-    число; None — всем (как до свёртки). Период — только у «Откликов» («остальные статусы не должны по периоду
-    фильтроваться»): responses_period = (с, по) по дате поступления, «по» не включительно, любая граница может быть
-    None. Возвращает (колонки, число по этапам, число откликов по источникам)."""
+def _board_where(caps, user_id, filters, responses_period=None):
+    """Условие доски и его параметры: круг человека (scope_clause), отборы и период «Откликов» — он режет только их."""
     scope_sql, scope_params = scope_clause(caps, user_id)
     where, params = _filters(filters)
     start, end = responses_period or (None, None)
@@ -1207,30 +1202,66 @@ def board(cursor, caps, user_id, filters, per_column=60, responses_period=None, 
     if bounds:
         where.append("(c.stage <> 'responses' OR (" + " AND ".join(bounds) + "))")
         params.extend(bound_params)
-    base_where = " AND ".join([scope_sql] + where)
-    cursor.execute("SELECT c.stage, COUNT(*) " + _CARD_FROM + " WHERE " + base_where + " GROUP BY c.stage",
-                   scope_params + params)
+    return " AND ".join([scope_sql] + where), scope_params + params
+
+
+# День карточки на доске (rules.board_day): визит в офис — его дата, обучение — дата старта группы, другие этапы — NULL.
+_BOARD_DAY = ("CASE c.stage WHEN 'invited_office' THEN c.office_visit_at::date "
+              "WHEN 'invited_training' THEN g.start_date END")
+
+
+def board(cursor, caps, user_id, filters, per_column=60, responses_period=None, expand_sources=(), expanded_limit=1000,
+          responses_open=None, days_open=None, expand_days=None):
+    """Колонки доски: порция карточек на колонку и полное число. Пул — свежие сверху, остальные — по последнему
+    изменению.
+
+    «Отклики» поделены по источникам (владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и
+    кол-вом»): порция и число — у каждого источника своё; expand_sources — источники, у которых «Показать ещё»
+    (порция expanded_limit). Группы свёрнуты, пока их не раскрыли (решение владельца 20.11.2026): responses_open —
+    (id источников, раскрыта ли группа без источника) — карточки отдаются только раскрытым группам, остальным — одно
+    число; None — всем (как до свёртки). Период — только у «Откликов» («остальные статусы не должны по периоду
+    фильтроваться»): responses_period = (с, по) по дате поступления, «по» не включительно, любая граница может быть
+    None. Возвращает (колонки, число по этапам, число откликов по источникам).
+
+    «Приглашен в офис» и «Приглашен на обучение» поделены по дням так же (владелец 24.11.2026, rules.board_day): порция —
+    на день, в офисе карточки дня идут по времени визита. days_open — {этап: (дни, раскрыта ли группа без даты)}:
+    карточки только раскрытым дням, этапа нет в словаре — ни одному; None — всем дням. expand_days — {этап: дни} с
+    «Показать ещё». Число карточек на каждый день — board_days."""
+    base_where, base_params = _board_where(caps, user_id, filters, responses_period)
+    cursor.execute("SELECT c.stage, COUNT(*) " + _CARD_FROM + " WHERE " + base_where + " GROUP BY c.stage", base_params)
     counts = {stage: int(count) for stage, count in cursor.fetchall()}
     cursor.execute("SELECT c.source_id, COUNT(*) " + _CARD_FROM + " WHERE " + base_where
-                   + " AND c.stage = 'responses' GROUP BY c.source_id", scope_params + params)
+                   + " AND c.stage = 'responses' GROUP BY c.source_id", base_params)
     by_source = {source_id: int(count) for source_id, count in cursor.fetchall()}
+    day_limits, day_limit_params, day_opened, day_opened_params = [], [], [], []
+    for stage in rules.DATED_STAGES:
+        day_limits.append("WHEN stage = %s AND board_day = ANY(%s::date[]) THEN %s")
+        day_limit_params += [stage, _days((expand_days or {}).get(stage)), int(expanded_limit)]
+        opened, opened_none = (days_open or {}).get(stage) or ((), False)
+        day_opened.append("AND (stage <> %s OR %s OR board_day = ANY(%s::date[]) OR (board_day IS NULL AND %s))")
+        day_opened_params += [stage, days_open is None, _days(opened), bool(opened_none)]
     cursor.execute("""
         SELECT * FROM (
-            SELECT """ + _CARD_COLUMNS + """,
-                   ROW_NUMBER() OVER (PARTITION BY c.stage, CASE WHEN c.stage = 'responses' THEN c.source_id END ORDER BY
+            SELECT """ + _CARD_COLUMNS + """, """ + _BOARD_DAY + """ AS board_day,
+                   ROW_NUMBER() OVER (PARTITION BY c.stage, CASE WHEN c.stage = 'responses' THEN c.source_id END, """
+                   + _BOARD_DAY + """ ORDER BY CASE WHEN c.stage = 'invited_office' THEN c.office_visit_at END,
                        CASE WHEN c.stage IN ('contacts', 'responses') THEN c.received_at ELSE c.updated_at END DESC, c.id DESC) AS rn
             """ + _CARD_FROM + " WHERE " + base_where + """
         ) ranked
-         WHERE rn <= CASE WHEN stage = 'responses' AND source_id = ANY(%s::int[]) THEN %s ELSE %s END
+         WHERE rn <= CASE WHEN stage = 'responses' AND source_id = ANY(%s::int[]) THEN %s """ + " ".join(day_limits) + """
+                          ELSE %s END
            AND (stage <> 'responses' OR %s OR source_id = ANY(%s::int[]) OR (source_id IS NULL AND %s))
-         ORDER BY stage, CASE WHEN stage IN ('contacts', 'responses') THEN received_at ELSE updated_at END DESC, id DESC
-    """, scope_params + params + [_ids(expand_sources), int(expanded_limit), int(per_column),
-                                  responses_open is None, _ids((responses_open or ((), False))[0]),
-                                  bool(responses_open and responses_open[1])])
+           """ + " ".join(day_opened) + """
+         ORDER BY stage, CASE WHEN stage = 'invited_office' THEN office_visit_at END,
+                  CASE WHEN stage IN ('contacts', 'responses') THEN received_at ELSE updated_at END DESC, id DESC
+    """, base_params + [_ids(expand_sources), int(expanded_limit)] + day_limit_params + [int(per_column),
+                        responses_open is None, _ids((responses_open or ((), False))[0]),
+                        bool(responses_open and responses_open[1])] + day_opened_params)
     rows = _all(cursor)
     columns = {stage: [] for stage in rules.STAGE_CODES}
     for row in rows:
         row.pop('rn', None)
+        row.pop('board_day', None)
         columns.setdefault(row['stage'], []).append(row)
     # «Отработал 10 дней» (SZOV-10) — колонка категории, а не этапа: те же карточки «Отработал 7 дней», у которых засчитана
     # десятая смена, — кандидат виден в обеих колонках сразу. Свежие засчитанные сверху; запросы — только когда на доске
@@ -1238,13 +1269,25 @@ def board(cursor, caps, user_id, filters, per_column=60, responses_period=None, 
     columns[rules.HIRED_10] = []
     if counts.get(rules.HIRED):
         ten_where = base_where + " AND c.stage = 'hired' AND c.hired10_at IS NOT NULL"
-        cursor.execute("SELECT COUNT(*) " + _CARD_FROM + " WHERE " + ten_where, scope_params + params)
+        cursor.execute("SELECT COUNT(*) " + _CARD_FROM + " WHERE " + ten_where, base_params)
         counts[rules.HIRED_10] = int(cursor.fetchone()[0])
         if counts[rules.HIRED_10]:
             cursor.execute("SELECT " + _CARD_COLUMNS + _CARD_FROM + " WHERE " + ten_where
-                           + " ORDER BY c.hired10_at DESC, c.id DESC LIMIT %s", scope_params + params + [int(per_column)])
+                           + " ORDER BY c.hired10_at DESC, c.id DESC LIMIT %s", base_params + [int(per_column)])
             columns[rules.HIRED_10] = _all(cursor)
     return columns, counts, by_source
+
+
+def board_days(cursor, caps, user_id, filters):
+    """Сколько карточек «Приглашен в офис» и «Приглашен на обучение» на каждый день (rules.board_day) с отборами доски —
+    числа у групп-дней, а не только у показанных карточек: {этап: {день или None: число}}."""
+    base_where, base_params = _board_where(caps, user_id, filters)
+    cursor.execute("SELECT c.stage, " + _BOARD_DAY + ", COUNT(*) " + _CARD_FROM + " WHERE " + base_where
+                   + " AND c.stage = ANY(%s) GROUP BY 1, 2", base_params + [list(rules.DATED_STAGES)])
+    days = {stage: {} for stage in rules.DATED_STAGES}
+    for stage, day, count in cursor.fetchall():
+        days[stage][day] = int(count)
+    return days
 
 
 def list_cards(cursor, caps, user_id, filters, limit=200, offset=0, order='c.updated_at DESC, c.id DESC'):

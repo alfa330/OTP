@@ -5,8 +5,9 @@ import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
 import { quickPeriods } from '../ui/periodRange';
 import {
-    ARCHIVE_STAGE, POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, boardQuery, codeOf, columnCollapsed, daysSince,
-    errorOf, groupCards, groupKey, initials, openICorePhoneCall, shortTime, sourceTone, todayIso, toggleInList, withExpanded,
+    ARCHIVE_STAGE, DATED_STAGES, POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, boardQuery, codeOf, columnCollapsed,
+    dayKey, dayLabel, daysSince, errorOf, groupCards, groupKey, initials, isPastDay, openDaysFrom, openICorePhoneCall, shortTime,
+    sourceTone, todayIso, toggleInList, visitTime, withExpanded, withExpandedDay,
 } from './hiringMeta';
 import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loading, Pill, SourcePill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
 
@@ -29,6 +30,12 @@ import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loadin
  * браузере; карточки сервер присылает только раскрытым, у длинной — «Показать ещё». Период — только у «Откликов»,
  * в их шапке: остальные этапы им не режутся (так и просил владелец).
  *
+ * «Приглашен в офис» и «Приглашен на обучение» поделены по дням (владелец 24.11.2026: «разбивку по датам приглашения
+ * начиная от сегодня… как в откликах раскрыть и посмотреть людей, которые приглашены к этому дню»; «прошлые дни должны
+ * уходить вниз»): в офисе — день визита, на обучении — старт группы. Сверху сегодня и дальше по порядку, ниже, под
+ * подписью «Прошедшие дни», — прошедшие от вчерашнего назад. Дни свёрнуты и раскрываются так же, как группы «Откликов»
+ * (раскрытые помнит браузер); в дне визита у карточки — время визита.
+ *
  * Последняя колонка — «Не отвечает звонок/чат» (владелец 20.11.2026: «отдельный список как архив», «по умолчанию
  * завёрнутый и серый»): туда сторож уводит из «В работе» тех, кто 72 часа не отвечает ни на звонок, ни на WhatsApp.
  * Свёрнута, пока её не раскрыли (раскрытие запоминается в браузере), и приглушена серым.
@@ -38,6 +45,8 @@ import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loadin
 const COLUMN_WIDTH = 'min-w-[236px] flex-1 basis-[272px]';
 const COLLAPSED_KEY = 'hiring.board.collapsed';
 const OPEN_GROUPS_KEY = 'hiring.board.openSources';
+// Раскрытые дни «Приглашен в офис» / «Приглашен на обучение»: {этап: [дни]}.
+const OPEN_DAYS_KEY = 'hiring.board.openDays';
 // Раскрытый архив «Не отвечает звонок/чат»: по умолчанию свёрнут — в прежних списках свёрнутых его нет.
 const ARCHIVE_OPEN_KEY = 'hiring.board.openArchive';
 // Быстрые периоды — как у остальных разделов сайта: «Сегодня», «Неделя», «Месяц», «Весь период»; виды — дни и месяцы.
@@ -66,16 +75,27 @@ const readList = (key) => {
     }
 };
 
-const saveList = (key, list) => {
+const readOpenDays = () => {
     try {
-        window.localStorage.setItem(key, JSON.stringify(list));
+        return openDaysFrom(JSON.parse(window.localStorage.getItem(OPEN_DAYS_KEY) || '{}'));
+    } catch (error) {
+        return openDaysFrom(null);
+    }
+};
+
+const saveStored = (key, value) => {
+    try {
+        window.localStorage.setItem(key, JSON.stringify(value));
     } catch (error) {
         // Приватное окно: свёрнутое просто не запомнится.
     }
 };
 
-/* showSource — плашка источника на карточке; в группах «Откликов» её нет: источник уже в шапке группы. */
-const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, onDragStart, onDragEnd, showSource = true }) => {
+/* showSource — плашка источника на карточке; в группах «Откликов» её нет: источник уже в шапке группы. inGroup — карточка
+   под липкой шапкой группы; visit — время визита в офис, когда день визита уже в шапке. */
+const CardTile = ({
+    card, canTake, canCall, onOpen, onTake, onCall, draggable, onDragStart, onDragEnd, showSource = true, inGroup = false, visit = '',
+}) => {
     const idle = card.last_touch_at || card.taken_at;
     const idleDays = idle && !POOL_STAGES.includes(card.stage) && !card.is_closed ? daysSince(idle) : null;
     const overdue = card.next_contact_at && !card.is_closed && daysSince(card.next_contact_at) > 0;
@@ -86,8 +106,9 @@ const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, o
             draggable={draggable}
             onDragStart={draggable ? (event) => onDragStart(event, card) : undefined}
             onDragEnd={draggable ? onDragEnd : undefined}
-            // В группе «Откликов» над карточкой липнет шапка группы: прокрутка к карточке в фокусе оставляет под шапку место.
-            className={`${iosCard} group relative cursor-pointer p-3 transition hover:ring-slate-300 ${draggable ? 'active:cursor-grabbing' : ''} ${showSource ? '' : 'scroll-mt-12'}`}
+            // В группе (источник «Откликов», день) над карточкой липнет шапка группы: прокрутка к карточке в фокусе оставляет
+            // под шапку место.
+            className={`${iosCard} group relative cursor-pointer p-3 transition hover:ring-slate-300 ${draggable ? 'active:cursor-grabbing' : ''} ${inGroup ? 'scroll-mt-12' : ''}`}
             onClick={() => onOpen(card.id)}
             role="button"
             tabIndex={0}
@@ -130,7 +151,7 @@ const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, o
                     </button>
                 ) : (
                     <span className="truncate">
-                        {card.next_contact_at && !card.is_closed ? `контакт ${shortTime(card.next_contact_at)}`
+                        {visit ? `визит ${visit}` : card.next_contact_at && !card.is_closed ? `контакт ${shortTime(card.next_contact_at)}`
                             : idleDays !== null && idleDays >= 7 ? `без касаний ${idleDays} дн` : card.candidate_no ? shortTime(card.received_at) : ''}
                     </span>
                 )}
@@ -146,18 +167,18 @@ const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, o
     );
 };
 
-/* Группа «Откликов» одного источника: шапка — стрелка, цвет источника, название и сколько откликов (всего, с учётом
-   отборов и периода, а не только показанных); шапка липнет к верху колонки, пока листаешь её карточки. Свёрнутая
-   группа — одна строка, и это вид по умолчанию: сначала видно все каналы с числами (решение владельца 20.11.2026).
-   Раскрыли — карточки приходят с сервера, до тех пор — «Загружаем…». Не все пришли — «Показать ещё N» (у карточек без
-   источника раскрывать нечем — сервер раскрывает группу по id источника, поэтому там кнопки нет); после догрузки фокус
-   встаёт на первую новую карточку, а не теряется вместе с кнопкой. */
-const SourceGroup = ({ group, open, cards, onToggle, onExpand, children }) => {
+/* Группа колонки: источник «Откликов» (цветная точка и название) или день «Приглашен в офис / на обучение». Шапка —
+   стрелка, подпись и сколько карточек (всего, с учётом отборов и периода, а не только показанных); шапка липнет к верху
+   колонки, пока листаешь её карточки. Свёрнутая группа — одна строка, и это вид по умолчанию: сначала видно все группы с
+   числами (решение владельца 20.11.2026). Раскрыли — карточки приходят с сервера, до тех пор — «Загружаем…». Не все
+   пришли — «Показать ещё N» (у группы без источника или без даты раскрывать нечем — сервер раскрывает группу по id
+   источника или по дате, поэтому там кнопки нет); после догрузки фокус встаёт на первую новую карточку, а не теряется
+   вместе с кнопкой. muted — прошедший день: подпись тише. */
+const BoardGroup = ({ label, dot = '', muted = false, total, open, cards, expandable, onToggle, onExpand, children }) => {
     const box = useRef(null);
     const focusFrom = useRef(null);
-    const expandable = group.source_id !== null && group.source_id !== undefined;
-    const waiting = open && cards.length === 0 && Number(group.total || 0) > 0;
-    const hidden = open && expandable && !waiting ? Math.max(0, Number(group.total || 0) - cards.length) : 0;
+    const waiting = open && cards.length === 0 && Number(total || 0) > 0;
+    const hidden = open && expandable && !waiting ? Math.max(0, Number(total || 0) - cards.length) : 0;
     useEffect(() => {
         if (focusFrom.current === null || cards.length <= focusFrom.current) return;
         box.current?.querySelectorAll(':scope > article')[focusFrom.current]?.focus();
@@ -166,13 +187,13 @@ const SourceGroup = ({ group, open, cards, onToggle, onExpand, children }) => {
     return (
         <div ref={box} className="flex flex-col gap-2">
             <button type="button" onClick={onToggle} aria-expanded={open}
-                    title={open ? `Свернуть «${group.name}»` : `Развернуть «${group.name}»`}
+                    title={open ? `Свернуть «${label}»` : `Развернуть «${label}»`}
                     className="sticky top-0 z-10 flex w-full items-center gap-2 rounded-xl bg-slate-100/95 px-2 py-1.5 text-left backdrop-blur-sm transition hover:bg-slate-200/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70">
                 <ChevronRight size={13} className={`shrink-0 text-slate-400 transition-transform ${open ? 'rotate-90' : ''}`} />
-                <span aria-hidden="true" className={`h-2.5 w-2.5 shrink-0 rounded-full ${sourceTone(group.color).dot}`} />
-                <span className="min-w-0 truncate text-[12.5px] font-semibold text-slate-700">{group.name}</span>
+                {dot && <span aria-hidden="true" className={`h-2.5 w-2.5 shrink-0 rounded-full ${dot}`} />}
+                <span className={`min-w-0 truncate text-[12.5px] font-semibold ${muted ? 'text-slate-500' : 'text-slate-700'}`}>{label}</span>
                 <span className="ml-auto shrink-0 rounded-full bg-white px-2 py-0.5 text-[11.5px] font-semibold tabular-nums text-slate-500 ring-1 ring-slate-200/70">
-                    {group.total}
+                    {total}
                 </span>
             </button>
             {open && children}
@@ -199,10 +220,11 @@ const ResponsesPeriod = ({ period, onChange }) => (
 
 const Column = ({
     column, caps, dropState, collapsed, onToggle, onOpen, onTake, onCall, canDrag, canCall, onDragStart, onDragEnd, onDrop,
-    period, onPeriod, openGroups = [], onToggleGroup, onExpandGroup,
+    period, onPeriod, openGroups = [], onToggleGroup, onExpandGroup, today, openDays = [], onToggleDay, onExpandDay,
 }) => {
     const [over, setOver] = useState(false);
     const grouped = Array.isArray(column.groups);
+    const dated = Array.isArray(column.days);
     const cardsById = useMemo(() => new Map(column.cards.map((card) => [card.id, card])), [column.cards]);
     const periodActive = Boolean(onPeriod && (period?.from || period?.to));
     const tone = STAGE_TONES[column.stage];
@@ -228,10 +250,27 @@ const Column = ({
             </button>
         );
     }
-    const tile = (card, showSource) => (
+    const tile = (card, extra = {}) => (
         <CardTile key={card.id} card={card} canTake={caps.take} canCall={canCall(card)} onOpen={onOpen} onTake={onTake} onCall={onCall}
-                  draggable={canDrag(card)} onDragStart={onDragStart} onDragEnd={onDragEnd} showSource={showSource} />
+                  draggable={canDrag(card)} onDragStart={onDragStart} onDragEnd={onDragEnd} {...extra} />
     );
+    // Дни колонки идут в порядке сервера: сегодня и дальше, ниже прошедшие — перед первым из них подпись «Прошедшие дни».
+    const dayGroup = (group, index) => {
+        const key = dayKey(group);
+        const past = isPastDay(group.day, today);
+        const cards = groupCards(group, cardsById);
+        return (
+            <React.Fragment key={key}>
+                {past && !isPastDay(column.days[index - 1]?.day, today) && (
+                    <div className="px-2 pt-1 text-[11.5px] font-medium text-slate-400">Прошедшие дни</div>
+                )}
+                <BoardGroup label={dayLabel(group.day, today)} muted={past} total={group.total} open={openDays.includes(key)}
+                            cards={cards} expandable={key !== 'none'} onToggle={() => onToggleDay(key)} onExpand={() => onExpandDay(group)}>
+                    {cards.map((card) => tile(card, { inGroup: true, visit: column.stage === 'invited_office' ? visitTime(card) : '' }))}
+                </BoardGroup>
+            </React.Fragment>
+        );
+    };
     return (
         <section className={`${COLUMN_WIDTH} group/column flex max-h-[calc(100vh-220px)] flex-col rounded-2xl p-2 transition ${surface}`} {...dragProps}>
             <header className="flex items-center gap-1.5 px-2 pb-2 pt-1">
@@ -249,16 +288,18 @@ const Column = ({
                 {grouped ? column.groups.map((group) => {
                     const cards = groupCards(group, cardsById);
                     return (
-                        <SourceGroup key={groupKey(group)} group={group} open={openGroups.includes(groupKey(group))} cards={cards}
-                                     onToggle={() => onToggleGroup(groupKey(group))} onExpand={() => onExpandGroup(group)}>
-                            {cards.map((card) => tile(card, false))}
-                        </SourceGroup>
+                        <BoardGroup key={groupKey(group)} label={group.name} dot={sourceTone(group.color).dot} total={group.total}
+                                    open={openGroups.includes(groupKey(group))} cards={cards}
+                                    expandable={group.source_id !== null && group.source_id !== undefined}
+                                    onToggle={() => onToggleGroup(groupKey(group))} onExpand={() => onExpandGroup(group)}>
+                            {cards.map((card) => tile(card, { showSource: false, inGroup: true }))}
+                        </BoardGroup>
                     );
-                }) : column.cards.map((card) => tile(card, true))}
+                }) : dated ? column.days.map(dayGroup) : column.cards.map((card) => tile(card))}
                 {column.total === 0 && (
                     <div className="py-6 text-center text-[12px] text-slate-400">{periodActive ? 'За этот период откликов нет' : 'Пусто'}</div>
                 )}
-                {!grouped && column.total > column.cards.length && (
+                {!grouped && !dated && column.total > column.cards.length && (
                     <div className="py-2 text-center text-[11.5px] text-slate-400">
                         Показаны {column.cards.length} из {column.total} — уточните отбор
                     </div>
@@ -366,6 +407,11 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
     const [period, setPeriod] = useState({ from: '', to: '' });
     const [openGroups, setOpenGroups] = useState(() => readList(OPEN_GROUPS_KEY).map(String));
     const [expanded, setExpanded] = useState([]);
+    // «Приглашен в офис / на обучение»: раскрытые дни ({этап: [дни]}, свёрнуты все, пока не раскрыли), дни с «Показать ещё»
+    // и сегодняшний день сервера — по нему подписаны «Сегодня» и «Завтра».
+    const [openDays, setOpenDays] = useState(readOpenDays);
+    const [expandedDays, setExpandedDays] = useState({});
+    const [today, setToday] = useState(todayIso);
     const timer = useRef(null);
     const requestSeq = useRef(0);
     const [debounced, setDebounced] = useState('');
@@ -382,11 +428,17 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
         const seq = requestSeq.current + 1;
         requestSeq.current = seq;
         setLoading(true);
-        return api.get('/board', boardQuery({ mine: scope === 'mine', query: debounced, filters, period, expanded, open: openGroups }))
-            .then(({ data }) => { if (seq === requestSeq.current) setColumns(data.columns); })
+        return api.get('/board', boardQuery({
+            mine: scope === 'mine', query: debounced, filters, period, expanded, open: openGroups, openDays, expandedDays,
+        }))
+            .then(({ data }) => {
+                if (seq !== requestSeq.current) return;
+                setColumns(data.columns);
+                if (data.today) setToday(data.today);
+            })
             .catch((error) => { if (seq === requestSeq.current) toast(errorOf(error, 'Не удалось загрузить доску'), 'error'); })
             .finally(() => { if (seq === requestSeq.current) setLoading(false); });
-    }, [api, scope, debounced, filters, period, expanded, openGroups, toast]);
+    }, [api, scope, debounced, filters, period, expanded, openGroups, openDays, expandedDays, toast]);
 
     useEffect(() => { load(); }, [load, version]);
 
@@ -461,24 +513,30 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
         if (stage === ARCHIVE_STAGE) {
             setOpenedArchive((prev) => {
                 const next = toggleInList(prev, stage);
-                saveList(ARCHIVE_OPEN_KEY, next);
+                saveStored(ARCHIVE_OPEN_KEY, next);
                 return next;
             });
             return;
         }
         setCollapsed((prev) => {
             const next = toggleInList(prev, stage);
-            saveList(COLLAPSED_KEY, next);
+            saveStored(COLLAPSED_KEY, next);
             return next;
         });
     };
     const toggleGroup = (key) => setOpenGroups((prev) => {
         const next = toggleInList(prev, key);
-        saveList(OPEN_GROUPS_KEY, next);
+        saveStored(OPEN_GROUPS_KEY, next);
         return next;
     });
     // «Показать ещё» — источник уходит в expand, сервер отдаёт его отклики целиком (до тысячи).
     const expandGroup = (group) => setExpanded((prev) => withExpanded(prev, group));
+    const toggleDay = (stage, key) => setOpenDays((prev) => {
+        const next = openDaysFrom({ ...prev, [stage]: toggleInList(prev[stage], key) });
+        saveStored(OPEN_DAYS_KEY, next);
+        return next;
+    });
+    const expandDay = (stage, group) => setExpandedDays((prev) => ({ ...prev, [stage]: withExpandedDay(prev[stage], group) }));
 
     const activeFilters = Object.values(filters).filter(Boolean).length;
     return (
@@ -528,6 +586,9 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
                                     onDragStart={onDragStart} onDragEnd={onDragEnd} onDrop={onDrop}
                                     {...(column.stage === 'responses' ? {
                                         period, onPeriod: setPeriod, openGroups, onToggleGroup: toggleGroup, onExpandGroup: expandGroup,
+                                    } : DATED_STAGES.includes(column.stage) ? {
+                                        today, openDays: openDays[column.stage] || [], onToggleDay: (key) => toggleDay(column.stage, key),
+                                        onExpandDay: (group) => expandDay(column.stage, group),
                                     } : {})} />
                         ))}
                     </div>

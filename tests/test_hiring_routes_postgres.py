@@ -577,6 +577,69 @@ def test_board_responses_groups_and_period_through_routes(client):
     assert len(whole['cards']) == 62
 
 
+def test_board_invited_days_through_routes(client):
+    """Владелец 24.11.2026: «Приглашен в офис» и «Приглашен на обучение» — по дням «начиная от сегодня», «прошлые дни должны
+    уходить вниз»; раскрываются как группы «Откликов». Ручка отдаёт days (день, число, номера карточек): сегодня и дальше,
+    ниже прошедшие, — и свой сегодняшний день; карточки — только раскрытым дням (office_open / training_open), без этих
+    параметров — всем (старая страница во время выкладки)."""
+    rec = as_user(REC1)
+    boot = client.get('/api/hiring', headers=rec).get_json()
+    manual = next(s for s in boot['dictionaries']['sources'] if s['code'] == 'manual')
+    today = rules.now_almaty().date()
+
+    def iso(shift):
+        return (today + timedelta(days=shift)).isoformat()
+
+    def worked(phone):
+        card = client.post('/api/hiring/cards', json={'phone': phone, 'source_id': manual['id']}, headers=rec).get_json()['card']
+        assert client.post('/api/hiring/cards/%s/take' % card['id'], headers=rec).status_code == 200
+        client.post('/api/hiring/cards/%s/touches' % card['id'], json={'kind': 'call', 'result': 'dial'}, headers=rec)
+        return card['id']
+
+    def move(card_id, payload):
+        moved = client.post('/api/hiring/cards/%s/move' % card_id, json=payload, headers=rec)
+        assert moved.status_code == 200, moved.get_json()
+        return card_id
+
+    def office(phone, shift, hour):
+        return move(worked(phone), {'target': 'invited_office', 'office_visit_at': '%sT%02d:00' % (iso(shift), hour)})
+
+    past = office('8 705 500 00 01', -3, 10)
+    later = office('8 705 500 00 02', 0, 15)
+    sooner = office('8 705 500 00 03', 0, 9)
+    ahead = office('8 705 500 00 04', 2, 11)
+    with client.world['db']._get_cursor() as cur:
+        groups = [queries.create_group(cur, 'Группа %d' % shift, today + timedelta(days=shift), TRAINER, 367,
+                                       client.world['vacancy_id'], SUPER, rules.now_almaty()) for shift in (-7, 1)]
+    started = move(worked('8 705 500 00 05'), {'target': 'invited_training', 'group_id': groups[0]})
+    upcoming = move(worked('8 705 500 00 06'), {'target': 'invited_training', 'group_id': groups[1]})
+
+    def board(**query):
+        data = client.get('/api/hiring/board', query_string=query, headers=rec).get_json()
+        return data, {column['stage']: column for column in data['columns']}
+
+    def days_of(column):
+        return [(g['day'], g['total'], g['card_ids']) for g in column['days']]
+
+    data, columns = board()
+    assert data['today'] == today.isoformat()
+    assert days_of(columns['invited_office']) == [(iso(0), 2, [sooner, later]), (iso(2), 1, [ahead]), (iso(-3), 1, [past])]
+    assert days_of(columns['invited_training']) == [(iso(1), 1, [upcoming]), (iso(-7), 1, [started])]
+    assert columns['invited_office']['total'] == 4 and 'groups' not in columns['invited_office']
+    assert all('days' not in columns[stage] for stage in ('responses', 'in_work', 'refused', 'hired_10'))
+    assert all(set(g) == {'day', 'total', 'card_ids'} for g in columns['invited_office']['days'])
+
+    # Свёрнутые дни: карточки только раскрытым, числа — всем; '-' — ни одного дня; мусор не ломает ответ.
+    _data, columns = board(office_open=iso(0), training_open='-')
+    assert [c['id'] for c in columns['invited_office']['cards']] == [sooner, later]
+    assert days_of(columns['invited_office']) == [(iso(0), 2, [sooner, later]), (iso(2), 1, []), (iso(-3), 1, [])]
+    assert columns['invited_training']['cards'] == [] and columns['invited_training']['total'] == 2
+    _data, columns = board(office_open='мусор,2026-02-30,%s' % iso(-3), office_expand='x,%s' % iso(-3))
+    assert [c['id'] for c in columns['invited_office']['cards']] == [past] and columns['invited_training']['cards'] == []
+    _data, columns = board(office_open='-', training_open='%s,none' % iso(1))
+    assert columns['invited_office']['cards'] == [] and [c['id'] for c in columns['invited_training']['cards']] == [upcoming]
+
+
 def test_external_responses(client):
     body = {'source': 'kaspi', 'items': [{'phone': '8 705 777 00 01', 'name': 'Kaspi Один', 'city': 'Алматы', 'vacancy': 'Водитель'},
                                         {'phone': 'мусор'}]}

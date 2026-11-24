@@ -52,6 +52,31 @@ HIRED_10_LABEL = 'Отработал 10 дней'
 # Колонки доски: этапы и категория тренера сразу за «Отработал 7 дней».
 BOARD_COLUMNS = tuple(item for code, label in STAGES
                       for item in (((code, label), (HIRED_10, HIRED_10_LABEL)) if code == HIRED else ((code, label),)))
+# «Приглашен в офис» и «Приглашен на обучение» на доске поделены по дням (владелец 24.11.2026: «разбивку по датам
+# приглашения начиная от сегодня, чтобы можно было, как в откликах, раскрыть и посмотреть людей, которые приглашены к этому
+# дню»; «прошлые дни должны уходить вниз»). День в офисе — дата визита, на обучении — дата старта группы.
+DATED_STAGES = (INVITED_OFFICE, INVITED_TRAINING)
+
+
+def board_day(card):
+    """День карточки в колонке доски (DATED_STAGES): дата визита в офис или старта группы обучения; без даты и на других
+    этапах — None. То же правило, что выражение queries._BOARD_DAY, по которому база считает карточки дня."""
+    stage = card.get('stage')
+    if stage == INVITED_OFFICE:
+        moment = card.get('office_visit_at')
+        return moment.date() if isinstance(moment, datetime) else moment
+    if stage == INVITED_TRAINING:
+        return card.get('group_start_date')
+    return None
+
+
+def day_order(days, today):
+    """Порядок дней колонки: с сегодняшнего вперёд, ближний сверху; ниже прошедшие — от вчерашнего назад; карточки без
+    даты — последней группой."""
+    days = set(days)
+    ahead = sorted(day for day in days if day is not None and day >= today)
+    past = sorted((day for day in days if day is not None and day < today), reverse=True)
+    return ahead + past + ([None] if None in days else [])
 
 POOL_STAGES = (CONTACTS, RESPONSES)
 FINAL_STAGES = (REFUSED, DROPPED, HIRED)
