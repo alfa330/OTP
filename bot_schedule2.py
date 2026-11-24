@@ -3780,37 +3780,36 @@ def _parse_user_agent_details(user_agent):
     }
 
 
-def _resolve_super_admin_chat_ids():
+def _resolve_session_access_notify_chat_ids():
+    """Кому слать «Открыт доступ к чувствительным данным».
+
+    Только админам, которые сами включили тумблер «Уведомления о доступе» в
+    разделе «Сессии» (владелец, 24.11.2026: по умолчанию выключен у всех).
+    Раньше сообщение безусловно уходило всем супер-админам и на SUPER_ADMIN_ID
+    из окружения — на каждый QR каждого оператора.
+
+    Роль сверяется в момент отправки тем же `_is_admin_role`, что пускает в
+    раздел: админа понизили — сообщения ему больше не идут, хотя подписка
+    осталась.
+    """
     chat_ids = []
     seen = set()
-
-    def _add_chat_id(raw_chat_id):
-        if raw_chat_id in (None, ''):
-            return
+    try:
+        recipients = db.list_session_access_notify_recipients()
+    except Exception as e:
+        logging.error(f"Failed to resolve session access notify recipients: {e}", exc_info=True)
+        return chat_ids
+    for person in recipients or []:
+        if not _is_admin_role(person.get('role')):
+            continue
         try:
-            chat_id = int(str(raw_chat_id).strip())
+            chat_id = int(str(person.get('telegram_id')).strip())
         except Exception:
-            return
+            continue
         if chat_id <= 0 or chat_id in seen:
-            return
+            continue
         seen.add(chat_id)
         chat_ids.append(chat_id)
-
-    _add_chat_id(super_admin_id)
-
-    try:
-        with db._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT telegram_id
-                FROM users
-                WHERE role = 'super_admin'
-                  AND telegram_id IS NOT NULL
-            """)
-            for row in cursor.fetchall() or []:
-                _add_chat_id(row[0] if isinstance(row, (tuple, list)) and row else row)
-    except Exception as e:
-        logging.error(f"Failed to resolve super admin chat ids: {e}", exc_info=True)
-
     return chat_ids
 
 
@@ -3866,7 +3865,7 @@ def _build_sensitive_access_approved_message_html(
         f"<b>Кому:</b> {person(operator_name, operator_role_label, operator_login)}",
         f"<b>Супервайзер:</b> {_escape_telegram_html(operator_supervisor_name or '—', 120)}",
         # Выдачу из раздела «Сессии» помечаем: оператор её не инициировал и мог
-        # о ней не знать — для супер-админа это и есть главное отличие от QR.
+        # о ней не знать — для получателя это и есть главное отличие от QR.
         f"<b>Открыл:</b> {person(approver_name, approver_role_label)}"
         f"{' · вручную, без QR' if source == 'manual' else ''}",
         f"<b>Когда:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(datetime.now()), 40)}",
@@ -3881,20 +3880,33 @@ def _build_sensitive_access_approved_message_html(
     return message
 
 
-def _notify_super_admin_sensitive_access_approved(
+def _notify_sensitive_access_approved(
     approver,
     operator,
     claims,
-    operator_session,
     approval_context,
-    operator_supervisor_name,
     source='qr'
 ):
+    """Сообщение в Telegram о выдаче доступа — тем, кто включил тумблер в «Сессиях».
+
+    Зовётся фоновым потоком. Получателей обычно нет — тумблер по умолчанию
+    выключен у всех, — поэтому сессию оператора и его супервайзера для текста
+    читаем здесь и только когда есть кому слать, а не в ручке на каждую выдачу.
+    """
     try:
-        super_admin_chat_ids = _resolve_super_admin_chat_ids()
-        if not super_admin_chat_ids:
-            logging.warning("Sensitive access approved, but super admin chat_id is not configured")
+        chat_ids = _resolve_session_access_notify_chat_ids()
+        if not chat_ids:
             return
+
+        claims = claims or {}
+        operator_id = operator[0] if isinstance(operator, (tuple, list)) and operator else None
+        session_id = claims.get('session_id')
+        operator_session = (
+            db.get_user_session(session_id=session_id, user_id=operator_id)
+            if session_id and operator_id else None
+        )
+        supervisor_id = operator[6] if isinstance(operator, (tuple, list)) and len(operator) > 6 else None
+        supervisor = db.get_user(id=supervisor_id) if supervisor_id else None
 
         message = _build_sensitive_access_approved_message_html(
             approver=approver,
@@ -3902,27 +3914,27 @@ def _notify_super_admin_sensitive_access_approved(
             claims=claims,
             operator_session=operator_session,
             approval_context=approval_context,
-            operator_supervisor_name=operator_supervisor_name,
+            operator_supervisor_name=supervisor[2] if supervisor else None,
             source=source
         )
 
-        for chat_id in super_admin_chat_ids:
+        for chat_id in chat_ids:
             try:
                 response = _send_telegram_text_message(chat_id=chat_id, text=message, parse_mode='HTML')
                 if response.status_code != 200:
                     logging.error(
-                        "Failed to send sensitive access approval notification to super admin %s: %s",
+                        "Failed to send sensitive access approval notification to %s: %s",
                         chat_id,
                         _get_telegram_error_text(response)
                     )
             except Exception as send_error:
                 logging.error(
-                    "Error sending sensitive access approval notification to super admin %s: %s",
+                    "Error sending sensitive access approval notification to %s: %s",
                     chat_id,
                     send_error
                 )
     except Exception as notify_error:
-        logging.error(f"notify_super_admin_sensitive_access_approved error: {notify_error}", exc_info=True)
+        logging.error(f"notify_sensitive_access_approved error: {notify_error}", exc_info=True)
 
 
 
@@ -12864,6 +12876,46 @@ def list_admin_sessions():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/admin/sessions/notify', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def admin_sessions_notify():
+    """Свой тумблер «Уведомления о доступе» в разделе «Сессии».
+
+    Включивший получает в Telegram «Открыт доступ к чувствительным данным» на
+    каждую выдачу — по QR и кнопкой из раздела. По умолчанию выключен у всех
+    (владелец, 24.11.2026): раньше сообщение безусловно получали все
+    супер-админы. Тумблер у каждого свой, чужой отсюда не переключить.
+    """
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        error, status = _admin_sessions_guard()
+        if error:
+            return jsonify(error), status
+
+        user_id = getattr(g, 'user_id', None)
+        if request.method == 'PUT':
+            data = request.get_json(silent=True) or {}
+            enabled = data.get('enabled')
+            # Только настоящий bool: строка «false» в Python истинна, и
+            # «выключить» молча включало бы.
+            if not isinstance(enabled, bool):
+                return jsonify({"error": "enabled must be true or false"}), 400
+            state = db.set_session_access_notify(user_id, enabled)
+        else:
+            state = db.get_session_access_notify_state(user_id)
+
+        return jsonify({
+            "status": "success",
+            "enabled": bool(state.get('enabled')),
+            "telegram_linked": bool(state.get('telegram_linked')),
+        }), 200
+    except Exception as e:
+        logging.error(f"admin_sessions_notify error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/admin/session-users/<int:user_id>', methods=['GET', 'OPTIONS'])
 @require_api_key
 def get_admin_session_user(user_id):
@@ -13132,16 +13184,10 @@ def grant_admin_session_sensitive_access(session_id):
         if not updated:
             return jsonify({"error": "Не удалось открыть доступ: сессия изменилась"}), 409
 
-        operator_session = db.get_user_session(session_id=session_id, user_id=target_id)
-        target_supervisor_id = target[6] if len(target) > 6 else None
-        operator_supervisor_name = None
-        if target_supervisor_id:
-            supervisor = db.get_user(id=target_supervisor_id)
-            if supervisor:
-                operator_supervisor_name = supervisor[2]
-
         # Всё из request и g вычислено ДО потока: он уходит из контекста Flask, и
-        # обращение к ним оттуда бросает RuntimeError.
+        # обращение к ним оттуда бросает RuntimeError. Сессию и супервайзера для
+        # текста поток читает сам — и только если есть кому слать (тумблер
+        # «Уведомления о доступе» по умолчанию выключен у всех).
         approval_context = {
             "request_ip": _client_ip(),
             "request_user_agent": request.headers.get('User-Agent'),
@@ -13149,9 +13195,8 @@ def grant_admin_session_sensitive_access(session_id):
         }
 
         threading.Thread(
-            target=_notify_super_admin_sensitive_access_approved,
-            args=(approver, target, {"session_id": session_id}, operator_session,
-                  approval_context, operator_supervisor_name),
+            target=_notify_sensitive_access_approved,
+            args=(approver, target, {"session_id": session_id}, approval_context),
             kwargs={"source": "manual"},
             daemon=True
         ).start()
@@ -13471,14 +13516,9 @@ def approve_sensitive_access():
         if not updated:
             return jsonify({"error": "Failed to activate access for operator session"}), 409
 
-        operator_session = db.get_user_session(session_id=claims["session_id"], user_id=operator_id)
-        operator_supervisor_name = None
-        operator_supervisor_id = operator[6] if len(operator) > 6 else None
-        if operator_supervisor_id:
-            supervisor = db.get_user(id=operator_supervisor_id)
-            if supervisor:
-                operator_supervisor_name = supervisor[2]
-
+        # Сессию и супервайзера для текста уведомления поток читает сам и только
+        # если есть кому слать: тумблер «Уведомления о доступе» в «Сессиях» по
+        # умолчанию выключен у всех.
         approval_context = {
             "request_ip": _client_ip(),
             "request_user_agent": request.headers.get('User-Agent'),
@@ -13486,8 +13526,8 @@ def approve_sensitive_access():
         }
 
         threading.Thread(
-            target=_notify_super_admin_sensitive_access_approved,
-            args=(approver, operator, claims, operator_session, approval_context, operator_supervisor_name),
+            target=_notify_sensitive_access_approved,
+            args=(approver, operator, claims, approval_context),
             daemon=True
         ).start()
 

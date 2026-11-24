@@ -2238,6 +2238,18 @@ class SchemaMixin:
                 CREATE INDEX IF NOT EXISTS idx_session_access_events_session
                 ON session_access_events(session_id, created_at DESC);
             """)
+            # Кто хочет знать об открытии доступа (владелец, 24.11.2026): сообщение
+            # «Открыт доступ к чувствительным данным» уходит в Telegram только тем
+            # админам, кто включил тумблер в разделе «Сессии»; по умолчанию он
+            # выключен у всех. Есть строка — включено; выключение строку удаляет:
+            # «не подписан» — одно состояние, как у twofa_notify_optin.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS session_access_notify_optin (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    enabled_at TIMESTAMP NOT NULL
+                        DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
             cursor.execute("""
                 CREATE OR REPLACE FUNCTION revoke_sessions_on_inactive_status()
                 RETURNS TRIGGER

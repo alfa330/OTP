@@ -1,6 +1,7 @@
 import React from 'react';
 import MobileActionSheet from '../common/MobileActionSheet';
 import { roleTitle } from '../news/newsShared';
+import { IosHint, IosToggle } from '../ui/ios';
 import { lastSeenLabel, plural, personWord, roleLabel, sessionWord, sessionWordAcc } from './userAgent';
 import './sessions-mobile.css';
 
@@ -143,6 +144,12 @@ export default function SessionsMobileView({
     selectedSessionsCount,
     bulkRevoking,
     onBulkRevoke,
+    notify = null,
+    notifyBusy = false,
+    onToggleNotify,
+    notifyLabel,
+    notifyHint,
+    notifyNoTelegram,
 }) {
     const [selecting, setSelecting] = React.useState(false);
     const [sortOpen, setSortOpen] = React.useState(false);
@@ -242,6 +249,22 @@ export default function SessionsMobileView({
                         </>
                     )}
                 </p>
+            )}
+
+            {/* Свой тумблер уведомлений об открытии доступа — строкой настроек,
+                как в «Настройках» iOS; пояснение — под «i», а не текстом рядом. */}
+            {notify && (
+                <div className="ses-m-notify">
+                    <span className="ses-m-notify-label">
+                        {notifyLabel}
+                        <IosHint label="Что за уведомления" text={notifyHint} />
+                    </span>
+                    <IosToggle checked={notify.enabled} disabled={notifyBusy}
+                        onChange={onToggleNotify} ariaLabel={notifyLabel} />
+                    {notify.enabled && !notify.telegram_linked && (
+                        <span className="ses-m-notify-warn text-amber-700">{notifyNoTelegram}</span>
+                    )}
+                </div>
             )}
 
             <div className="ses-m-search">

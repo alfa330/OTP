@@ -966,6 +966,70 @@ class UsersMixin:
             ))
             return True
 
+    # ── Уведомления об открытии доступа (тумблер в разделе «Сессии») ─────────
+    # Владелец, 24.11.2026: сообщение «Открыт доступ к чувствительным данным»
+    # приходит только тем админам, кто сам включил тумблер; по умолчанию он
+    # выключен у всех. Строка в session_access_notify_optin = включено.
+
+    def _session_access_notify_state(self, cursor, user_id):
+        cursor.execute("""
+            SELECT EXISTS (SELECT 1 FROM session_access_notify_optin o
+                            WHERE o.user_id = u.id),
+                   u.telegram_id IS NOT NULL
+              FROM users u
+             WHERE u.id = %s
+        """, (int(user_id),))
+        row = cursor.fetchone()
+        return {
+            'enabled': bool(row[0]) if row else False,
+            # Уведомление ходит только в Telegram: без привязки включённый
+            # тумблер ничего не принесёт, и экран обязан это сказать.
+            'telegram_linked': bool(row[1]) if row else False,
+        }
+
+    def get_session_access_notify_state(self, user_id):
+        """Включён ли у человека тумблер и привязан ли Telegram — одним запросом."""
+        with self._get_cursor() as cursor:
+            return self._session_access_notify_state(cursor, user_id)
+
+    def set_session_access_notify(self, user_id, enabled):
+        """Включить или выключить себе уведомления об открытии доступа.
+
+        Выключение удаляет строку, а не хранит FALSE: «не подписан» — одно
+        состояние. Возвращает состояние после записи, прочитанное тем же курсором.
+        """
+        user_id = int(user_id)
+        with self._get_cursor() as cursor:
+            if enabled:
+                cursor.execute("""
+                    INSERT INTO session_access_notify_optin (user_id) VALUES (%s)
+                    ON CONFLICT (user_id) DO NOTHING
+                """, (user_id,))
+            else:
+                cursor.execute(
+                    "DELETE FROM session_access_notify_optin WHERE user_id = %s", (user_id,))
+            return self._session_access_notify_state(cursor, user_id)
+
+    def list_session_access_notify_recipients(self):
+        """Включившие тумблер, кто работает и у кого привязан Telegram.
+
+        Роль здесь не проверяется: её сверяет вызывающий тем же правилом, что
+        пускает в раздел (`_is_admin_role`), — вторая копия правила в SQL
+        разошлась бы с ним молча. Админ, которого понизили, строку сохраняет,
+        но сообщений не получает, пока снова не станет админом.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.role, u.telegram_id
+                  FROM session_access_notify_optin o
+                  JOIN users u ON u.id = o.user_id
+                 WHERE u.telegram_id IS NOT NULL
+                   AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+                 ORDER BY u.id
+            """)
+            return [{'user_id': int(row[0]), 'role': row[1], 'telegram_id': row[2]}
+                    for row in cursor.fetchall()]
+
     def is_session_sensitive_access_unlocked(self, session_id, user_id, cursor=None):
         """Подтверждена ли сессия QR-кодом.
 

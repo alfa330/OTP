@@ -98,6 +98,43 @@ body.mobile-shell .ses-m-sub > span {
     white-space: nowrap;
 }
 
+/* ── Свой тумблер «Уведомления о доступе»: строка настроек над поиском ──
+   Сеткой, а не flex с gap: общий слой оболочки переносит такие ряды, и
+   тумблер уезжал бы под подпись. */
+body.mobile-shell .ses-m-notify {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 12px;
+    margin: 0 0 12px;
+    padding: 9px 12px 9px 16px;
+    border-radius: 12px;
+    background: var(--sheet-card);
+    box-shadow: 0 0 0 0.5px var(--sheet-sep);
+}
+
+/* Сводки нет, когда сессий нет вовсе, — строка встаёт сразу под шапкой. */
+body.mobile-shell .ses-m-head + .ses-m-notify {
+    margin-top: 10px;
+}
+
+body.mobile-shell .ses-m-notify-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 16px;
+    line-height: 21px;
+    color: var(--sheet-text);
+}
+
+body.mobile-shell .ses-m-notify-warn {
+    grid-column: 1 / -1;
+    margin-top: 4px;
+    font-size: 13px;
+    line-height: 18px;
+}
+
 /* ── Поиск: поле системного вида ── */
 
 body.mobile-shell .ses-m-search {

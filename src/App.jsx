@@ -448,6 +448,10 @@ const ADMIN_SESSIONS_DEFAULT_VIEW = Object.freeze({
 const SESSION_DEPARTMENT_ALL = 'all';
 const SESSION_DEPARTMENT_NONE = 'none';
 const SESSION_DEPARTMENT_NONE_LABEL = 'Без отдела';
+// Тумблер «Уведомления о доступе» в «Сессиях» — одни слова на обе раскладки.
+const SESSION_NOTIFY_LABEL = 'Уведомления о доступе';
+const SESSION_NOTIFY_HINT = 'Сообщение в Telegram, когда сотруднику открывают доступ к чувствительным данным — по QR или кнопкой в этом разделе. Только вам и только пока переключатель включён; по умолчанию он выключен.';
+const SESSION_NOTIFY_NO_TELEGRAM = 'Telegram не привязан — уведомления не придут. Войдите в бота портала своим логином и паролем.';
 const FOUR_YOU_ADMIN_USER_ID = 2;
 // Раздел 4 You закрыт для всех, в том числе для того, кто его ведёт (04.10.2026,
 // слово владельца). Зеркало — FOUR_YOU_SECTION_OPEN в bot_schedule2.py; тест
@@ -43920,6 +43924,49 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             />
         ) : null;
 
+        // ── Тумблер «Уведомления о доступе» ──────────────────────────────────────
+        // Свой у каждого админа и по умолчанию выключен (владелец, 24.11.2026):
+        // «Открыт доступ к чувствительным данным» уходит в Telegram только
+        // включившим. Читается один раз при входе в раздел — список сессий
+        // перезапрашивается на каждую букву поиска, и тумблер к нему не привязан:
+        // иначе ответ списка, ушедший до щелчка, вернул бы тумблер назад.
+        const notifyUserId = apiHeaders?.['X-User-Id'] ?? null;
+        const [notify, setNotify] = React.useState(null); // { enabled, telegram_linked } | null
+        const [notifyBusy, setNotifyBusy] = React.useState(false);
+
+        React.useEffect(() => {
+            if (!notifyUserId) return undefined;
+            let cancelled = false;
+            axios.get(`${API_BASE_URL}/api/admin/sessions/notify`, { headers: { 'X-User-Id': notifyUserId } })
+                .then(({ data }) => {
+                    if (cancelled || data?.status !== 'success') return;
+                    setNotify({ enabled: Boolean(data.enabled), telegram_linked: Boolean(data.telegram_linked) });
+                })
+                // Не прочитали — тумблер просто не показываем: список от него не зависит.
+                .catch(() => {});
+            return () => { cancelled = true; };
+        }, [notifyUserId]);
+
+        const toggleNotify = React.useCallback(async (next) => {
+            if (!notifyUserId) return;
+            setNotifyBusy(true);
+            setNotify((prev) => (prev ? { ...prev, enabled: next } : prev));
+            try {
+                const { data } = await axios.put(
+                    `${API_BASE_URL}/api/admin/sessions/notify`,
+                    { enabled: next },
+                    { headers: { 'X-User-Id': notifyUserId } }
+                );
+                if (data?.status !== 'success') throw new Error(data?.error || '');
+                setNotify({ enabled: Boolean(data.enabled), telegram_linked: Boolean(data.telegram_linked) });
+            } catch (err) {
+                setNotify((prev) => (prev ? { ...prev, enabled: !next } : prev));
+                emitAppToast(err?.response?.data?.error || 'Не удалось переключить уведомления', 'error');
+            } finally {
+                setNotifyBusy(false);
+            }
+        }, [notifyUserId]);
+
         // ── Карточка сотрудника ──────────────────────────────────────────────────
         const [detailPerson, setDetailPerson] = React.useState(null);
         const [detail, setDetail] = React.useState(null);
@@ -44348,6 +44395,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             selectedSessionsCount={selectedSessionsCount}
                             bulkRevoking={bulkRevoking}
                             onBulkRevoke={handleBulkRevoke}
+                            notify={notify}
+                            notifyBusy={notifyBusy}
+                            onToggleNotify={toggleNotify}
+                            notifyLabel={SESSION_NOTIFY_LABEL}
+                            notifyHint={SESSION_NOTIFY_HINT}
+                            notifyNoTelegram={SESSION_NOTIFY_NO_TELEGRAM}
                         />
                     </Suspense>
                 </div>
@@ -44409,6 +44462,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     )}
                 </p>
                 </div>
+                <div className="shrink-0 flex items-center gap-2">
+                {notify && (
+                    <div className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white py-[5px] pl-3.5 pr-1.5 shadow-sm">
+                        <span className="text-sm font-medium text-gray-600">{SESSION_NOTIFY_LABEL}</span>
+                        <IosHint label="Что за уведомления" text={SESSION_NOTIFY_HINT} align="right" />
+                        <IosToggle checked={notify.enabled} disabled={notifyBusy}
+                            onChange={toggleNotify} ariaLabel={SESSION_NOTIFY_LABEL} />
+                    </div>
+                )}
                 <button onClick={fetchAdminSessions} disabled={isAdminSessionsLoading}
                 className="shrink-0 inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-gray-200 bg-white text-sm font-medium text-gray-600 shadow-sm hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                 <svg className={`w-4 h-4 ${isAdminSessionsLoading ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -44416,7 +44478,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 </svg>
                 Обновить
                 </button>
+                </div>
             </div>
+            {/* Уведомление ходит только в Telegram: включённый тумблер без
+                привязки не принесёт ничего, и молчать об этом нельзя. */}
+            {notify?.enabled && !notify.telegram_linked && (
+                <p className="-mt-2 text-right text-xs text-amber-700">{SESSION_NOTIFY_NO_TELEGRAM}</p>
+            )}
 
             {/* ── Stat tiles: сколько ЧЕЛОВЕК, столько же строк в списке ── */}
             <div className="grid grid-cols-3 gap-3">

@@ -1105,7 +1105,7 @@ def _grant_route(fake_db, actor_id=1, method='POST'):
         'SENSITIVE_QR_GATED_ROLES': QR_GATED_ROLES,
         '_client_ip': lambda: '10.0.0.9',
         '_build_cors_preflight_response': lambda: ({}, 200),
-        '_notify_super_admin_sensitive_access_approved': lambda *a, **kw: None,
+        '_notify_sensitive_access_approved': lambda *a, **kw: None,
     }
     module = source_cache.parse(BOT_PATH.read_text(encoding='utf-8-sig'))
     nodes = []
@@ -1143,7 +1143,9 @@ class GrantAccessRouteTests(unittest.TestCase):
         self.assertEqual(fake_db.granted['actor_id'], 1, 'выдал тот, кто нажал')
         self.assertEqual(fake_db.granted['actor_role'], 'super_admin')
         self.assertEqual(fake_db.granted['ip_address'], '10.0.0.9')
-        self.assertEqual(len(notifications), 1, 'супер-админ обязан узнать о выдаче')
+        # Будит отправку всегда; кому слать (включившим тумблер «Уведомления о
+        # доступе»), решает она сама — tests/test_session_access_notify.py.
+        self.assertEqual(len(notifications), 1, 'выдача обязана будить уведомление')
 
     def test_notification_says_the_grant_was_manual(self):
         """Ручную выдачу отличаем от QR: оператор её не инициировал."""
