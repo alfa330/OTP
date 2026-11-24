@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-    Ban, ChartColumn, CircleCheck, CircleHelp, Clock, PackageOpen, TriangleAlert, Wallet,
+    Ban, ChartColumn, CircleCheck, CircleHelp, Clock, PackageOpen, Sheet, TriangleAlert, Wallet,
 } from 'lucide-react';
 import { availabilityOf, fmtStamp, memoKindOf } from './thermoboxMeta';
 
@@ -91,7 +91,7 @@ export const MemoIcon = ({ item, kind: forcedKind, size = 'md' }) => {
    grow basis-0, а не flex-1: на телефоне оболочка ставит колонкой любой
    .flex.items-start с ребёнком .flex-1 и переносит строки с gap — значок
    уезжал бы над заголовком (mobile-shell.css). */
-export const SectionTitle = ({ updated, actions }) => (
+export const SectionTitle = ({ updated, source, actions }) => (
     <header className="mb-5 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
         <div className="flex min-w-0 items-center gap-3">
             <span className="grid h-12 w-12 shrink-0 place-items-center rounded-[14px] bg-gradient-to-br from-sky-500 to-blue-600 text-white shadow-[0_6px_16px_rgba(37,99,235,0.28)]">
@@ -103,7 +103,16 @@ export const SectionTitle = ({ updated, actions }) => (
             </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-            {updated && (
+            {/* Зеркало Google-таблицы: когда лист сверили; иначе — последняя правка в разделе. */}
+            {source ? (
+                /* tabular-nums: время сверки меняется каждую минуту, и метка не
+                   должна от этого менять ширину и двигать шапку. */
+                <span title={source.hint || undefined}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12.5px] tabular-nums text-slate-600 ring-1 ring-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+                    <Sheet size={13} className={source.warning ? 'text-amber-500' : 'text-emerald-600'} />
+                    {source.label}
+                </span>
+            ) : updated && (
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12.5px] text-slate-600 ring-1 ring-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
                     <Clock size={13} className="text-slate-400" />
                     Обновлено {fmtStamp(updated.at)}{updated.by ? ` · ${updated.by}` : ''}

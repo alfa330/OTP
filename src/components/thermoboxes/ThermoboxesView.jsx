@@ -1,14 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { ChevronRight, Download, Loader2, Pencil, Plus, Search, X } from 'lucide-react';
+import { ChevronRight, Download, ExternalLink, Loader2, Pencil, Plus, RefreshCw, Search, TriangleAlert, X } from 'lucide-react';
 import { APPLE_FONT, IosMenu, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import { runSseStream } from '../common/sseClient';
 import ThermoboxMemo from './ThermoboxMemo';
 import { AddOfficeSheet, ThermoboxRowSheet } from './ThermoboxRowSheet';
 import { Dot, Pill, SectionTitle, StatusPill, TONES } from './thermoboxUi';
+import { createSourceCheck, watchSheetSource } from './sheetPulse';
 import {
-    AVAILABILITY_LEGEND, COUNT_FIELDS, FIELD_LABELS, availabilityOf, changedFields, citiesOf, depositShort,
-    draftErrors, exportFileName, latestUpdate, matchesRow, ordersLabel, periodShort, plural, tariffShort,
+    AVAILABILITY_LEGEND, CHECK_TIMEOUT_MS, COUNT_FIELDS, FIELD_LABELS, FRESH_MS, SOURCE_POLL_MS, availabilityOf,
+    changedFields, changesToast, citiesOf, depositShort, draftErrors, exportFileName, freshHint, latestUpdate,
+    matchesRow, memoChanged, ordersLabel, periodShort, plural, rowChanges, sourceNotOlder, sourceState, tariffShort,
 } from './thermoboxMeta';
 
 /*
@@ -28,6 +31,13 @@ import {
  *     одно сохранение на всё: так руководитель сверяет полку по сводке.
  * Обе отправляют одну и ту же пачку PUT /rows; сервер принимает её целиком
  * или не принимает вовсе.
+ *
+ * С 24.11.2026 раздел — зеркало Google-таблицы (thermoboxes/sync.py): цифры,
+ * условия и памятку правят в таблице, сервер перечитывает лист каждую минуту,
+ * а открытый экран сам подтягивает правку и подсвечивает, что изменилось.
+ * Права правки сервер тогда не выдаёт (can_edit, can_manage, can_edit_memo),
+ * и обе правки выше просто не показываются. В шапке — когда лист сверили;
+ * администратору — «Обновить из таблицы» и строки листа, которые не перенеслись.
  */
 
 const errorOf = (requestError, fallback) => requestError?.response?.data?.error || fallback;
@@ -45,13 +55,27 @@ const COUNT_SHORT = {
     used_boxes: 'Б/У',
 };
 
+/* Только что пришедшая из Google-таблицы правка: голубое кольцо, как у
+   изменённого поля в правке, — тенью, а не рамкой, чтобы ячейка не сдвигалась;
+   гаснет плавно (transition-shadow). */
+const FRESH_RING = 'ring-2 ring-blue-400/80 ring-offset-2 ring-offset-white';
+
 /* Число в ячейке: бесплатные коробы — зелёной плашкой (по ним отправляют
-   курьера), остальное — серой; ноль — бледным, без плашки. */
-const CountCell = ({ value, accent }) => (
-    <span className={`inline-flex min-w-[40px] justify-center rounded-lg px-2 py-1 text-[15px] font-bold tabular-nums ${
+   курьера), остальное — серой; ноль — бледным, без плашки. hint — ячейка
+   только что обновилась из таблицы: кольцо и «было → стало» в подсказке. */
+const CountCell = ({ value, accent, hint }) => (
+    <span title={hint || undefined} className={`inline-flex min-w-[40px] justify-center rounded-lg px-2 py-1 text-[15px] font-bold tabular-nums transition-shadow duration-700 ${
         value ? (accent ? TONES.green.cell : TONES.slate.cell) : 'text-slate-300'
-    }`}>
+    } ${hint ? FRESH_RING : ''}`}>
         {value || 0}
+    </span>
+);
+
+/* То же кольцо вокруг условия (тариф, заказы, депозит, отдельное условие). */
+const FreshMark = ({ hint, block = false, children }) => (
+    <span title={hint || undefined}
+          className={`${block ? 'inline-block' : 'inline-flex'} rounded-md transition-shadow duration-700 ${hint ? FRESH_RING : ''}`}>
+        {children}
     </span>
 );
 
@@ -116,6 +140,7 @@ const ThermoboxesView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [openedId, setOpenedId] = useState(null);
     const [adding, setAdding] = useState(false);
     const [exporting, setExporting] = useState(false);
+    const [syncing, setSyncing] = useState(false);
 
     const load = useCallback(() => {
         setError('');
@@ -126,6 +151,104 @@ const ThermoboxesView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     useEffect(() => { load(); }, [load]);
 
+    /* ── Правка в Google-таблице — на открытом экране ─────────────────── */
+
+    // Подсвеченные ячейки: id строки → {поле: прежнее значение}; '*' — новый офис.
+    const [fresh, setFresh] = useState({});
+    const dataRef = useRef(null);
+    useEffect(() => { dataRef.current = data; }, [data]);
+    const freshTimer = useRef(null);
+    useEffect(() => () => window.clearTimeout(freshTimer.current), []);
+
+    // Новые данные экрана: что поменялось — подсветить, какие офисы — сказать
+    // тостом. Подряд пришедшие правки копятся, «было» — до первой из них.
+    const applyFresh = useCallback((next, { quiet = false } = {}) => {
+        const current = dataRef.current;
+        // Ответы сверки и кнопки «Обновить из таблицы» не упорядочены: опоздавший
+        // старый не должен лечь поверх нового и подсветить «было новое → стало старое».
+        if (current && !sourceNotOlder(current.source, next.source)) return;
+        dataRef.current = next;
+        setData(next);
+        if (!current) return;
+        const diff = rowChanges(current.rows, next.rows);
+        const marks = { ...diff.changed };
+        diff.added.forEach((id) => { marks[id] = { '*': true }; });
+        if (Object.keys(marks).length) {
+            setFresh((previous) => {
+                const merged = { ...previous };
+                Object.entries(marks).forEach(([id, fields]) => { merged[id] = { ...fields, ...previous[id] }; });
+                return merged;
+            });
+            window.clearTimeout(freshTimer.current);
+            freshTimer.current = window.setTimeout(() => setFresh({}), FRESH_MS);
+        }
+        if (!quiet) {
+            const text = changesToast(diff, next.rows, memoChanged(current.memo, next.memo));
+            if (text) toast(text, 'success');
+        }
+    }, [toast]);
+
+    // Сверка с сервером — лёгкий /source; строки перечитываются, только когда
+    // цифры в таблице правда поменялись. Будят её тычок живого канала (сервер
+    // прочитал лист), возврат на вкладку и — пока канала нет — опрос раз в
+    // SOURCE_POLL_MS. Сравнение — с тем, что на экране в момент ответа.
+    const mirrored = Boolean(data?.source);
+    const syncingRef = useRef(false);
+    const checkOnce = useCallback(async () => {
+        const request = { headers: headers(), timeout: CHECK_TIMEOUT_MS };
+        const source = (await axios.get(`${apiBaseUrl}/api/thermoboxes/source`, request)).data?.source;
+        const current = dataRef.current;
+        if (!source || !current?.source || !sourceNotOlder(current.source, source)) return;
+        if (source.changed_at === current.source.changed_at) {
+            // Цифры те же: обновить «Сверено …» и плашку ошибки, строки не трогать.
+            if (JSON.stringify(source) !== JSON.stringify(current.source)) {
+                dataRef.current = { ...current, source };
+                setData((previous) => (previous ? { ...previous, source } : previous));
+            }
+            return;
+        }
+        const response = await axios.get(`${apiBaseUrl}/api/thermoboxes`, request);
+        // Пока идёт «Обновить из таблицы», о правке скажет её тост — второй не нужен.
+        if (response.data) applyFresh(response.data, { quiet: syncingRef.current });
+    }, [apiBaseUrl, headers, applyFresh]);
+    const checkOnceRef = useRef(checkOnce);
+    useEffect(() => { checkOnceRef.current = checkOnce; }, [checkOnce]);
+    // Одна сверка за раз; тычок посреди сверки — ещё одна сразу после неё (sheetPulse.js).
+    const checkSource = useMemo(() => createSourceCheck({
+        run: () => checkOnceRef.current(),
+        canRun: () => Boolean(dataRef.current?.source) && document.visibilityState === 'visible',
+    }), []);
+
+    // Живой канал (thermoboxes/live.py): сервер прочитал лист — экран сверяется
+    // сразу; возврат на вкладку — тоже сверка. Пока тычки идут, опрос молчит;
+    // нет канала или он замолчал — опрос, как раньше.
+    const liveRef = useRef(false);
+    useEffect(() => {
+        if (!mirrored) return undefined;
+        const watcher = watchSheetSource({
+            url: `${apiBaseUrl}/api/thermoboxes/stream`,
+            getHeaders: headers,
+            runStream: runSseStream,
+            onPulse: checkSource,
+            onLive: (value) => { liveRef.current = value; },
+        });
+        return () => {
+            watcher.stop();
+            liveRef.current = false;
+        };
+    }, [mirrored, apiBaseUrl, headers, checkSource]);
+
+    useEffect(() => {
+        if (!mirrored) return undefined;
+        const timer = window.setInterval(() => { if (!liveRef.current) checkSource(); }, SOURCE_POLL_MS);
+        return () => window.clearInterval(timer);
+    }, [mirrored, checkSource]);
+
+    const hintOf = (row, field) => {
+        const marks = fresh[row.id];
+        return marks && field in marks ? freshHint(field, marks[field], row[field]) : '';
+    };
+
     const capabilities = data?.capabilities || {};
     const allRows = useMemo(() => data?.rows || [], [data]);
     const rows = useMemo(() => allRows.filter((row) => row.is_active), [allRows]);
@@ -133,6 +256,8 @@ const ThermoboxesView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const cities = useMemo(() => citiesOf(rows), [rows]);
     const visible = useMemo(() => rows.filter((row) => matchesRow(row, city, query)), [rows, city, query]);
     const updated = useMemo(() => latestUpdate(rows), [rows]);
+    const source = useMemo(() => sourceState(data?.source), [data]);
+    const sourceProblems = data?.source?.problems || [];
     const opened = allRows.find((row) => row.id === openedId) || null;
     const filtered = Boolean(city || query.trim());
 
@@ -231,6 +356,38 @@ const ThermoboxesView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         }
     };
 
+    /* ── Перечитать Google-таблицу ─────────────────────────────────────── */
+
+    const syncNow = async () => {
+        if (syncing) return;
+        setSyncing(true);
+        syncingRef.current = true;
+        try {
+            const response = await axios.post(`${apiBaseUrl}/api/thermoboxes/sync`, {}, { headers: headers() });
+            const summary = response.data?.summary || {};
+            const touched = (summary.updated || 0) + (summary.created || 0) + (summary.hidden || 0) + (summary.shown || 0);
+            if (!response.data?.ok) {
+                // Причина — в плашке над таблицей, тост её не повторяет.
+                toast('Не удалось прочитать Google-таблицу', 'error');
+            } else if (touched || summary.memo) {
+                toast(touched
+                    ? `Обновлено из таблицы: ${touched} ${plural(touched, 'офис', 'офиса', 'офисов')}`
+                    : 'Памятка обновлена из таблицы', 'success');
+            } else {
+                toast('Таблица прочитана — изменений нет', 'success');
+            }
+            // Перечитать экран с подсветкой того, что поменялось; тост уже сказан выше.
+            const next = await axios.get(`${apiBaseUrl}/api/thermoboxes`, { headers: headers() })
+                .then((screen) => screen.data).catch(() => null);
+            if (next) applyFresh(next, { quiet: true }); else await load();
+        } catch (requestError) {
+            toast(errorOf(requestError, 'Не удалось прочитать Google-таблицу'), 'error');
+        } finally {
+            syncingRef.current = false;
+            setSyncing(false);
+        }
+    };
+
     /* ── Экран ─────────────────────────────────────────────────────────── */
 
     /* Непрозрачный фон корня — на телефоне: там `.main-content` прозрачен, и в
@@ -266,6 +423,11 @@ const ThermoboxesView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const menuItems = [
         { key: 'export', label: exporting ? 'Готовим файл…' : 'Выгрузить в Excel', icon: Download, onSelect: exportXlsx },
         capabilities.can_manage && { key: 'add', label: 'Добавить офис', icon: Plus, onSelect: () => setAdding(true) },
+        capabilities.can_sync && { key: 'sync', label: syncing ? 'Читаем таблицу…' : 'Обновить из таблицы', icon: RefreshCw, onSelect: syncNow },
+        capabilities.can_sync && data.source?.url && {
+            key: 'sheet', label: 'Открыть Google-таблицу', icon: ExternalLink,
+            onSelect: () => window.open(data.source.url, '_blank', 'noopener,noreferrer'),
+        },
     ];
 
     const headerActions = (
@@ -281,7 +443,32 @@ const ThermoboxesView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     return shell(
         <>
-            <SectionTitle updated={updated} actions={headerActions} />
+            <SectionTitle updated={updated} source={source} actions={headerActions} />
+
+            {/* Лист не прочитался — всем: на какой момент цифры. Причина — тому,
+                кто может её устранить (сервер отдаёт её только администратору). */}
+            {source?.warning && (
+                <div className="mb-4 flex items-start gap-2.5 rounded-2xl bg-amber-50 px-4 py-3 text-[13px] text-amber-900 ring-1 ring-amber-200">
+                    <TriangleAlert size={16} className="mt-0.5 shrink-0 text-amber-500" />
+                    <div className="min-w-0 grow basis-0">
+                        <div className="font-semibold">{source.warning}</div>
+                        {data.source?.error && <div className="mt-0.5 text-amber-800">{data.source.error}</div>}
+                    </div>
+                </div>
+            )}
+            {sourceProblems.length > 0 && (
+                <div className="mb-4 rounded-2xl bg-white px-4 py-3 text-[13px] text-slate-700 ring-1 ring-slate-200/80">
+                    {/* Без числа строк: в списке бывают и памятка, и офисы, которые
+                        не убраны, пока строка листа не узнана, — это не «строки». */}
+                    <div className="font-semibold text-slate-900">Из таблицы перенесено не всё</div>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-slate-600">
+                        {sourceProblems.map((problem) => <li key={problem}>{problem}</li>)}
+                    </ul>
+                    <div className="mt-1.5 text-[12px] text-slate-500">
+                        Остальные офисы обновляются как обычно. Поправьте строку в таблице или адрес офиса в справочнике вики.
+                    </div>
+                </div>
+            )}
 
             <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_380px] 2xl:items-start">
                 <div className="min-w-0 space-y-3">
@@ -351,7 +538,7 @@ const ThermoboxesView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                             <tr
                                                 key={row.id}
                                                 onClick={editing ? undefined : () => setOpenedId(row.id)}
-                                                className={`border-l-4 ${TONES[state.tone].edge} ${index ? 'border-t border-t-slate-100' : ''} ${editing ? '' : 'group cursor-pointer transition hover:bg-slate-50/80'}`}
+                                                className={`border-l-4 ${TONES[state.tone].edge} ${index ? 'border-t border-t-slate-100' : ''} ${editing ? '' : 'group cursor-pointer transition hover:bg-slate-50/80'} ${fresh[row.id]?.['*'] ? 'bg-blue-50/60' : ''}`}
                                             >
                                                 <td className="py-3 pl-4 pr-3 align-middle">
                                                     <div className="text-[14px] font-semibold text-slate-900">{row.city}</div>
@@ -370,21 +557,31 @@ const ThermoboxesView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                                                 index={index}
                                                                 label={`${row.city}: ${FIELD_LABELS[field]}`}
                                                             />
-                                                        ) : <CountCell value={row[field]} accent={field === 'free_boxes'} />}
+                                                        ) : <CountCell value={row[field]} accent={field === 'free_boxes'} hint={hintOf(row, field)} />}
                                                     </td>
                                                 ))}
                                                 <td className="whitespace-nowrap px-3 py-3 align-middle text-slate-700">
-                                                    {row.tariff === 'all' ? <Pill tone="blue">Все тарифы</Pill> : tariffShort(row.tariff)}
+                                                    <FreshMark hint={hintOf(row, 'tariff')}>
+                                                        {row.tariff === 'all' ? <Pill tone="blue">Все тарифы</Pill> : tariffShort(row.tariff)}
+                                                    </FreshMark>
                                                 </td>
                                                 <td className="whitespace-nowrap px-3 py-3 align-middle">
-                                                    <div className="text-slate-700">{ordersLabel(row.min_orders)}</div>
-                                                    {row.min_orders > 0 && <div className="text-[12px] text-slate-500">{periodShort(row.period_days)}</div>}
+                                                    <FreshMark block hint={hintOf(row, 'min_orders') || hintOf(row, 'period_days')}>
+                                                        <div className="text-slate-700">{ordersLabel(row.min_orders)}</div>
+                                                        {row.min_orders > 0 && <div className="text-[12px] text-slate-500">{periodShort(row.period_days)}</div>}
+                                                    </FreshMark>
                                                 </td>
                                                 <td className="whitespace-nowrap px-3 py-3 align-middle tabular-nums text-slate-700">
-                                                    {row.deposit_tenge ? depositShort(row.deposit_tenge) : <Pill tone="green">Без депозита</Pill>}
+                                                    <FreshMark hint={hintOf(row, 'deposit_tenge')}>
+                                                        {row.deposit_tenge ? depositShort(row.deposit_tenge) : <Pill tone="green">Без депозита</Pill>}
+                                                    </FreshMark>
                                                 </td>
                                                 <td className="px-3 py-3 align-middle">
-                                                    {row.special_condition ? <Pill tone="amber">{row.special_condition}</Pill> : null}
+                                                    {row.special_condition ? (
+                                                        <FreshMark hint={hintOf(row, 'special_condition')}>
+                                                            <Pill tone="amber">{row.special_condition}</Pill>
+                                                        </FreshMark>
+                                                    ) : null}
                                                 </td>
                                                 {!editing && (
                                                     <td className="pr-3 align-middle text-slate-300 transition group-hover:text-slate-400">
@@ -410,7 +607,9 @@ const ThermoboxesView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                             const state = availabilityOf(row);
                             return (
                                 <button key={row.id} type="button" onClick={() => setOpenedId(row.id)}
-                                        className={`${iosCard} block w-full border-l-4 ${TONES[state.tone].edge} p-3.5 text-left transition active:scale-[0.99]`}>
+                                        className={`${iosCard} block w-full border-l-4 ${TONES[state.tone].edge} p-3.5 text-left transition active:scale-[0.99] ${
+                                            fresh[row.id] ? 'ring-2 ring-blue-300' : ''
+                                        }`}>
                                     <div className="flex items-start justify-between gap-2">
                                         <div className="min-w-0 grow basis-0">
                                             <div className="text-[15px] font-semibold text-slate-900">{row.city}</div>
@@ -424,9 +623,9 @@ const ThermoboxesView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                         а три коротких числа читаются одной строкой. */}
                                     <div className="mt-3 flex gap-2">
                                         {COUNT_FIELDS.map((field) => (
-                                            <div key={field} className={`min-w-0 grow basis-0 rounded-xl px-2.5 py-2 ${
+                                            <div key={field} title={hintOf(row, field) || undefined} className={`min-w-0 grow basis-0 rounded-xl px-2.5 py-2 transition-shadow duration-700 ${
                                                 field === 'free_boxes' && row[field] ? 'bg-emerald-50' : 'bg-slate-50'
-                                            }`}>
+                                            } ${hintOf(row, field) ? 'ring-2 ring-blue-400/80' : ''}`}>
                                                 <div className="truncate text-[11px] text-slate-500">{COUNT_SHORT[field]}</div>
                                                 <div className={`text-[17px] font-bold tabular-nums ${
                                                     row[field] ? (field === 'free_boxes' ? 'text-emerald-700' : 'text-slate-900') : 'text-slate-300'

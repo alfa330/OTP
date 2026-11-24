@@ -598,6 +598,10 @@ ai_qa_digest_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ai-qa-
 # идёт здесь: зависший кабинет держит этот поток, а не запрос «Из АТС» или проход
 # выборки (_binotel_panel_day_end_parties).
 binotel_panel_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='binotel-panel')
+# Зеркало Google-таблицы «Термокоробов» — своё ОДНО место: чтение листа ждёт
+# Google до 30 секунд, и в общем пуле зависший ответ держал бы четверть
+# приложения. Прогоны и так идут по одному — их запирает строка thermobox_sync.
+thermobox_sheet_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='thermobox-sheet')
 login_rate_limit_lock = threading.Lock()
 session_touch_gate_lock = threading.Lock()
 session_touch_next_due = {}
@@ -54564,6 +54568,11 @@ try:
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
+        # Открытый экран обновляется сразу после чтения листа (thermoboxes/live.py): слушатель NOTIFY на своём
+        # соединении. Мест нет — экран остаётся на опросе раз в 30 с. tcp_user_timeout — оборванное без разрыва TCP
+        # соединение слушатель замечает за полминуты, а не за четверть часа повторов передачи.
+        listen_connect=lambda: psycopg2.connect(**{**_build_postgres_connection_params(), 'tcp_user_timeout': 30000}),
+        stream_limit=_env_int('THERMOBOX_STREAM_LIMIT', 10, minimum=2, maximum=WAITRESS_THREADS),
     ))
     logging.info("Раздел «Термокороба»: Blueprint подключён на /api/thermoboxes")
 except Exception:
@@ -59758,6 +59767,29 @@ async def run_wiki_classifier_sync_async():
     except Exception:
         logging.exception("wiki classifier sync job failed")
 
+
+def thermoboxes_sheet_sync_job():
+    """«Термокороба»: перечитать лист «Условия выдачи коробов» Google-таблицы.
+
+    Лист скачивается без открытого соединения, таблица раздела приводится к
+    нему одной транзакцией (thermoboxes/sync.py). Ошибка чтения не трогает
+    данные — она пишется в состояние и видна на экране раздела.
+    """
+    try:
+        from thermoboxes import sync as thermoboxes_sync
+        return thermoboxes_sync.run(db, triggered_by='scheduler')
+    except Exception:
+        logging.exception("thermoboxes sheet sync job failed")
+        return None
+
+
+async def run_thermoboxes_sheet_sync_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(thermobox_sheet_pool, thermoboxes_sheet_sync_job)
+    except Exception:
+        logging.exception("thermoboxes sheet sync job failed")
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -60805,6 +60837,24 @@ if __name__ == '__main__':
         coalesce=True,
         next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(minutes=4)
     )
+
+    # «Термокороба» — зеркало Google-таблицы: лист читается каждую минуту —
+    # поправили цифру в таблице, и в течение минуты она в разделе (открытый
+    # экран подтягивает её сам). Мгновенно по самой правке Google сообщает
+    # только у Google Таблиц, а файл — xlsx. Чтение — один лист в пару
+    # килобайт; повтор без изменений в листе пишет только «проверено».
+    if _env_bool('THERMOBOXES_SHEET_SYNC_ENABLED', True):
+        from thermoboxes import access as thermoboxes_access
+        if thermoboxes_access.SHEET_MIRROR:
+            scheduler.add_job(
+                run_thermoboxes_sheet_sync_async,
+                CronTrigger(minute='*', timezone=ZoneInfo('Asia/Almaty')),
+                id='thermoboxes_sheet_sync',
+                misfire_grace_time=55,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(minutes=1)
+            )
 
     # Тесты в «Опросах»: раз в минуту добираем попытки, у которых истекло
     # время. Статус теста (Запланирован/Активен/Завершён) сам считается от

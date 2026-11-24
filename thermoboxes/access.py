@@ -32,6 +32,14 @@ from parcels.access import is_department_head, is_global_admin, normalize_role
 # (THERMOBOXES_PILOT_SUPER_ADMIN_ONLY в App.jsx) — тест сверяет их.
 PILOT_SUPER_ADMIN_ONLY = True
 
+# ЗЕРКАЛО (24.11.2026): «сделать так, чтобы таблица читалась и обновлялась» —
+# данные приходят из Google-таблицы (thermoboxes/sync.py), раздел их только
+# показывает. Пока флаг стоит, правка остатков, условий, состава таблицы и
+# памятки в iCore закрыта для всех: следующее чтение листа затёрло бы её.
+# Права ниже (can_edit, can_manage, can_edit_memo) — на случай, если правку
+# вернут в раздел; снять флаг — вернуть их без переписывания.
+SHEET_MIRROR = True
+
 EDIT_DEPARTMENT_CODE = 'front_office'   # заполняют данные
 READ_DEPARTMENT_CODE = 'szov'           # колл-центр: смотрят
 
@@ -98,6 +106,13 @@ def can_edit_memo(ctx):
     return any(_belongs_to(ctx, code) for code in SECTION_DEPARTMENT_CODES)
 
 
+def can_sync(ctx):
+    """Перечитать Google-таблицу сейчас, не дожидаясь планового чтения, и
+    видеть, какие строки листа не перенеслись, — глобальный админ: он же
+    разбирается с доступом к таблице и справочником офисов."""
+    return is_global_admin(ctx)
+
+
 def capabilities(ctx):
     """Сводка для фронта: экран рисует кнопки по ней, а не по роли.
 
@@ -105,9 +120,11 @@ def capabilities(ctx):
     сводка обещала бы кнопки, на которые каждая ручка ответит 403.
     """
     opened = can_open_section(ctx)
+    writable = opened and not SHEET_MIRROR
     return {
         'can_open': opened,
-        'can_edit': opened and can_edit(ctx),
-        'can_manage': opened and can_manage(ctx),
-        'can_edit_memo': opened and can_edit_memo(ctx),
+        'can_edit': writable and can_edit(ctx),
+        'can_manage': writable and can_manage(ctx),
+        'can_edit_memo': writable and can_edit_memo(ctx),
+        'can_sync': opened and SHEET_MIRROR and can_sync(ctx),
     }

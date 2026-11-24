@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {
     COUNT_FIELDS, MEMO_KINDS, availabilityOf, changedFields, guessMemoKind, memoKindOf, splitMemo, citiesOf, depositShort, draftErrors, draftOf, exportFileName,
     fieldError, fmtStamp, latestUpdate, matchesRow, ordersLabel, parseWhole, periodLabel,
-    periodShort, valueOf,
+    periodShort, sourceNotOlder, sourceState, valueOf,
 } from '../src/components/thermoboxes/thermoboxMeta.js';
 
 // 1 октября 2026, 15:00 в Алматы (UTC+5).
@@ -125,4 +125,86 @@ test('пункт памятки: первая строка — суть, ост�
     assert.deepEqual(splitMemo('Депозит списывается.\nПеред визитом — деньги на балансе.'),
         { head: 'Депозит списывается.', rest: 'Перед визитом — деньги на балансе.' });
     assert.deepEqual(splitMemo('Одна строка'), { head: 'Одна строка', rest: '' });
+});
+
+test('источник цифр — когда лист сверили и что делать, если не читается', () => {
+    assert.equal(sourceState(null), null);
+    const fresh = sourceState({ status: 'ok', read_at: '2026-10-01T14:55:00', changed_at: '2026-09-30T09:10:00' }, NOW);
+    assert.deepEqual(fresh, {
+        label: 'Сверено с Google-таблицей сегодня в 14:55',
+        hint: 'Цифры последний раз менялись вчера в 09:10',
+        warning: '',
+    });
+    const broken = sourceState({ status: 'error', read_at: '2026-10-01T13:00:00', changed_at: null }, NOW);
+    assert.equal(broken.label, 'Сверено с Google-таблицей сегодня в 13:00');
+    assert.equal(broken.warning, 'Google-таблица сейчас не читается — показаны цифры последней сверки');
+    const never = sourceState({ status: 'error', read_at: null, changed_at: null }, NOW);
+    assert.equal(never.label, 'Google-таблица ещё не прочитана');
+    assert.equal(never.warning, 'Google-таблица пока не читается — цифры могут быть устаревшими');
+    assert.equal(sourceState({ status: null }, NOW).warning, '');
+});
+
+// ── Правка в Google-таблице на открытом экране (24.11.2026) ────────────────
+
+test('что поменялось между двумя ответами экрана', async () => {
+    const { rowChanges, TRACKED_FIELDS } = await import('../src/components/thermoboxes/thermoboxMeta.js');
+    const before = [
+        { ...ROW, id: 1, free_boxes: 28 },
+        { ...ROW, id: 2, city: 'Астана', special_condition: 'Не новички' },
+        { ...ROW, id: 3, city: 'Атырау' },
+    ];
+    const after = [
+        { ...ROW, id: 1, free_boxes: 18 },
+        { ...ROW, id: 2, city: 'Астана', special_condition: 'НЕ новички', deposit_tenge: 0 },
+        { ...ROW, id: 4, city: 'Актобе' },
+    ];
+    assert.deepEqual(rowChanges(before, after), {
+        changed: { 1: { free_boxes: 28 }, 2: { deposit_tenge: 5000, special_condition: 'Не новички' } },
+        added: [4],
+        removed: [3],
+    });
+    // Без правок — пусто; убранная строка (is_active=false) на экране не считается.
+    assert.deepEqual(rowChanges(after, after.map((row) => ({ ...row }))), { changed: {}, added: [], removed: [] });
+    assert.deepEqual(rowChanges([{ ...ROW, is_active: false }], [{ ...ROW, is_active: false }]),
+        { changed: {}, added: [], removed: [] });
+    assert.ok(TRACKED_FIELDS.includes('free_boxes') && TRACKED_FIELDS.includes('special_condition'));
+});
+
+test('тост называет обновлённые офисы, а без правок молчит', async () => {
+    const { changesToast, memoChanged } = await import('../src/components/thermoboxes/thermoboxMeta.js');
+    const rows = [{ id: 1, city: 'Алматы' }, { id: 2, city: 'Алматы' }, { id: 4, city: 'Актобе' }];
+    assert.equal(changesToast({ changed: { 1: { free_boxes: 28 }, 2: { used_boxes: 0 } }, added: [4], removed: [] }, rows),
+        'Обновлено из Google-таблицы: Алматы, Актобе');
+    assert.equal(changesToast({ changed: {}, added: [], removed: [3, 5] }, rows), 'Обновлено из Google-таблицы: 2 офиса убраны');
+    assert.equal(changesToast({ changed: {}, added: [], removed: [] }, rows, true), 'Обновлено из Google-таблицы: памятка');
+    assert.equal(changesToast({ changed: {}, added: [], removed: [] }, rows), '');
+    const many = [1, 2, 3, 4, 5].map((id) => ({ id, city: `Город ${id}` }));
+    assert.equal(changesToast({ changed: Object.fromEntries(many.map((row) => [row.id, { free_boxes: 0 }])), added: [], removed: [] }, many),
+        'Обновлено из Google-таблицы: Город 1, Город 2, Город 3 и ещё 2');
+    const memo = { title: 'Памятка', items: [{ text: 'Пункт', owner: 'kc', kind: 'money' }] };
+    assert.equal(memoChanged(memo, { ...memo, updated_at: '2026-11-24T12:00:00', updated_by_name: 'Google-таблица' }), false);
+    assert.equal(memoChanged(memo, { ...memo, items: [{ ...memo.items[0], text: 'Пункт 2' }] }), true);
+});
+
+test('подсказка у подсвеченной ячейки — было и стало', async () => {
+    const { freshHint } = await import('../src/components/thermoboxes/thermoboxMeta.js');
+    assert.equal(freshHint('free_boxes', 28, 18), 'Было 28 → стало 18 — правка в Google-таблице');
+    assert.equal(freshHint('used_boxes', null, 1), 'Было 0 → стало 1 — правка в Google-таблице');
+    assert.equal(freshHint('deposit_tenge', 5000, 0), 'Было 5 000 ₸ → стало без депозита — правка в Google-таблице');
+    assert.equal(freshHint('min_orders', 20, 15), 'Было 20+ заказов → стало 15+ заказов — правка в Google-таблице');
+    assert.equal(freshHint('special_condition', null, 'НЕ новички'), 'Было — → стало НЕ новички — правка в Google-таблице');
+});
+
+test('опоздавший ответ не ложится поверх нового: сначала цифры, потом метка «Сверено …»', () => {
+    const at = (changed, checked) => ({ changed_at: changed, checked_at: checked });
+    const now = at('2026-11-24T17:51:00', '2026-11-24T17:53:00');
+    assert.equal(sourceNotOlder(now, at('2026-11-24T17:51:00', '2026-11-24T17:54:00')), true, 'то же, свежее сверено');
+    assert.equal(sourceNotOlder(now, now), true, 'тот же ответ');
+    assert.equal(sourceNotOlder(now, at('2026-11-24T17:51:00', '2026-11-24T17:52:00')), false, 'метка не уходит назад');
+    assert.equal(sourceNotOlder(now, at('2026-11-24T17:50:00', '2026-11-24T17:59:00')), false, 'старые цифры — нет');
+    assert.equal(sourceNotOlder(now, at('2026-11-24T17:55:00', '2026-11-24T17:55:00')), true, 'новые цифры');
+    assert.equal(sourceNotOlder(at(null, '2026-11-24T17:53:00'), at('2026-11-24T17:55:00', '2026-11-24T17:55:00')), true,
+        'первые цифры после «ещё не читали»');
+    assert.equal(sourceNotOlder(null, now), true, 'не зеркало — не с чем сравнивать');
+    assert.equal(sourceNotOlder(now, null), true);
 });

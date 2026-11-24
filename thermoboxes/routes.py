@@ -13,23 +13,30 @@ Blueprint собирается фабрикой и получает зависи
 
 Ручки:
     GET   ''                     экран целиком: права, строки, памятка, справочник
+    GET   /source                когда лист читали и когда цифры менялись (опрос экрана)
+    GET   /stream                SSE: «лист прочитан» — экран сразу сверяет /source (live.py)
     PUT   /rows                  сохранить правки пачкой (фронт-офисы)
     POST  /rows                  завести офис в таблицу (глава, админ)
     PATCH /rows/<id>/visibility  убрать офис из таблицы или вернуть (глава, админ)
     GET   /rows/<id>/events      история строки
     PUT   /memo                  памятка (супервайзер)
     GET   /export                xlsx с тем же отбором, что на экране
+    POST  /sync                  перечитать Google-таблицу сейчас (глобальный админ)
+
+С 24.11.2026 данные — зеркало Google-таблицы (access.SHEET_MIRROR, sync.py):
+ручки правки отвечают 409 THERMO_SHEET_MIRROR — правят в таблице.
 """
 
 import logging
+import time
 from functools import wraps
 from io import BytesIO
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, Response, jsonify, request, send_file
 
 from parcels import queries as parcels_queries
 
-from . import access, queries, report, rules, schema
+from . import access, live, queries, report, rules, schema, sync
 
 XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -54,8 +61,11 @@ def _bad(message, code, status=400, **extra):
 
 
 def build_thermoboxes_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                                resolve_requester):
-    """Собирает Blueprint раздела."""
+                                resolve_requester, listen_connect=None, stream_limit=10):
+    """Собирает Blueprint раздела.
+
+    listen_connect() → новое соединение Postgres для LISTEN (своё, вне пула). Без него /stream отвечает 503,
+    и открытый экран живёт на опросе /source раз в 30 с — так же, как в юнит-тестах, где базы нет."""
     bp = Blueprint('thermoboxes', __name__, url_prefix='/api/thermoboxes')
 
     def thermo_route(rule, methods=('GET',), need=None):
@@ -63,7 +73,11 @@ def build_thermoboxes_blueprint(*, db, require_api_key, build_cors_preflight_res
 
         need='edit'   — остатки и условия (фронт-офисы, глобальный админ);
         need='manage' — состав таблицы (глава фронт-офисов, глобальный админ);
-        need='memo'   — памятка (супервайзер, глобальный админ).
+        need='memo'   — памятка (супервайзер, глобальный админ);
+        need='sync'   — перечитать Google-таблицу (глобальный админ).
+
+        Пока раздел — зеркало таблицы, правка (edit, manage, memo) закрыта
+        всем: 409, а не 403 — дело не в правах человека, а в том, где правят.
         """
         all_methods = tuple(methods) + ('OPTIONS',)
 
@@ -87,6 +101,11 @@ def build_thermoboxes_blueprint(*, db, require_api_key, build_cors_preflight_res
 
                     if not access.can_open_section(ctx):
                         return _bad('Раздел «Термокороба» вам не открыт', 'THERMO_SECTION_CLOSED', 403)
+                    if need in ('edit', 'manage', 'memo') and access.SHEET_MIRROR:
+                        return _bad('Данные берутся из Google-таблицы — поправьте их там, раздел '
+                                    'обновится сам', 'THERMO_SHEET_MIRROR', 409)
+                    if need == 'sync' and not access.can_sync(ctx):
+                        return _bad('Перечитать таблицу может администратор', 'THERMO_SYNC_FORBIDDEN', 403)
                     if need == 'edit' and not access.can_edit(ctx):
                         return _bad('Данные заполняют сотрудники фронт-офисов', 'THERMO_EDIT_FORBIDDEN', 403)
                     if need == 'manage' and not access.can_manage(ctx):
@@ -116,6 +135,25 @@ def build_thermoboxes_blueprint(*, db, require_api_key, build_cors_preflight_res
         return _bad('Раздел ещё разворачивается — попробуйте после перезапуска сервера',
                     'THERMO_SCHEMA_NOT_READY', 409)
 
+    def _source(state, capabilities):
+        """Откуда цифры: когда лист читали и когда они менялись. Причина
+        ошибки и непереносимые строки — тому, кто может с ними разобраться:
+        оператору КЦ хватит «таблица не читается, цифры на такое-то время»."""
+        source = {
+            'kind': 'google_sheet',
+            'status': state.get('status'),
+            'checked_at': state.get('checked_at'),
+            'read_at': state.get('read_at'),
+            'changed_at': state.get('changed_at'),
+        }
+        if capabilities.get('can_sync'):
+            source.update({
+                'error': state.get('error'),
+                'problems': state.get('problems') or [],
+                'url': sync.sheet_url(),
+            })
+        return source
+
     # ── Экран ─────────────────────────────────────────────────────────────
     @thermo_route('')
     def thermoboxes_screen(ctx):
@@ -134,11 +172,79 @@ def build_thermoboxes_blueprint(*, db, require_api_key, build_cors_preflight_res
                                           include_hidden=capabilities['can_manage']),
                 "memo": queries.get_memo(cursor),
             }
+            if access.SHEET_MIRROR:
+                payload['source'] = _source(queries.get_sync_state(cursor), capabilities)
             if capabilities['can_manage']:
                 taken = queries.taken_office_ids(cursor)
                 payload['directory'] = [office for office in queries.directory(cursor, spaces=spaces)
                                         if office['id'] not in taken]
         return jsonify(payload)
+
+    # ── Свежесть зеркала: открытый экран спрашивает раз в полминуты ───────
+    @thermo_route('/source')
+    def thermoboxes_source(ctx):
+        """Только состояние чтения листа — одна строка thermobox_sync. Экран
+        перечитывает строки, лишь когда changed_at сдвинулся: правку в таблице
+        видно без перезагрузки, а пустые опросы не гоняют таблицу раздела."""
+        if not access.SHEET_MIRROR:
+            return jsonify({"source": None})
+        capabilities = access.capabilities(ctx)
+        with db._get_cursor() as cursor:
+            if not schema.schema_is_ready(cursor):
+                return _not_ready()
+            return jsonify({"source": _source(queries.get_sync_state(cursor), capabilities)})
+
+    # ── Живой канал: «лист прочитан» — открытый экран сверяется сразу ─────
+    @thermo_route('/stream')
+    def thermoboxes_stream(ctx):
+        """SSE без данных: после каждого чтения листа — событие source, экран спрашивает /source (live.py).
+        Мест под потоки stream_limit: сверх — 503 с Retry-After, и экран остаётся на опросе раз в 30 с."""
+        if not access.SHEET_MIRROR:
+            return _bad('Раздел не читает Google-таблицу — живому каналу нечего сообщать', 'THERMO_LIVE_OFF', 503)
+        if listen_connect is None:
+            return _bad('Живой канал не подключён — экран обновляется опросом', 'THERMO_LIVE_OFF', 503)
+        live.ensure_listener(listen_connect)
+        # Слушатель не подключён — поток только пинговал бы, а экран считал бы себя живым и не опрашивал сервер.
+        if not live.hub.wait_listening(live.LISTEN_WAIT_SECONDS):
+            response = jsonify({"error": "Живой канал сейчас не работает — экран обновляется опросом",
+                                "code": "THERMO_LIVE_OFF"})
+            response.status_code = 503
+            response.headers['Retry-After'] = '60'
+            return response
+        if not live.hub.acquire(stream_limit):
+            response = jsonify({"error": "Мест под живые экраны нет — экран обновляется опросом",
+                                "code": "THERMO_LIVE_BUSY"})
+            response.status_code = 503
+            response.headers['Retry-After'] = '120'
+            return response
+
+        # Место возвращается ровно один раз — каким бы путём ни закрылся поток. call_on_close — когда сервер закрывает
+        # ответ (у ни разу не прочитанного генератора finally не сработал бы); finally генератора — когда сервер
+        # бросает ответ без close(): dev-сервер werkzeug при сброшенном клиентом соединении падает раньше, чем
+        # закрывает ответ, и без этого место висело бы вечно.
+        slot = {'held': True}
+
+        def release():
+            if slot.pop('held', False):
+                live.hub.release()
+
+        def generate():
+            try:
+                cursor_seq = live.hub.current_seq()
+                yield ': connected %d\n\n' % int(time.time())
+                deadline = time.monotonic() + live.STREAM_MAX_SECONDS
+                while time.monotonic() < deadline:
+                    woke, cursor_seq = live.hub.wait(cursor_seq, live.HEARTBEAT_SECONDS)
+                    yield live.sse('source') if woke else ': ping %d\n\n' % int(time.time())
+                yield live.sse('bye')
+            finally:
+                release()
+
+        response = Response(generate(), mimetype='text/event-stream')
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        response.call_on_close(release)
+        return response
 
     # ── Сохранить правки пачкой ───────────────────────────────────────────
     @thermo_route('/rows', methods=('PUT',), need='edit')
@@ -277,6 +383,21 @@ def build_thermoboxes_blueprint(*, db, require_api_key, build_cors_preflight_res
                 return _not_ready()
             saved = queries.save_memo(cursor, memo, _actor(ctx))
         return jsonify({"memo": saved})
+
+    # ── Перечитать Google-таблицу ─────────────────────────────────────────
+    @thermo_route('/sync', methods=('POST',), need='sync')
+    def thermoboxes_sync(ctx):
+        """Прочитать лист сейчас — после правки в таблице или открытия доступа,
+        чтобы не ждать планового чтения. Экран потом перечитывает себя сам."""
+        if not access.SHEET_MIRROR:
+            return _bad('Раздел не читает Google-таблицу', 'THERMO_SYNC_OFF', 409)
+        result = sync.run(db, triggered_by='manual:%s' % ctx['user_id'])
+        with db._get_cursor() as cursor:
+            if not schema.schema_is_ready(cursor):
+                return _not_ready()
+            source = _source(queries.get_sync_state(cursor), access.capabilities(ctx))
+        return jsonify({"ok": result.get('status') == 'ok', "source": source,
+                        "summary": result.get('summary') or {}})
 
     # ── Выгрузка ──────────────────────────────────────────────────────────
     @thermo_route('/export')

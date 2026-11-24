@@ -23,6 +23,14 @@
 
 * **Памятка — одна строка (`id = 1`)**, пункты — JSONB-список. Своя таблица
   на пункты ничего не дала бы: памятку правят целиком и читают целиком.
+
+* **Зеркало Google-таблицы (24.11.2026).** Источник данных — лист «Условия
+  выдачи коробов»; раздел читает его сам (thermoboxes/sync.py). `sheet_key` —
+  город и адрес строки так, как они написаны в листе: по нему строка узнаётся
+  в следующий раз. `thermobox_sync` — одна строка (`id = 1`) о последнем
+  чтении: когда проверяли, когда данные последний раз поменялись, ошибка и
+  строки листа, которые не удалось перенести. Строкой же запирается прогон:
+  ручное «Обновить» и плановый не пишут вдвоём.
 """
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
@@ -82,7 +90,23 @@ _STATEMENTS = [
     )
     """ % _NOW,
 
+    """
+    CREATE TABLE IF NOT EXISTS thermobox_sync (
+        id               SMALLINT PRIMARY KEY CHECK (id = 1),
+        -- ok — прочитано; error — лист не прочитан или не разобран (данные
+        -- раздела при этом не тронуты); NULL — ещё ни разу не читали.
+        status           VARCHAR(16),
+        error            TEXT,
+        problems         JSONB NOT NULL DEFAULT '[]'::jsonb,
+        summary          JSONB NOT NULL DEFAULT '{}'::jsonb,
+        checked_at       TIMESTAMP,
+        read_at          TIMESTAMP,
+        changed_at       TIMESTAMP
+    )
+    """,
+
     "INSERT INTO thermobox_memo (id) VALUES (1) ON CONFLICT (id) DO NOTHING",
+    "INSERT INTO thermobox_sync (id) VALUES (1) ON CONFLICT (id) DO NOTHING",
 
     "CREATE INDEX IF NOT EXISTS idx_thermobox_offices_active ON thermobox_offices(is_active, city, name)",
     "CREATE INDEX IF NOT EXISTS idx_thermobox_events_row "
@@ -91,7 +115,9 @@ _STATEMENTS = [
 
 # Миграции по живой базе. Идут ПОСЛЕ таблиц и ПЕРЕД индексами — порядок держит
 # init_thermoboxes_schema (у «Обращений» обратный порядок уронил прод 17.08.2026).
-_MIGRATIONS = []
+_MIGRATIONS = [
+    "ALTER TABLE thermobox_offices ADD COLUMN IF NOT EXISTS sheet_key TEXT",
+]
 
 
 def _is_table(statement):
@@ -116,6 +142,6 @@ def schema_is_ready(cursor):
     Спрашивает последнюю по порядку таблицу: разворот идёт одним SAVEPOINT, так
     что есть она — есть и остальные.
     """
-    cursor.execute("SELECT to_regclass('public.thermobox_memo') IS NOT NULL")
+    cursor.execute("SELECT to_regclass('public.thermobox_sync') IS NOT NULL")
     row = cursor.fetchone()
     return bool(row and row[0])

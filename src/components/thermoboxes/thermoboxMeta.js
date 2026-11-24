@@ -222,6 +222,115 @@ export const fmtStamp = (iso, now = new Date()) => {
     return `${parts.day} ${MONTHS[parts.month - 1]}${year} в ${parts.time}`;
 };
 
+/* Откуда цифры (с 24.11.2026 раздел — зеркало Google-таблицы, thermoboxes/sync.py).
+
+   Метка в шапке — когда лист последний раз прочитали, а не когда цифры
+   менялись: лист, в котором неделю ничего не правили, свеж, если его сверили
+   пять минут назад. Когда цифры менялись — в подсказке. Лист не прочитался —
+   предупреждение: оператор КЦ должен знать, на какой момент цифры. */
+export const sourceState = (source, now = new Date()) => {
+    if (!source) return null;
+    const readAt = fmtStamp(source.read_at, now);
+    const changedAt = fmtStamp(source.changed_at, now);
+    const state = {
+        label: readAt ? `Сверено с Google-таблицей ${readAt}` : 'Google-таблица ещё не прочитана',
+        hint: changedAt ? `Цифры последний раз менялись ${changedAt}` : '',
+        warning: '',
+    };
+    // Время последней сверки уже в метке рядом — плашка его не повторяет.
+    if (source.status === 'error') {
+        state.warning = readAt
+            ? 'Google-таблица сейчас не читается — показаны цифры последней сверки'
+            : 'Google-таблица пока не читается — цифры могут быть устаревшими';
+    }
+    return state;
+};
+
+/* Правка в Google-таблице — на открытом экране (с 24.11.2026).
+
+   Сервер читает лист каждую минуту (thermoboxes/sync.py) и после каждого чтения
+   будит открытый экран по живому каналу (thermoboxes/live.py, sheetPulse.js);
+   нет канала — экран сам раз в SOURCE_POLL_MS спрашивает /api/thermoboxes/source.
+   Строки перечитываются, только когда сдвинулся changed_at. Пришли новые цифры — изменённые ячейки
+   подсвечиваются на FRESH_MS («было → стало» в подсказке), а тост говорит,
+   какие офисы обновились: цифры не должны молча меняться под глазами. */
+export const SOURCE_POLL_MS = 30000;
+export const FRESH_MS = 120000;
+// Сверка — фон: зависший запрос не должен держать её — тычки копились бы за ним.
+export const CHECK_TIMEOUT_MS = 15000;
+
+/* Ответ сервера не старше того, что уже на экране: сначала по changed_at
+   (цифры), потом по checked_at (метка «Сверено …»). Ответы сверки и кнопки
+   «Обновить из таблицы» не упорядочены — опоздавший старый не должен лечь
+   поверх нового. Время — строки одного вида «2026-11-24T17:51:00», их порядок
+   — порядок строк; нет источника (раздел не зеркало) — не с чем сравнивать. */
+export const sourceNotOlder = (current, next) => {
+    if (!current || !next) return true;
+    const changedNow = current.changed_at || '';
+    const changedNext = next.changed_at || '';
+    if (changedNext !== changedNow) return changedNext > changedNow;
+    return (next.checked_at || '') >= (current.checked_at || '');
+};
+export const TRACKED_FIELDS = [...COUNT_FIELDS, ...CONDITION_FIELDS];
+
+/* Что поменялось между двумя ответами экрана: {changed: {id: {поле: прежнее}},
+   added: [id], removed: [id]}. Считаются только строки на экране (is_active). */
+export const rowChanges = (before, after, fields = TRACKED_FIELDS) => {
+    const shown = (rows) => (rows || []).filter((row) => row.is_active !== false);
+    const previous = new Map(shown(before).map((row) => [row.id, row]));
+    const changed = {};
+    const added = [];
+    for (const row of shown(after)) {
+        const old = previous.get(row.id);
+        if (!old) {
+            added.push(row.id);
+            continue;
+        }
+        const fieldsChanged = {};
+        for (const field of fields) {
+            if ((old[field] ?? null) !== (row[field] ?? null)) fieldsChanged[field] = old[field] ?? null;
+        }
+        if (Object.keys(fieldsChanged).length) changed[row.id] = fieldsChanged;
+    }
+    const now = new Set(shown(after).map((row) => row.id));
+    const removed = [...previous.keys()].filter((id) => !now.has(id));
+    return { changed, added, removed };
+};
+
+const memoKey = (memo) => JSON.stringify([memo?.title || null,
+    (memo?.items || []).map((item) => [item.text, item.owner || null, item.kind || null])]);
+
+export const memoChanged = (before, after) => memoKey(before) !== memoKey(after);
+
+/* Тост о правке из таблицы: какие офисы обновились; пусто — ничего видимого. */
+export const changesToast = (diff, rows, memoUpdated = false) => {
+    const byId = new Map((rows || []).map((row) => [row.id, row]));
+    const ids = [...Object.keys(diff.changed).map(Number), ...diff.added];
+    const cities = [...new Set(ids.map((id) => byId.get(id)?.city).filter(Boolean))];
+    const parts = [];
+    if (cities.length) {
+        parts.push(cities.length > 3 ? `${cities.slice(0, 3).join(', ')} и ещё ${cities.length - 3}` : cities.join(', '));
+    }
+    if (diff.removed.length) {
+        parts.push(`${diff.removed.length} ${plural(diff.removed.length, 'офис убран', 'офиса убраны', 'офисов убраны')}`);
+    }
+    if (memoUpdated) parts.push('памятка');
+    return parts.length ? `Обновлено из Google-таблицы: ${parts.join('; ')}` : '';
+};
+
+/* Подсказка у подсвеченной ячейки: «Было 28 → стало 18». */
+export const freshHint = (field, was, now) => {
+    const show = (value) => {
+        if (COUNT_FIELDS.includes(field)) return String(value || 0);
+        if (field === 'tariff') return tariffShort(value);
+        if (field === 'min_orders') return ordersLabel(value);
+        if (field === 'period_days') return periodShort(value);
+        if (field === 'deposit_tenge') return value ? depositShort(value) : 'без депозита';
+        return value || '—';
+    };
+    return `Было ${show(was)} → стало ${show(now)} — правка в Google-таблице`;
+};
+
 /* «Термокороба 01.10.2026.xlsx». Пара — file_name в thermoboxes/report.py. */
 export const exportFileName = (now = new Date()) => {
     const { year, month, day } = almatyToday(now);

@@ -1,8 +1,9 @@
 """Перенос листа «Условия выдачи коробов» в раздел «Термокороба» (#363).
 
-Лист выгружается из Google-таблицы «Кол-во термопакетов и термокоробов» в CSV
-(Файл → Скачать → CSV, текущий лист). Сам файл в репозиторий не кладётся: это
-рабочие данные, а не код.
+С 24.11.2026 прод сам читает лист (thermoboxes/sync.py) — скрипт нужен для
+стенда и разового переноса. Лист выгружается из Google-таблицы «Кол-во
+термопакетов и термокоробов» в CSV (Файл → Скачать → CSV, текущий лист). Сам
+файл в репозиторий не кладётся: это рабочие данные, а не код.
 
     python scripts/import_thermoboxes.py --csv лист.csv --dsn postgresql://…          # стенд, сухой прогон
     python scripts/import_thermoboxes.py --csv лист.csv --dsn … --office Туркестан=63 # офис вручную
@@ -29,9 +30,7 @@
 """
 
 import argparse
-import csv
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -40,207 +39,26 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from thermoboxes import queries, rules  # noqa: E402
-from wiki.text import fold_kazakh  # noqa: E402
+# Разбор листа — общий с зеркалом раздела (thermoboxes/sync.py): один и тот же
+# лист не должен читаться двумя разными способами. memo_kind и memo_text здесь
+# не зовутся — их проверяют тесты переноса через этот модуль.
+from thermoboxes.sheet import (  # noqa: E402,F401
+    SheetError, match_office, memo_kind, memo_text, parse_value,
+)
+from thermoboxes.sheet import fold as _fold  # noqa: E402
+from thermoboxes.sheet import read_csv_text  # noqa: E402
 
 ACTOR = {'user_id': None, 'name': 'Перенос из Google-таблицы'}
-
-HEADERS = {
-    'город': 'city',
-    'адрес': 'address',
-    'бесплатные термокороба': 'free_boxes',
-    'термопакет': 'thermo_bags',
-    'б/у короб': 'used_boxes',
-    'тариф': 'tariff',
-    'заказы': 'min_orders',
-    'срок': 'period_days',
-    'отдельное условие': 'special_condition',
-    'депозит': 'deposit_tenge',
-}
-
-MEMO_OWNERS = {'кц': 'kc', 'регионы': 'regions'}
-
-# Значок пункта памятки — эмодзи в колонке слева от текста (rules.MEMO_KIND_LABELS).
-# «⚠» без вариационного селектора: в ячейке он бывает и «⚠️», и «⚠».
-MEMO_EMOJI_KINDS = (
-    ('⛔', 'forbidden'), ('🚫', 'forbidden'), ('💰', 'money'), ('📊', 'data'),
-    ('⚠', 'warning'), ('✅', 'check'), ('❓', 'question'), ('❔', 'question'),
-)
-
-
-def memo_kind(mark):
-    return next((kind for sign, kind in MEMO_EMOJI_KINDS if sign in str(mark or '')), None)
-
-# Слова адреса, которые ничего не различают.
-_NOISE = {
-    'ул', 'улица', 'пр', 'пр-т', 'проспект', 'мкр', 'микрорайон', 'д', 'дом', 'офис', 'оф',
-    'бц', 'угол', 'улицы', 'по', 'малой', 'этаж', 'кабинет', 'и',
-}
-
-
-def _fold(text):
-    return fold_kazakh(' '.join(str(text or '').lower().replace('ё', 'е').split()))
-
-
-def _address_words(text):
-    """Слова адреса без мусора: «ул. Нуркена Абдирова, 4» → {нуркена, абдирова, 4}.
-
-    Номер офиса («офис 6») отбрасывается вместе со словом «офис»: в справочнике
-    его чаще всего нет, и он перевешивал бы номер дома.
-    """
-    text = _fold(text)
-    text = re.sub(r'(?:офис|оф\.?)\s*\d+', ' ', text)
-    text = re.sub(r'«[^»]*»|"[^"]*"', ' ', text)
-    words = re.findall(r'[0-9]+[а-яa-z]?|[а-яa-z]{2,}', text)
-    return {word for word in words if word not in _NOISE}
-
-
-def _house(words):
-    return {word for word in words if word[0].isdigit()}
-
-
-def _house_digits(words):
-    return {re.match(r'\d+', word).group(0) for word in _house(words)}
-
-
-def _streets(words):
-    return {word for word in words if not word[0].isdigit()}
-
-
-def match_office(city, address, offices):
-    """Офис справочника для строки листа: (офис, None, пометка) или (None, причина, None).
-
-    Совпасть обязан номер дома: улица без дома — это другой офис той же улицы.
-    Сначала дом сравнивается целиком, с литерой; не нашлось — по цифрам, но
-    тогда должна совпасть и улица («Жамбыла, 172» в листе — «Жамбыла, 172В»
-    в справочнике). Такое совпадение помечается, чтобы человек его увидел.
-    """
-    candidates = [office for office in offices if _fold(office['city']) == _fold(city)]
-    if not candidates:
-        return None, 'в справочнике нет офиса в городе %s' % city, None
-    wanted = _address_words(address)
-
-    def pick(scored, note):
-        scored.sort(key=lambda item: -item[0])
-        best = [office for score, office in scored if score == scored[0][0]]
-        if len(best) > 1:
-            return None, 'подходят несколько офисов: %s' % ', '.join(
-                '%s (id %s)' % (office.get('address'), office['id']) for office in best), None
-        return best[0], None, note
-
-    exact = []
-    loose = []
-    for office in candidates:
-        words = _address_words(office.get('address'))
-        if _house(wanted) & _house(words):
-            exact.append((len(wanted & words), office))
-        elif (_house_digits(wanted) & _house_digits(words)) and (_streets(wanted) & _streets(words)):
-            loose.append((len(wanted & words), office))
-    if exact:
-        return pick(exact, None)
-    if loose:
-        return pick(loose, 'дом совпал без литеры')
-    if len(candidates) == 1:
-        return None, 'единственный офис города не совпал по адресу: %s' % candidates[0].get('address'), None
-    return None, 'адрес не совпал ни с одним из %d офисов города' % len(candidates), None
-
-
-def _number(text):
-    digits = re.sub(r'\D', '', str(text or ''))
-    return int(digits) if digits else None
-
-
-def parse_value(field, text):
-    """Ячейка листа → значение поля раздела (до проверки rules)."""
-    text = ' '.join(str(text or '').split())
-    if field in ('free_boxes', 'thermo_bags', 'used_boxes'):
-        if not re.fullmatch(r'\d+', text):
-            raise rules.FieldError(field, '%s: в ячейке не целое число («%s»)' % (rules.FIELD_LABELS[field], text))
-        return int(text)
-    if field == 'tariff':
-        for code, label in rules.TARIFF_LABELS.items():
-            if _fold(label) == _fold(text):
-                return code
-        raise rules.FieldError(field, 'Тариф «%s» не из списка раздела' % text)
-    if field == 'min_orders':
-        return _number(text) or 0
-    if field == 'period_days':
-        value = _number(text)
-        if value is None:
-            raise rules.FieldError(field, 'Срок «%s» без числа дней' % text)
-        return value
-    if field == 'deposit_tenge':
-        return 0 if 'нет' in _fold(text) else (_number(text) or 0)
-    if field == 'special_condition':
-        return text or None
-    raise rules.FieldError(field, 'Неизвестное поле')
-
-
-def memo_text(text):
-    """Текст пункта памятки из ячейки листа.
-
-    Переносы строк в ячейке ставились под ширину Google-таблицы: «…проверьте
-    соответствие условиям⏎и отправьте данные…» — это одна фраза, и на узкой
-    карточке раздела перенос рвал бы её посередине. Строка, начатая со
-    строчной буквы, — продолжение предыдущей; с заглавной — новое предложение,
-    и перенос перед ним остаётся.
-    """
-    result = []
-    for line in (' '.join(part.split()) for part in str(text or '').splitlines()):
-        if not line:
-            continue
-        if result and line[0].islower():
-            result[-1] = '%s %s' % (result[-1], line)
-        else:
-            result.append(line)
-    return '\n'.join(result)
 
 
 def read_sheet(path):
     """(строки офисов, памятка) из CSV листа."""
     with open(path, encoding='utf-8-sig', newline='') as handle:
-        table = list(csv.reader(handle))
-    header = [_fold(cell) for cell in table[0]]
-    columns = {}
-    for index, name in enumerate(header):
-        if name in HEADERS and HEADERS[name] not in columns:
-            columns[HEADERS[name]] = index
-    missing = [label for label, field in HEADERS.items() if field not in columns]
-    if missing:
-        raise SystemExit('В листе нет колонок: %s' % ', '.join(missing))
-
-    rows = []
-    for number, cells in enumerate(table[1:], start=2):
-        cells = cells + [''] * (len(header) - len(cells))
-        city = cells[columns['city']].strip()
-        if not city:
-            continue
-        rows.append({
-            'line': number,
-            'city': city,
-            'address': ' '.join(cells[columns['address']].split()),
-            'raw': {field: cells[index] for field, index in columns.items()},
-        })
-
-    memo = {'title': None, 'items': []}
-    memo_col = next((i for i, name in enumerate(header) if 'памятка' in name), None)
-    owner_col = next((i for i, name in enumerate(header) if 'ответствен' in name), None)
-    if memo_col is not None:
-        for cells in table[1:]:
-            cells = cells + [''] * (len(header) - len(cells))
-            # Пункт — в колонке справа от значка; подзаголовок — в самой колонке.
-            text = (cells[memo_col + 1] if memo_col + 1 < len(cells) else '').strip()
-            title = cells[memo_col].strip()
-            if not text and title and not memo['title'] and len(title) > 3:
-                memo['title'] = title
-                continue
-            if text:
-                owner = cells[owner_col].strip() if owner_col is not None else ''
-                memo['items'].append({
-                    'text': memo_text(text),
-                    'owner': MEMO_OWNERS.get(_fold(owner)),
-                    'kind': memo_kind(title),
-                })
-    return rows, memo
+        text = handle.read()
+    try:
+        return read_csv_text(text)
+    except SheetError as exc:
+        raise SystemExit(str(exc))
 
 
 class ApiStore:

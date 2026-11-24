@@ -14,7 +14,7 @@ from datetime import date, datetime
 
 from parcels import queries as parcels_queries
 
-from . import rules
+from . import live, rules
 
 load_access_context = parcels_queries.load_access_context
 
@@ -46,7 +46,7 @@ ROW_FIELDS = (
     'id', 'office_id', 'city', 'name', 'address',
     'free_boxes', 'thermo_bags', 'used_boxes',
     'tariff', 'min_orders', 'period_days', 'deposit_tenge', 'special_condition',
-    'is_active', 'version', 'updated_by_name', 'updated_at', 'created_at',
+    'is_active', 'version', 'updated_by_name', 'updated_at', 'created_at', 'sheet_key',
 )
 
 # Город, имя и адрес — живые из справочника; снимок — если офис из него удалили.
@@ -141,10 +141,19 @@ def create_row(cursor, office, fields, actor):
         'INSERT INTO thermobox_offices (office_id, city, name, address, %s, updated_by, updated_by_name) '
         'VALUES (%%s, %%s, %%s, %%s, %s, %%s, %%s) RETURNING id' % (
             ', '.join(names), ', '.join(['%s'] * len(names))),
-        [office['id'], office['city'], office['name'], office.get('address')]
+        # Снимок имени: в справочнике вики оно до 255 знаков, здесь — до 200.
+        # Длинное имя не должно ронять заведение офиса (и с ним весь прогон
+        # зеркала): на экране имя всё равно живое, из справочника.
+        [office['id'], office['city'], str(office['name'] or '')[:200], office.get('address')]
         + [values[name] for name in names]
         + [actor['user_id'], actor.get('name')])
     return cursor.fetchone()[0]
+
+
+def set_sheet_key(cursor, row_id, key):
+    """Запомнить, какой строке листа соответствует строка раздела. Версию и
+    «Обновлено» не двигает: цифры от этого не поменялись."""
+    cursor.execute('UPDATE thermobox_offices SET sheet_key = %s WHERE id = %s', (key, int(row_id)))
 
 
 def taken_office_ids(cursor):
@@ -212,3 +221,58 @@ def save_memo(cursor, memo, actor):
         (memo.get('title'), json.dumps(memo['items'], ensure_ascii=False),
          actor['user_id'], actor.get('name')))
     return get_memo(cursor)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Зеркало Google-таблицы: состояние последнего чтения
+# ─────────────────────────────────────────────────────────────────────────────
+
+SYNC_FIELDS = ('status', 'error', 'problems', 'summary', 'checked_at', 'read_at', 'changed_at')
+
+
+def _sync(raw):
+    if not raw:
+        return {'status': None, 'error': None, 'problems': [], 'summary': {},
+                'checked_at': None, 'read_at': None, 'changed_at': None}
+    state = dict(zip(SYNC_FIELDS, raw))
+    state['problems'] = [str(item) for item in _json_list(state['problems'])]
+    summary = state['summary']
+    if isinstance(summary, str):
+        try:
+            summary = json.loads(summary)
+        except ValueError:
+            summary = {}
+    state['summary'] = summary if isinstance(summary, dict) else {}
+    for name in ('checked_at', 'read_at', 'changed_at'):
+        state[name] = _iso(state[name])
+    return state
+
+
+def get_sync_state(cursor, *, lock=False):
+    """Последнее чтение листа. lock — запереть строку до конца транзакции:
+    так ручное «Обновить» и плановый прогон не пишут таблицу вдвоём."""
+    cursor.execute('SELECT %s FROM thermobox_sync WHERE id = 1%s' % (
+        ', '.join(SYNC_FIELDS), ' FOR UPDATE' if lock else ''))
+    return _sync(cursor.fetchone())
+
+
+def save_sync_state(cursor, *, status, error=None, problems=(), summary=None, read=False, changed=False):
+    """Итог чтения. read — лист прочитан и разобран, changed — данные раздела
+    поменялись; у ошибки обе метки остаются прежними: экран показывает, на
+    какой момент цифры.
+
+    Каждый итог будит открытые экраны (live.notify): они сверяют /source —
+    «Сверено …» и плашка ошибки свежие, строки перечитываются, только если
+    сдвинулся changed_at. Тычок в той же транзакции — уйдёт при коммите."""
+    now = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
+    cursor.execute(
+        'INSERT INTO thermobox_sync (id, status, error, problems, summary, checked_at, read_at, changed_at) '
+        'VALUES (1, %%s, %%s, %%s::jsonb, %%s::jsonb, %(now)s, %(read)s, %(changed)s) '
+        'ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, error = EXCLUDED.error, '
+        'problems = EXCLUDED.problems, summary = EXCLUDED.summary, checked_at = EXCLUDED.checked_at, '
+        'read_at = COALESCE(EXCLUDED.read_at, thermobox_sync.read_at), '
+        'changed_at = COALESCE(EXCLUDED.changed_at, thermobox_sync.changed_at)' % {
+            'now': now, 'read': now if read else 'NULL', 'changed': now if changed else 'NULL'},
+        (status, error, json.dumps(list(problems), ensure_ascii=False),
+         json.dumps(summary or {}, ensure_ascii=False)))
+    live.notify(cursor)

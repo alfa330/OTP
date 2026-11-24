@@ -84,20 +84,23 @@ class PilotTests(unittest.TestCase):
                         predicate.index('if (THERMOBOXES_PILOT_SUPER_ADMIN_ONLY) return false;'))
 
 
+@mock.patch.object(access, 'SHEET_MIRROR', False)
 @mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', False)
 class AccessTests(unittest.TestCase):
-    """Периметр после пилота."""
+    """Периметр после пилота — с правкой в разделе (без зеркала таблицы)."""
 
     def caps(self, **kwargs):
         return access.capabilities(person(**kwargs))
 
     def test_front_office_edits_data_but_not_memo_or_composition(self):
         self.assertEqual(self.caps(), {
-            'can_open': True, 'can_edit': True, 'can_manage': False, 'can_edit_memo': False})
+            'can_open': True, 'can_edit': True, 'can_manage': False, 'can_edit_memo': False,
+            'can_sync': False})
 
     def test_call_center_only_looks(self):
         self.assertEqual(self.caps(department_code='szov'), {
-            'can_open': True, 'can_edit': False, 'can_manage': False, 'can_edit_memo': False})
+            'can_open': True, 'can_edit': False, 'can_manage': False, 'can_edit_memo': False,
+            'can_sync': False})
 
     def test_supervisor_edits_memo_but_not_numbers(self):
         caps = self.caps(role='sv', department_code='szov')
@@ -120,6 +123,8 @@ class AccessTests(unittest.TestCase):
     def test_global_admin_does_everything(self):
         for role in ('super_admin', 'admin'):
             caps = self.caps(role=role, department_code=None)
+            # «Перечитать таблицу» — только у зеркала, без него кнопки нет.
+            self.assertFalse(caps.pop('can_sync'), role)
             self.assertTrue(all(caps.values()), role)
 
     def test_front_office_head_manages_but_does_not_write_memo(self):
@@ -286,8 +291,8 @@ class SchemaTests(unittest.TestCase):
         cursor = _Cursor()
         schema.init_thermoboxes_schema(cursor)
         kinds = ['table' if 'CREATE TABLE' in sql else 'other' for sql in cursor.statements]
-        self.assertEqual(kinds[:3], ['table'] * 3)
-        self.assertNotIn('table', kinds[3:])
+        self.assertEqual(kinds[:4], ['table'] * 4)
+        self.assertNotIn('table', kinds[4:])
         self.assertTrue(all('IF NOT EXISTS' in sql or 'ON CONFLICT' in sql for sql in cursor.statements))
 
 
@@ -321,6 +326,8 @@ class Store:
             {'id': 41, 'city': 'Алматы', 'name': 'Офис Алматы', 'address': 'ул. Алматы, 1'},
             {'id': 50, 'city': 'Актобе', 'name': 'Офис Актобе', 'address': '11-й мкр, 3д'},
         ]
+        self.sync_state = {'status': None, 'error': None, 'problems': [], 'summary': {},
+                           'checked_at': None, 'read_at': None, 'changed_at': None}
 
     def section_spaces(self, cursor):
         return [11]
@@ -370,7 +377,23 @@ class Store:
 
     def save_memo(self, cursor, memo, actor):
         self.memo = dict(memo, updated_by_name=actor['name'], updated_at='2026-10-01T12:00:00')
+        self.memo_saves = getattr(self, 'memo_saves', 0) + 1
         return dict(self.memo)
+
+    def set_sheet_key(self, cursor, row_id, key):
+        self.rows[row_id]['sheet_key'] = key
+
+    def get_sync_state(self, cursor, *, lock=False):
+        return dict(self.sync_state)
+
+    def save_sync_state(self, cursor, *, status, error=None, problems=(), summary=None, read=False, changed=False):
+        state = dict(self.sync_state, status=status, error=error, problems=list(problems),
+                     summary=summary or {}, checked_at='2026-11-24T10:05:00')
+        if read:
+            state['read_at'] = '2026-11-24T10:05:00'
+        if changed:
+            state['changed_at'] = '2026-11-24T10:05:00'
+        self.sync_state = state
 
 
 class FakeDb:
@@ -391,6 +414,8 @@ class FakeDb:
 @unittest.skipIf(Flask is None, 'Flask не установлен')
 class _Base(unittest.TestCase):
 
+    mirror = False
+
     def setUp(self):
         self.store = Store()
         self.db = FakeDb()
@@ -398,7 +423,7 @@ class _Base(unittest.TestCase):
         patches = {'load_access_context': lambda cursor, user_id: dict(self.viewer)}
         for name in ('section_spaces', 'list_rows', 'read_row', 'lock_rows', 'update_row', 'set_active',
                      'create_row', 'taken_office_ids', 'directory', 'insert_event', 'list_events',
-                     'get_memo', 'save_memo'):
+                     'get_memo', 'save_memo', 'set_sheet_key', 'get_sync_state', 'save_sync_state'):
             patches[name] = getattr(self.store, name)
         patcher = mock.patch.multiple(queries, **patches)
         patcher.start()
@@ -430,6 +455,11 @@ class _Base(unittest.TestCase):
         pilot = mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', False)
         pilot.start()
         self.addCleanup(pilot.stop)
+        # Ручки правки проверяются так, будто правку вернули в раздел; зеркало
+        # таблицы — MirrorRouteTests.
+        mirror = mock.patch.object(access, 'SHEET_MIRROR', self.mirror)
+        mirror.start()
+        self.addCleanup(mirror.stop)
 
     def save(self, *items):
         return self.client.put('/api/thermoboxes/rows', json={'items': list(items)})
