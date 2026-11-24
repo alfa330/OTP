@@ -10,6 +10,7 @@ import {
     matchesQuery, monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, sourceChoices,
     sourceRequestBody, sourceTone, splitDateTime, stepCapacity, toggleInList, withExpanded, ARCHIVE_STAGE, columnCollapsed,
     DATED_STAGES, dayKey, dayLabel, isPastDay, openDaysFrom, visitTime, withExpandedDay,
+    SYSTEM_TOUCH_LABELS, canReschedule, rescheduleBody, rescheduleProblem, trainingDay,
     HH_NO_ICORE, hhIcoreOptions, hhIcoreValue, hhSettingsBody, hhVacancyMeta,
     hhMoney, hhPeriod, hhResumeSummary, hhSpan,
 } from '../src/components/hiring/hiringMeta.js';
@@ -214,6 +215,36 @@ test('day headers: today, tomorrow, yesterday, weekday; past days; visit time on
     assert.equal(visitTime({ office_visit_at: '2026-11-24T14:00:00' }), '14:00');
     assert.equal(visitTime({ office_visit_at: '2026-11-24' }), '');
     assert.equal(visitTime({}), '');
+});
+
+test('reschedule: who may, what the form needs, what goes to the server', () => {
+    // Владелец 24.11.2026: перенос даты визита и обучения с причиной («форс-мажор, поменялись планы, учёба, другое с комментом»).
+    const office = { stage: 'invited_office', is_closed: false, office_visit_at: '2026-11-25T10:00:00' };
+    const training = { stage: 'invited_training', is_closed: false, group_start_date: '2026-11-25', training_date: null };
+    assert.equal(canReschedule(office, true), true);
+    assert.equal(canReschedule(training, true), true);
+    assert.equal(canReschedule(office, false), false);                  // не закреплённый рекрутер и не руководитель
+    assert.equal(canReschedule({ ...office, is_closed: true }, true), false);
+    assert.equal(canReschedule({ stage: 'in_work' }, true), false);
+    assert.equal(canReschedule(null, true), false);
+    assert.equal(trainingDay(training), '2026-11-25');
+    assert.equal(trainingDay({ ...training, training_date: '2026-11-27' }), '2026-11-27');
+    assert.equal(trainingDay({}), '');
+    const reasons = [{ code: 'plans', needs_comment: false }, { code: 'other', needs_comment: true }];
+    assert.equal(rescheduleProblem({ date: '', reason: 'plans' }, true, reasons), 'Укажите новую дату и время визита');
+    assert.equal(rescheduleProblem({ date: '', reason: 'plans' }, false, reasons), 'Укажите новую дату обучения');
+    assert.equal(rescheduleProblem({ date: '2026-11-27', time: '14:00', reason: '' }, true, reasons), 'Укажите причину переноса');
+    assert.equal(rescheduleProblem({ date: '2026-11-27', time: '14:00', reason: 'other', comment: '  ' }, true, reasons), 'Для «Другое» нужен комментарий');
+    assert.equal(rescheduleProblem({ date: '2026-11-25', time: '10:00', reason: 'plans' }, true, reasons, office.office_visit_at),
+        'Это та же дата — выберите новую');
+    assert.equal(rescheduleProblem({ date: '2026-11-25', time: '11:00', reason: 'plans' }, true, reasons, office.office_visit_at), '');
+    assert.equal(rescheduleProblem({ date: '2026-11-25', reason: 'plans' }, false, reasons, '2026-11-25'), 'Это та же дата — выберите новую');
+    assert.equal(rescheduleProblem({ date: '2026-11-26', reason: 'other', comment: 'Сессия' }, false, reasons, '2026-11-25'), '');
+    assert.deepEqual(rescheduleBody({ date: '2026-11-27', time: '14:00', reason: 'plans', comment: '  ' }, true),
+        { when: '2026-11-27T14:00', reason: 'plans', comment: null });
+    assert.deepEqual(rescheduleBody({ date: '2026-11-27', time: '14:00', reason: 'other', comment: ' Сессия ' }, false),
+        { when: '2026-11-27', reason: 'other', comment: 'Сессия' });
+    assert.equal(SYSTEM_TOUCH_LABELS.rescheduled, 'Перенос даты');
 });
 
 test('source window body: new source has a kind, existing one sends only name and color', () => {

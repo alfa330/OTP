@@ -721,11 +721,10 @@ class HiringService:
                 fields['next_contact_at'] = _parse_moment(payload.get('next_contact_at'), 'дату следующего контакта')
                 fields['next_contact_notified'] = None
             if 'office_visit_at' in payload and card['stage'] == rules.INVITED_OFFICE:
-                moment = _parse_moment(payload.get('office_visit_at'), 'дату визита')
-                if not moment:
-                    raise HiringError('HIRING_NEED_OFFICE_DATE', 'Укажите дату и время визита')
-                fields['office_visit_at'] = moment
-                fields['substage'] = 'expected'
+                # Дату визита меняет только перенос с причиной (владелец 24.11.2026) — reschedule. Та же дата (форма прежней
+                # страницы присылала её при любой правке) — не правка и подстатус «Пришел» больше не сбрасывает.
+                if _parse_moment(payload.get('office_visit_at'), 'дату визита') != card.get('office_visit_at'):
+                    raise HiringError('HIRING_USE_RESCHEDULE', 'Дату визита меняют кнопкой «Перенести визит» — с причиной переноса', 409)
             if 'source_id' in payload:
                 source_id = self._card_source(cursor, card, payload.get('source_id'))
                 if source_id != card.get('source_id'):
@@ -738,6 +737,47 @@ class HiringService:
                         card.get('source_name') or '—', queries.get_source(cursor, source_id)['name']),
                         ctx['user_id'], ctx['name'], now, meta={'from_source_id': card.get('source_id'), 'to_source_id': source_id})
             queries.update_card(cursor, card_id, **fields)
+            return queries.get_card(cursor, card_id)
+
+    def reschedule(self, ctx, card_id, payload):
+        """Перенести дату приглашения (владелец 24.11.2026: «в колонках Приглашен в офис и Приглашен в обучение возможность
+        менять дату приглашения с указанием причины в категориях — форс-мажор, поменялись планы, учёба, другое с
+        комментом»). when — новые дата и время визита или новая дата обучения; reason — код rules.RESCHEDULE_REASONS,
+        у «Другое» обязателен comment. Визит: подстатус снова «Ожидается». Обучение: своя дата кандидата (training_date),
+        группа и место в ней остаются. Прежняя дата, новая и причина — строкой в ленте карточки."""
+        payload = payload or {}
+        now = self._now()
+        reason = str(payload.get('reason') or '')
+        if reason not in rules.RESCHEDULE_LABELS:
+            raise HiringError('HIRING_NEED_RESCHEDULE_REASON', 'Укажите причину переноса')
+        comment = _text(payload.get('comment'), 2000)
+        if reason in rules.RESCHEDULE_NEEDS_COMMENT and not comment:
+            raise HiringError('HIRING_NEED_COMMENT', 'Для «Другое» нужен комментарий')
+        with self._cursor() as cursor:
+            card = self._load_visible(cursor, ctx, card_id, lock=True)
+            if not self._is_owner_or_lead(ctx, card):
+                raise _forbidden('Дату переносит закреплённый рекрутер или руководитель')
+            if card['is_closed'] or card['stage'] not in rules.DATED_STAGES:
+                raise HiringError('HIRING_NOT_RESCHEDULABLE', 'Перенести можно только визит в офис или обучение', 409)
+            if card['stage'] == rules.INVITED_OFFICE:
+                before = card.get('office_visit_at')
+                after = _parse_moment(payload.get('when'), 'дату визита')
+                if not after:
+                    raise HiringError('HIRING_NEED_OFFICE_DATE', 'Укажите новые дату и время визита')
+                fields = {'office_visit_at': after, 'substage': 'expected'}
+            else:
+                before = card.get('training_date') or card.get('group_start_date')
+                after = _parse_date(payload.get('when'), 'дату обучения')
+                if not after:
+                    raise HiringError('HIRING_NEED_TRAINING_DATE', 'Укажите новую дату обучения')
+                fields = {'training_date': after}
+            if after == before:
+                raise HiringError('HIRING_SAME_DATE', 'Это та же дата — выберите новую', 409)
+            queries.update_card(cursor, card_id, updated_at=now, **fields)
+            queries.add_touch(cursor, card_id, rules.TOUCH_SYSTEM, rules.TOUCH_RESCHEDULED,
+                              rules.reschedule_text(card['stage'], before, after, reason, comment), ctx['user_id'], ctx['name'], now,
+                              meta={'stage': card['stage'], 'from': before.isoformat() if before else None,
+                                    'to': after.isoformat(), 'reason': reason, 'comment': comment})
             return queries.get_card(cursor, card_id)
 
     @staticmethod
@@ -972,10 +1012,13 @@ class HiringService:
                         raise HiringError('HIRING_GROUP_FULL', 'В группе «%s» мест нет — занято %d из %d. Выберите другую группу' % (
                             group['name'], taken, int(group['capacity'])), 409)
                 fields['group_id'] = group['id']
+                # Новое приглашение — дата обучения снова по старту группы: прежний перенос к ней не относится.
+                fields['training_date'] = None
                 if not card.get('vacancy_id') and group.get('vacancy_id'):
                     fields['vacancy_id'] = group['vacancy_id']
             elif target == rules.ON_TRAINING:
-                fields['training_started_at'] = _parse_date(payload.get('training_started_at')) or card.get('group_start_date') or now.date()
+                fields['training_started_at'] = (_parse_date(payload.get('training_started_at')) or card.get('training_date')
+                                                 or card.get('group_start_date') or now.date())
             elif target == rules.ON_LINE:
                 fields['line_started_at'] = _parse_date(payload.get('line_started_at'), 'дату выхода на линию')
             elif target in (rules.REFUSED, rules.DROPPED):
@@ -1084,7 +1127,7 @@ class HiringService:
                     raise HiringError('HIRING_NOT_RETURNABLE', 'В пул возвращаются карточки до выхода на обучение', 409)
                 pool = rules.pool_stage_for(card['kind'])
                 queries.update_card(cursor, card_id, stage=pool, substage=None, recruiter_id=None, next_contact_at=None,
-                                    group_id=None, office_visit_at=None, updated_at=now)
+                                    group_id=None, training_date=None, office_visit_at=None, updated_at=now)
                 queries.add_stage(cursor, card_id, pool, None, ctx['user_id'], ctx['name'], now)
                 queries.add_assignment(cursor, card_id, None, 'release', ctx['user_id'], ctx['name'], now, comment)
             notices.reassigned(cursor, card, old, new, now, comment)
@@ -1374,7 +1417,7 @@ class HiringService:
                 pool = rules.pool_stage_for(card['kind'])
                 queries.release_assignments(cursor, card['id'], now)
                 queries.update_card(cursor, card['id'], stage=pool, substage=None, recruiter_id=None, next_contact_at=None,
-                                    group_id=None, office_visit_at=None, updated_at=now)
+                                    group_id=None, training_date=None, office_visit_at=None, updated_at=now)
                 queries.add_stage(cursor, card['id'], pool, None, ctx['user_id'], ctx['name'], now)
                 queries.add_assignment(cursor, card['id'], None, 'recruiter_off', ctx['user_id'], ctx['name'], now)
                 returned += 1

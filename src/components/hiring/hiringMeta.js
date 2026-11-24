@@ -395,6 +395,39 @@ export const visitTime = (card) => {
     return p?.hasTime ? `${p.hour}:${p.minute}` : '';
 };
 
+/** Дата обучения кандидата: своя, если обучение переносили (training_date), иначе старт группы. */
+export const trainingDay = (card) => String(card?.training_date || card?.group_start_date || '').slice(0, 10);
+
+/*
+ * Перенос даты приглашения (владелец 24.11.2026: «в колонках Приглашен в офис и Приглашен в обучение возможность менять
+ * дату приглашения с указанием причины в категориях — форс-мажор, поменялись планы, учёба, другое с комментом»).
+ * Причины — из меты раздела (rules.RESCHEDULE_REASONS), у «Другое» нужен комментарий. Переносить можно закреплённому
+ * рекрутеру и руководителю, пока карточка в одной из двух колонок и не закрыта.
+ */
+export const canReschedule = (card, ownerOrLead) => Boolean(card && ownerOrLead && !card.is_closed && DATED_STAGES.includes(card.stage));
+
+/** Что не так с формой переноса — строкой для тоста; всё в порядке — ''. current — нынешняя дата (визиту — со временем). */
+export const rescheduleProblem = (form, office, reasons = [], current = '') => {
+    if (!form?.date) return office ? 'Укажите новую дату и время визита' : 'Укажите новую дату обучения';
+    if (!form.reason) return 'Укажите причину переноса';
+    if ((reasons || []).find((reason) => reason.code === form.reason)?.needs_comment && !String(form.comment || '').trim()) {
+        return 'Для «Другое» нужен комментарий';
+    }
+    const chosen = office ? joinDateTime(form.date, form.time) : form.date;
+    if (current && chosen === String(current).slice(0, chosen.length)) return 'Это та же дата — выберите новую';
+    return '';
+};
+
+/** Тело POST /cards/<id>/reschedule: визиту — дата со временем, обучению — дата. */
+export const rescheduleBody = (form, office) => ({
+    when: office ? joinDateTime(form.date, form.time) : form.date,
+    reason: form.reason,
+    comment: String(form.comment || '').trim() || null,
+});
+
+/* Системные строки ленты со своим названием (остальные подписаны «Система»). */
+export const SYSTEM_TOUCH_LABELS = { rescheduled: 'Перенос даты' };
+
 /*
  * Звонок из карточки — в iCore Phone на этом же компьютере (владелец 30.10.2026: «заменить tel:
  * на наш icore-phone:call?number=»). Формат — docs/CLICK-TO-CALL.md телефона:

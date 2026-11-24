@@ -21,6 +21,7 @@ Blueprint собирается фабрикой и получает зависи
     PATCH  /cards/<id>/touches/<touch_id>    дописать касание: комментарий, следующий контакт, исход звонка без телефонии
     PUT    /cards/<id>/substage              подстатус «В работе» / «Приглашен в офис»
     POST   /cards/<id>/move                  переход по этапам
+    POST   /cards/<id>/reschedule            перенос даты визита в офис или обучения — с причиной
     POST   /cards/<id>/reassign              переназначить / вернуть в пул (руководитель)
     PUT    /cards/<id>/motivation            выплачено / отменено (руководитель рекрутинга)
     POST   /upload                           файл базы контактов (multipart: file, source_id)
@@ -254,6 +255,8 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                     'idle_days': rules.IDLE_RETURN_DAYS,
                     'grant_kinds': [{'code': code, 'label': rules.GRANT_LABELS[code]} for code in rules.GRANT_KINDS],
                     'reason_kinds': [{'code': code, 'label': rules.REASON_KIND_LABELS[code]} for code in rules.REASON_KINDS],
+                    'reschedule_reasons': [{'code': code, 'label': label, 'needs_comment': code in rules.RESCHEDULE_NEEDS_COMMENT}
+                                           for code, label in rules.RESCHEDULE_REASONS],
                     'motivation_labels': rules.MOTIVATION_LABELS,
                 },
                 'integrations': _json(queries.list_integrations(cursor)) if caps['manage'] else [],
@@ -487,6 +490,11 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             stages = queries.card_stages(cursor, card_id)
             motivation = queries.get_motivation(cursor, card_id)
         return jsonify({'card': public_card(card, ctx), 'stages': _json(stages), 'motivation': _json(motivation)})
+
+    @hiring_route('/cards/<int:card_id>/reschedule', methods=('POST',))
+    def hiring_reschedule(card_id, ctx):
+        # Перенос даты визита или обучения с причиной (владелец 24.11.2026) — HiringService.reschedule.
+        return jsonify({'card': public_card(service.reschedule(ctx, card_id, _body()), ctx)})
 
     @hiring_route('/cards/<int:card_id>/reassign', methods=('POST',))
     def hiring_reassign(card_id, ctx):

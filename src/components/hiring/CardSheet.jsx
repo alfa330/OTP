@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-    ArrowRight, Check, ChevronDown, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone, PhoneIncoming,
-    PhoneMissed, PhoneOutgoing, Play, Repeat, UserCog, X,
+    ArrowRight, CalendarClock, Check, ChevronDown, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone,
+    PhoneIncoming, PhoneMissed, PhoneOutgoing, Play, Repeat, UserCog, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
@@ -10,9 +10,10 @@ import { IosHint, IosMenu, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondar
 import {
     ARCHIVE_STAGE, ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, FINAL_STAGES,
     MOTIVATION_LABELS, MOTIVATION_TONES, POOL_STAGES, SOURCE_COLOR_CODES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES,
-    TOUCH_LABELS, TOUCH_RESULT_LABELS, addDays, codeOf, errorOf, fmtDuration, fullDate, groupSeats, groupWhen, hhResumeSummary,
-    joinDateTime, longTime, markGroupFull,
-    openICorePhoneCall, reasonKindFor, shortTime, sourceChoices, sourceTone, splitDateTime, todayIso,
+    SYSTEM_TOUCH_LABELS, TOUCH_LABELS, TOUCH_RESULT_LABELS, addDays, canReschedule, codeOf, errorOf, fmtDuration, fullDate, groupSeats,
+    groupWhen, hhResumeSummary, joinDateTime, longTime, markGroupFull,
+    openICorePhoneCall, reasonKindFor, rescheduleBody, rescheduleProblem, shortTime, sourceChoices, sourceTone, splitDateTime, todayIso,
+    trainingDay,
 } from './hiringMeta';
 import { DATE_TRIGGER, FIELD, ICON_BTN, Label, Loading, Pill, ReasonDialog, SourcePill, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
 import { HhResume } from './HhResume';
@@ -163,7 +164,7 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
         if (!open) return;
         const initial = { office_date: '', office_time: '10:00', group_id: '', initiator: '', reason_id: '', comment: '', day: '',
             date: '', recruiter_id: card?.recruiter_id ? String(card.recruiter_id) : '' };
-        if (target === 'on_training') initial.date = card?.group_start_date || todayIso();
+        if (target === 'on_training') initial.date = trainingDay(card) || todayIso();
         if (target === 'on_line') initial.date = todayIso();
         if (target === 'refused' && card?.stage === 'invited_office' && card?.substage === 'no_show') initial.presetReason = 'Не пришел в офис';
         if (target === 'refused' && card?.stage === 'invited_training') initial.presetReason = 'Не пришел на обучение';
@@ -397,10 +398,9 @@ const EditDialog = ({ open, onClose, api, toast, card, boot, onDone }) => {
     useEffect(() => {
         if (!open || !card) return;
         const next = splitDateTime(card.next_contact_at);
-        const office = splitDateTime(card.office_visit_at);
         setForm({ full_name: card.full_name || '', whatsapp: card.whatsapp || '', city: card.city || '',
             vacancy_id: card.vacancy_id ? String(card.vacancy_id) : '', referred_by: card.referred_by || '', comment: card.comment || '',
-            next_date: next.date, next_time: next.time || '10:00', office_date: office.date, office_time: office.time || '10:00' });
+            next_date: next.date, next_time: next.time || '10:00' });
     }, [open, card]);
     const set = (key) => (value) => setForm((prev) => ({ ...prev, [key]: value?.target ? value.target.value : value }));
     const vacancies = (boot.dictionaries?.vacancies || []).filter((v) => v.is_active !== false || String(v.id) === form.vacancy_id);
@@ -410,7 +410,6 @@ const EditDialog = ({ open, onClose, api, toast, card, boot, onDone }) => {
             const payload = { full_name: form.full_name, whatsapp: form.whatsapp || null, city: form.city || null,
                 vacancy_id: form.vacancy_id ? Number(form.vacancy_id) : null, referred_by: form.referred_by || null, comment: form.comment || null,
                 next_contact_at: form.next_date ? joinDateTime(form.next_date, form.next_time) : null };
-            if (card.stage === 'invited_office' && form.office_date) payload.office_visit_at = joinDateTime(form.office_date, form.office_time);
             await api.patch(`/cards/${card.id}`, payload);
             onDone();
             onClose();
@@ -442,13 +441,89 @@ const EditDialog = ({ open, onClose, api, toast, card, boot, onDone }) => {
                     <Label>Следующий контакт</Label>
                     <DateTimeField date={form.next_date} time={form.next_time} onDate={set('next_date')} onTime={set('next_time')} />
                 </div>
-                {card?.stage === 'invited_office' && (
-                    <div className="sm:col-span-2">
-                        <Label hint="Не пришёл — назначьте новую дату: подстатус снова станет «Ожидается».">Визит в офис</Label>
-                        <DateTimeField date={form.office_date} time={form.office_time} onDate={set('office_date')} onTime={set('office_time')} />
-                    </div>
-                )}
                 <div className="sm:col-span-2"><Label>Комментарий</Label><textarea className={`${FIELD} min-h-[72px]`} value={form.comment || ''} onChange={set('comment')} /></div>
+            </div>
+        </IosModal>
+    );
+};
+
+/* Причина переноса — сегментами, как «Инициатор» в окне отказа: на широком экране одной строкой (длинная подпись берёт
+   свою ширину), на узком — в две строки. */
+const ReasonChoice = ({ value, options, onChange }) => (
+    <div role="radiogroup" aria-label="Причина переноса" className="grid grid-cols-2 gap-[3px] rounded-[10px] bg-slate-100 p-[3px] sm:flex">
+        {options.map((option) => {
+            const active = option.code === value;
+            return (
+                <button key={option.code} type="button" role="radio" aria-checked={active} onClick={() => onChange(option.code)}
+                        className={`whitespace-nowrap rounded-[8px] px-2 py-[5px] text-[12.5px] font-medium transition active:scale-[0.98] sm:flex-1 sm:px-3 ${active
+                            ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]' : 'text-slate-500 hover:text-slate-800'}`}>
+                    {option.label}
+                </button>
+            );
+        })}
+    </div>
+);
+
+/* Перенос даты приглашения (владелец 24.11.2026: «менять дату приглашения с указанием причины в категориях — форс-мажор,
+   поменялись планы, учёба, другое с комментом»; HR-6: «кандидат перенёс обучение — просто изменить дату в карточке, без
+   нового приглашения»). Визиту — новые дата и время, обучению — новая дата: группа и место в ней остаются. Прежняя дата,
+   новая и причина ложатся строкой в ленту карточки. */
+const RescheduleDialog = ({ open, onClose, api, toast, card, boot, onDone }) => {
+    const office = card?.stage === 'invited_office';
+    const current = office ? String(card?.office_visit_at || '') : trainingDay(card);
+    const [form, setForm] = useState({ date: '', time: '10:00', reason: '', comment: '' });
+    const [saving, setSaving] = useState(false);
+    useEffect(() => {
+        if (!open) return;
+        const was = splitDateTime(current);
+        setForm({ date: was.date, time: was.time && was.time !== '00:00' ? was.time : '10:00', reason: '', comment: '' });
+    }, [open, current]);
+    const reasons = boot.meta?.reschedule_reasons || [];
+    const needsComment = Boolean(reasons.find((reason) => reason.code === form.reason)?.needs_comment);
+    const set = (key) => (value) => setForm((prev) => ({ ...prev, [key]: value?.target ? value.target.value : value }));
+    const submit = async () => {
+        const problem = rescheduleProblem(form, office, reasons, current);
+        if (problem) return toast(problem, 'error');
+        setSaving(true);
+        try {
+            const body = rescheduleBody(form, office);
+            await api.post(`/cards/${card.id}/reschedule`, body);
+            toast(office ? `Визит перенесён на ${longTime(body.when)}` : `Обучение перенесено на ${longTime(body.when)}`, 'success');
+            onDone();
+            onClose();
+        } catch (error) {
+            toast(errorOf(error, 'Дата не перенесена'), 'error');
+        } finally {
+            setSaving(false);
+        }
+        return undefined;
+    };
+    return (
+        <IosModal open={open} onClose={onClose} title={office ? 'Перенести визит' : 'Перенести обучение'}
+                  subtitle={current ? `Сейчас: ${longTime(current)}${office ? '' : card?.group_name ? ` · ${card.group_name}` : ''}` : ''}
+                  footer={(
+                      <div className="flex justify-end gap-2">
+                          <button type="button" className={iosBtnSecondary} onClick={onClose}>Отмена</button>
+                          <button type="button" className={iosBtnPrimary} onClick={submit} disabled={saving}>Перенести</button>
+                      </div>
+                  )}>
+            <div className="space-y-3">
+                <div>
+                    <Label required hint={office ? undefined : 'Кандидат остаётся в своей группе — меняется только его дата.'}>
+                        {office ? 'Новые дата и время визита' : 'Новая дата обучения'}
+                    </Label>
+                    {office ? <DateTimeField date={form.date} time={form.time} onDate={set('date')} onTime={set('time')} />
+                        : <IosDatePicker value={form.date} onChange={set('date')} triggerClassName={DATE_TRIGGER} ariaLabel="Дата обучения" />}
+                </div>
+                <div>
+                    <Label required>Причина</Label>
+                    <ReasonChoice value={form.reason} options={reasons} onChange={set('reason')} />
+                </div>
+                <div>
+                    <Label required={needsComment}>Комментарий</Label>
+                    <textarea className={`${FIELD} min-h-[72px]`} value={form.comment} onChange={set('comment')}
+                              placeholder={needsComment ? 'Что случилось' : 'Если нужно'} />
+                </div>
             </div>
         </IosModal>
     );
@@ -552,10 +627,15 @@ const timelineIcon = (item, call) => {
     if (item.kind === 'whatsapp') return MessageCircle;
     if (item.kind === 'comment') return MessageSquareText;
     if (item.kind === 'repeat_response') return Repeat;
+    if (item.kind === 'system' && item.result === 'rescheduled') return CalendarClock;
     return Info;
 };
 
 const SMALL_BTN = 'inline-flex h-7 items-center rounded-lg bg-white px-2.5 text-[12px] font-medium text-slate-700 ring-1 ring-slate-200/70 transition hover:bg-slate-50 active:scale-[0.98]';
+// Действие в ряду переходов карточки, не переход (перенос даты), — тем же видом, что шаг вперёд.
+const STEP_BTN = 'inline-flex h-8 items-center gap-1 rounded-xl bg-white px-3 text-[12.5px] font-medium text-slate-700 ring-1 ring-slate-200/70 transition hover:bg-slate-50 active:scale-[0.98]';
+// Завершающий переход («Отказ», «Отсев») — в конце ряда и красным контуром.
+const isClosingStep = (target) => FINAL_STAGES.includes(target) && target !== 'hired';
 
 /* Лента касаний: свежие сверху. Звонок без исхода ждёт телефонию; если звонок прошёл мимо неё,
    закреплённый рекрутер ставит исход прямо в строке. */
@@ -578,7 +658,9 @@ const Timeline = ({ touches, calls = [], api, canEdit, onSetResult }) => {
                         <div className="min-w-0 grow">
                             {call ? <CallRow item={item} call={call} api={api} /> : (
                                 <div className="text-[13px] text-slate-800">
-                                    <span className="font-medium">{TOUCH_LABELS[item.kind] || item.kind}</span>
+                                    <span className="font-medium">
+                                        {(item.kind === 'system' && SYSTEM_TOUCH_LABELS[item.result]) || TOUCH_LABELS[item.kind] || item.kind}
+                                    </span>
                                     {item.kind === 'call' && item.result ? <Pill tone={item.result === 'dial' ? 'green' : 'amber'} className="ml-1.5">{TOUCH_RESULT_LABELS[item.result]}</Pill> : null}
                                     {pending && <Pill className="ml-1.5">ждём исход из телефонии</Pill>}
                                     {item.author_name ? <span className="text-slate-400"> · {item.author_name}</span> : null}
@@ -638,11 +720,15 @@ const StageHistory = ({ stages, assignments }) => (
     </div>
 );
 
-const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChanged, onOpenChat, initialMove = null, onMoveConsumed, initialCall = false, onCallConsumed }) => {
+const CardSheet = ({
+    api, toast, boot, reloadBoot, caps, cardId, onClose, onChanged, onOpenChat, initialMove = null, onMoveConsumed, initialCall = false,
+    onCallConsumed, initialReschedule = false, onRescheduleConsumed,
+}) => {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
     const [tab, setTab] = useState('card');
     const [move, setMove] = useState(null);
+    const [rescheduling, setRescheduling] = useState(false);
     const [editing, setEditing] = useState(false);
     const [reassigning, setReassigning] = useState(false);
     const [cancelling, setCancelling] = useState(false);
@@ -665,6 +751,7 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
         setError('');
         setTab('card');
         setMove(null);
+        setRescheduling(false);
         setComment('');
         setEditing(false);
         setReassigning(false);
@@ -699,6 +786,22 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
         return isOwnerOrLead;
     };
     const targets = card ? (card.targets || []).filter(canMoveTo) : [];
+    const stepButton = (target) => (
+        <button key={target} type="button" onClick={() => setMove(target)}
+                className={`inline-flex h-8 items-center gap-1 rounded-xl px-3 text-[12.5px] font-medium ring-1 transition active:scale-[0.98] ${
+                    isClosingStep(target) ? 'bg-white text-rose-700 ring-rose-200 hover:bg-rose-50'
+                        : target === 'hired' ? 'bg-emerald-600 text-white ring-emerald-600 hover:bg-emerald-700'
+                            : 'bg-white text-slate-700 ring-slate-200/70 hover:bg-slate-50'}`}>
+            <ArrowRight size={13} className="opacity-60" /> {STAGE_LABELS[target]}
+        </button>
+    );
+    // Перенос даты визита или обучения — с причиной (владелец 24.11.2026); с доски карточка открывается сразу с окном.
+    const reschedulable = canReschedule(card, isOwnerOrLead);
+    useEffect(() => {
+        if (!initialReschedule || !data?.card) return;
+        onRescheduleConsumed?.();
+        if (canReschedule(data.card, (data.actor || []).some((kind) => kind === 'owner' || kind === 'lead'))) setRescheduling(true);
+    }, [initialReschedule, data, onRescheduleConsumed]);
 
     // Сам вызов уже ушёл в iCore Phone (кнопкой здесь или со стола/доски). В ленте появляется касание
     // «ждём исход из телефонии», а панель над лентой — для комментария и следующего контакта.
@@ -880,18 +983,17 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
 
                         {activeTab === 'card' && (
                             <>
-                                {targets.length > 0 && (
+                                {(targets.length > 0 || reschedulable) && (
                                     <div className="flex flex-wrap items-center gap-1.5">
-                                        {/* Шаги вперёд — первыми, завершения («Отказ», «Отсев») — в конце и красным контуром. */}
-                                        {[...targets].sort((a, b) => Number(FINAL_STAGES.includes(a) && a !== 'hired') - Number(FINAL_STAGES.includes(b) && b !== 'hired')).map((target) => (
-                                            <button key={target} type="button" onClick={() => setMove(target)}
-                                                    className={`inline-flex h-8 items-center gap-1 rounded-xl px-3 text-[12.5px] font-medium ring-1 transition active:scale-[0.98] ${
-                                                        FINAL_STAGES.includes(target) && target !== 'hired' ? 'bg-white text-rose-700 ring-rose-200 hover:bg-rose-50'
-                                                            : target === 'hired' ? 'bg-emerald-600 text-white ring-emerald-600 hover:bg-emerald-700'
-                                                                : 'bg-white text-slate-700 ring-slate-200/70 hover:bg-slate-50'}`}>
-                                                <ArrowRight size={13} className="opacity-60" /> {STAGE_LABELS[target]}
+                                        {/* Шаги вперёд — первыми, перенос даты — за ними, завершения («Отказ», «Отсев») — в конце и
+                                            красным контуром. */}
+                                        {targets.filter((target) => !isClosingStep(target)).map(stepButton)}
+                                        {reschedulable && (
+                                            <button type="button" onClick={() => setRescheduling(true)} className={STEP_BTN}>
+                                                <CalendarClock size={13} className="opacity-60" /> {card.stage === 'invited_office' ? 'Перенести визит' : 'Перенести обучение'}
                                             </button>
-                                        ))}
+                                        )}
+                                        {targets.filter(isClosingStep).map(stepButton)}
                                     </div>
                                 )}
 
@@ -944,6 +1046,10 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                                         {card.next_contact_at && !card.is_closed && <InfoRow label="Следующий контакт">{longTime(card.next_contact_at)}</InfoRow>}
                                         {card.office_visit_at && <InfoRow label="Визит в офис">{longTime(card.office_visit_at)}</InfoRow>}
                                         {card.group_name && <InfoRow label="Группа">{card.group_name}{card.group_start_date ? ` · с ${fullDate(card.group_start_date)}` : ''}</InfoRow>}
+                                        {/* Обучение переносили — у кандидата своя дата, группа та же (владелец 24.11.2026). */}
+                                        {card.training_date && card.stage === 'invited_training' && (
+                                            <InfoRow label="Дата обучения">{fullDate(card.training_date)}</InfoRow>
+                                        )}
                                         {card.training_started_at && <InfoRow label="Вышел на обучение">{fullDate(card.training_started_at)}</InfoRow>}
                                         {card.line_started_at && <InfoRow label="Вышел на линию">{fullDate(card.line_started_at)}</InfoRow>}
                                         {card.hired_at && <InfoRow label={STAGE_LABELS.hired}>{longTime(card.hired_at)}</InfoRow>}
@@ -1032,6 +1138,7 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                 )}
             </IosModal>
             {card && <MoveDialog open={Boolean(move)} onClose={() => setMove(null)} card={card} target={move} boot={boot} caps={caps} api={api} toast={toast} onDone={changed} />}
+            {card && <RescheduleDialog open={rescheduling} onClose={() => setRescheduling(false)} api={api} toast={toast} card={card} boot={boot} onDone={changed} />}
             {card && <EditDialog open={editing} onClose={() => setEditing(false)} api={api} toast={toast} card={card} boot={boot} onDone={changed} />}
             {card && <ReassignDialog open={reassigning} onClose={() => setReassigning(false)} api={api} toast={toast} card={card} boot={boot} onDone={changed} />}
             {card && (

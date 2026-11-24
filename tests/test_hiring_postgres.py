@@ -2112,6 +2112,83 @@ def test_board_invited_by_day(world):
         assert [c['id'] for c in columns['invited_office']] == [astana]
 
 
+def test_reschedule_office_visit_and_training_with_a_reason(world):
+    """Владелец 24.11.2026: «в колонках Приглашен в офис и Приглашен в обучение возможность менять дату приглашения с
+    указанием причины в категориях — форс-мажор, поменялись планы, учёба, другое с комментом»; HR-6: «кандидат перенёс
+    обучение — просто изменить дату в карточке, без нового приглашения». Визит — новые дата и время, подстатус снова
+    «Ожидается»; обучение — своя дата кандидата, группа та же, доска раскладывает по новому дню; прежняя дата и причина —
+    строкой в ленте. Переносит закреплённый рекрутер или руководитель; причина обязательна, у «Другое» — и комментарий."""
+    service = world['service']
+    me, other, lead, trainer = ctx_of(world, REC1), ctx_of(world, REC2), ctx_of(world, LEAD_GRANT), ctx_of(world, TRAINER)
+    card = take_and_touch(world, REC1, '8 705 810 00 01')
+    card = service.move(me, card['id'], 'invited_office', {'office_visit_at': '2026-10-16T10:00'})
+    card = service.set_substage(me, card['id'], 'no_show')
+    for payload, code in (({'when': '2026-10-18T14:00'}, 'HIRING_NEED_RESCHEDULE_REASON'),
+                          ({'when': '2026-10-18T14:00', 'reason': 'weather'}, 'HIRING_NEED_RESCHEDULE_REASON'),
+                          ({'when': '2026-10-18T14:00', 'reason': 'other'}, 'HIRING_NEED_COMMENT'),
+                          ({'when': '2026-10-18T14:00', 'reason': 'other', 'comment': '   '}, 'HIRING_NEED_COMMENT'),
+                          ({'reason': 'plans'}, 'HIRING_NEED_OFFICE_DATE'),
+                          ({'when': '2026-10-16T10:00', 'reason': 'plans'}, 'HIRING_SAME_DATE')):
+        with pytest.raises(HiringError) as caught:
+            service.reschedule(me, card['id'], payload)
+        assert caught.value.code == code, payload
+    with pytest.raises(HiringError) as caught:                       # чужой рекрутер карточку не видит
+        service.reschedule(other, card['id'], {'when': '2026-10-18T14:00', 'reason': 'plans'})
+    assert caught.value.code == 'HIRING_NOT_FOUND'
+    moved = service.reschedule(me, card['id'], {'when': '2026-10-18T14:00', 'reason': 'plans', 'comment': 'Попросил перенести'})
+    assert (moved['office_visit_at'], moved['substage'], moved['stage']) == (datetime(2026, 10, 18, 14, 0), 'expected', 'invited_office')
+    assert moved['last_touch_at'] == card['last_touch_at']           # перенос — не касание: срок без касаний не трогает
+    with world['db']._get_cursor() as cur:
+        touch = queries.card_touches(cur, card['id'])[-1]
+    assert (touch['kind'], touch['result'], touch['author_id']) == ('system', 'rescheduled', REC1)
+    assert touch['body'] == 'Визит перенесён: 16.10 10:00 → 18.10 14:00 · Поменялись планы\nПопросил перенести'
+    assert touch['meta'] == {'stage': 'invited_office', 'from': '2026-10-16T10:00:00', 'to': '2026-10-18T14:00:00',
+                             'reason': 'plans', 'comment': 'Попросил перенести'}
+    assert service.reschedule(lead, card['id'], {'when': '2026-10-20T09:00', 'reason': 'other', 'comment': 'Болеет'})[
+        'office_visit_at'] == datetime(2026, 10, 20, 9, 0)
+    # Дату визита правкой карточки больше не поменять — только переносом; та же дата в правке «Пришел» не сбрасывает.
+    service.set_substage(me, card['id'], 'came')
+    with pytest.raises(HiringError) as caught:
+        service.edit_card(me, card['id'], {'office_visit_at': '2026-10-21T09:00'})
+    assert caught.value.code == 'HIRING_USE_RESCHEDULE'
+    same = service.edit_card(me, card['id'], {'office_visit_at': '2026-10-20T09:00', 'city': 'Шымкент'})
+    assert (same['substage'], same['city'], same['office_visit_at']) == ('came', 'Шымкент', datetime(2026, 10, 20, 9, 0))
+
+    # Обучение: своя дата кандидата, группа и место те же; доска — по новому дню; «Вышел на обучение» по умолчанию — она.
+    card = service.move(me, card['id'], 'invited_training', {'group_id': world['group_id']})      # группа стартует 20.10
+    assert card['training_date'] is None
+    for payload, code in (({'when': '2026-10-20', 'reason': 'study'}, 'HIRING_SAME_DATE'),
+                          ({'reason': 'study'}, 'HIRING_NEED_TRAINING_DATE')):
+        with pytest.raises(HiringError) as caught:
+            service.reschedule(me, card['id'], payload)
+        assert caught.value.code == code, payload
+    card = service.reschedule(me, card['id'], {'when': '2026-10-22', 'reason': 'study'})
+    assert (card['training_date'], card['group_id'], card['stage']) == (date(2026, 10, 22), world['group_id'], 'invited_training')
+    with world['db']._get_cursor() as cur:
+        assert queries.card_touches(cur, card['id'])[-1]['body'] == 'Обучение перенесено: 20.10 → 22.10 · Учёба'
+        assert queries.board_days(cur, {'lead': True}, LEAD_GRANT, {})['invited_training'] == {date(2026, 10, 22): 1}
+        columns, _counts, _by_source = queries.board(cur, {'lead': True}, LEAD_GRANT, {},
+                                                     days_open={'invited_training': ([date(2026, 10, 22)], False)})
+        assert [c['id'] for c in columns['invited_training']] == [card['id']]
+    card = service.reschedule(me, card['id'], {'when': '2026-10-23', 'reason': 'force_majeure'})
+    with world['db']._get_cursor() as cur:
+        assert queries.card_touches(cur, card['id'])[-1]['body'] == 'Обучение перенесено: 22.10 → 23.10 · Форс-мажор'
+    with pytest.raises(HiringError) as caught:                       # тренер группы дату не переносит — он отмечает выход
+        service.reschedule(trainer, card['id'], {'when': '2026-10-24', 'reason': 'plans'})
+    assert caught.value.code == 'HIRING_FORBIDDEN'
+    assert service.move(trainer, card['id'], 'on_training', {})['training_started_at'] == date(2026, 10, 23)
+    with pytest.raises(HiringError) as caught:                       # вышел на обучение — переносить нечего
+        service.reschedule(me, card['id'], {'when': '2026-10-25', 'reason': 'plans'})
+    assert caught.value.code == 'HIRING_NOT_RESCHEDULABLE'
+
+    # Возврат в пул снимает и группу, и свою дату обучения: новое приглашение начнётся со старта новой группы.
+    again = take_and_touch(world, REC1, '8 705 810 00 02')
+    again = service.move(me, again['id'], 'invited_training', {'group_id': world['group_id']})
+    service.reschedule(me, again['id'], {'when': '2026-10-21', 'reason': 'plans'})
+    released = service.reassign(lead, again['id'], None, 'Кандидат передумал, вернём в пул')
+    assert (released['stage'], released['group_id'], released['training_date']) == ('responses', None, None)
+
+
 # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ────────────────────────
 
 def _webhook(general_call_id, phone, *, disposition='ANSWER', billsec=120, call_type='1', line='8501', start=1792000000):

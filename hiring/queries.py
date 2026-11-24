@@ -488,7 +488,7 @@ _CARD_COLUMNS = """
     c.id, c.candidate_no, c.kind, c.full_name, c.phone, c.whatsapp, c.city, c.vacancy_id, c.vacancy_text, c.plan_id,
     c.source_id, c.batch_id, c.platform_ref, c.campaign, c.referred_by, c.received_at, c.stage, c.substage,
     c.recruiter_id, c.taken_at, c.next_contact_at, c.last_touch_at, c.no_answer_streak, c.office_visit_at,
-    c.group_id, c.training_started_at, c.line_started_at, c.shifts_done, c.hired_at, c.hired_by, c.hired10_at,
+    c.group_id, c.training_date, c.training_started_at, c.line_started_at, c.shifts_done, c.hired_at, c.hired_by, c.hired10_at,
     c.close_initiator, c.close_reason_id, c.close_reason_text, c.close_stage, c.close_day, c.close_comment,
     c.is_closed, c.closed_at, c.repeat_of_card_id, c.reactivations, c.comment, c.created_by, c.created_at, c.updated_at,
     c.employee_user_id, e.name AS employee_name,
@@ -555,7 +555,7 @@ def insert_card(cursor, fields):
 def update_card(cursor, card_id, **fields):
     allowed = ('full_name', 'whatsapp', 'city', 'vacancy_id', 'vacancy_text', 'plan_id', 'source_id', 'campaign',
                'referred_by', 'stage', 'substage', 'recruiter_id', 'taken_at', 'next_contact_at', 'next_contact_notified',
-               'last_touch_at', 'no_answer_streak', 'office_visit_at', 'group_id', 'training_started_at',
+               'last_touch_at', 'no_answer_streak', 'office_visit_at', 'group_id', 'training_date', 'training_started_at',
                'line_started_at', 'shifts_done', 'hired_at', 'hired_by', 'close_initiator', 'close_reason_id',
                'close_reason_text', 'close_stage', 'close_day', 'close_comment', 'is_closed', 'closed_at',
                'reactivations', 'comment', 'updated_at', 'candidate_no', 'employee_user_id', 'hired10_at')
@@ -1195,9 +1195,10 @@ def _board_where(caps, user_id, filters):
     return " AND ".join([scope_sql] + where), scope_params + params
 
 
-# День карточки на доске (rules.board_day): визит в офис — его дата, обучение — дата старта группы, другие этапы — NULL.
+# День карточки на доске (rules.board_day): визит в офис — его дата, обучение — перенесённая дата кандидата или старт
+# группы, другие этапы — NULL.
 _BOARD_DAY = ("CASE c.stage WHEN 'invited_office' THEN c.office_visit_at::date "
-              "WHEN 'invited_training' THEN g.start_date END")
+              "WHEN 'invited_training' THEN COALESCE(c.training_date, g.start_date) END")
 
 
 def board(cursor, caps, user_id, filters, per_column=60, expand_sources=(), expanded_limit=1000,

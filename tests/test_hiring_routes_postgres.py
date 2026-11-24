@@ -642,6 +642,36 @@ def test_board_invited_days_through_routes(client):
     assert columns['invited_office']['cards'] == [] and [c['id'] for c in columns['invited_training']['cards']] == [upcoming]
 
 
+def test_reschedule_through_routes(client):
+    """Владелец 24.11.2026: перенос даты визита или обучения с причиной («форс-мажор, поменялись планы, учёба, другое с
+    комментом»). Причины приходят в мете раздела; ручка переносит, лента карточки отдаёт строку переноса; дату визита правкой
+    карточки больше не поменять."""
+    rec = as_user(REC1)
+    boot = client.get('/api/hiring', headers=rec).get_json()
+    assert boot['meta']['reschedule_reasons'] == [
+        {'code': 'force_majeure', 'label': 'Форс-мажор', 'needs_comment': False},
+        {'code': 'plans', 'label': 'Поменялись планы', 'needs_comment': False},
+        {'code': 'study', 'label': 'Учёба', 'needs_comment': False},
+        {'code': 'other', 'label': 'Другое', 'needs_comment': True}]
+    manual = next(s for s in boot['dictionaries']['sources'] if s['code'] == 'manual')
+    card = client.post('/api/hiring/cards', json={'phone': '8 705 600 00 01', 'source_id': manual['id']}, headers=rec).get_json()['card']
+    client.post('/api/hiring/cards/%s/take' % card['id'], headers=rec)
+    client.post('/api/hiring/cards/%s/touches' % card['id'], json={'kind': 'call', 'result': 'dial'}, headers=rec)
+    assert client.post('/api/hiring/cards/%s/move' % card['id'], json={'target': 'invited_office', 'office_visit_at': '2026-12-01T10:00'},
+                       headers=rec).status_code == 200
+    url = '/api/hiring/cards/%s/reschedule' % card['id']
+    bad = client.post(url, json={'when': '2026-12-02T11:00'}, headers=rec)
+    assert bad.status_code == 400 and bad.get_json()['code'] == 'HIRING_NEED_RESCHEDULE_REASON'
+    assert client.post(url, json={'when': '2026-12-02T11:00', 'reason': 'plans'}, headers=as_user(REC2)).status_code == 404
+    moved = client.post(url, json={'when': '2026-12-02T11:00', 'reason': 'other', 'comment': 'Экзамен'}, headers=rec)
+    assert moved.status_code == 200 and moved.get_json()['card']['office_visit_at'] == '2026-12-02T11:00:00'
+    touches = client.get('/api/hiring/cards/%s' % card['id'], headers=rec).get_json()['touches']
+    assert (touches[-1]['kind'], touches[-1]['result'], touches[-1]['meta']['reason']) == ('system', 'rescheduled', 'other')
+    assert touches[-1]['body'] == 'Визит перенесён: 01.12 10:00 → 02.12 11:00 · Другое\nЭкзамен'
+    edit = client.patch('/api/hiring/cards/%s' % card['id'], json={'office_visit_at': '2026-12-03T10:00'}, headers=rec)
+    assert edit.status_code == 409 and edit.get_json()['code'] == 'HIRING_USE_RESCHEDULE'
+
+
 def test_external_responses(client):
     body = {'source': 'kaspi', 'items': [{'phone': '8 705 777 00 01', 'name': 'Kaspi Один', 'city': 'Алматы', 'vacancy': 'Водитель'},
                                         {'phone': 'мусор'}]}

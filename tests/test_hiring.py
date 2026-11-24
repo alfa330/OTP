@@ -187,6 +187,26 @@ class StageTests(unittest.TestCase):
                          ([date(2026, 11, 24), date(2026, 11, 25)], True))
         self.assertEqual(routes._days_arg('-'), ([], False))
         self.assertEqual(routes._days_arg(None), ([], False))
+        # Перенесённое обучение (24.11.2026) — в колонке по своей дате кандидата, а не по старту группы.
+        self.assertEqual(rules.board_day({'stage': 'invited_training', 'group_start_date': date(2026, 11, 25),
+                                          'training_date': date(2026, 11, 27)}), date(2026, 11, 27))
+
+    def test_reschedule_reasons_and_feed_line(self):
+        """Владелец 24.11.2026: причины переноса — «форс-мажор, поменялись планы, учёба, другое с комментом»; строка ленты
+        говорит, с какой даты на какую и почему."""
+        from datetime import date
+        self.assertEqual(rules.RESCHEDULE_REASONS, (('force_majeure', 'Форс-мажор'), ('plans', 'Поменялись планы'),
+                                                    ('study', 'Учёба'), ('other', 'Другое')))
+        self.assertEqual(rules.RESCHEDULE_NEEDS_COMMENT, ('other',))
+        self.assertEqual(rules.reschedule_text('invited_office', datetime(2026, 11, 25, 10, 0), datetime(2026, 11, 27, 14, 30), 'plans'),
+                         'Визит перенесён: 25.11 10:00 → 27.11 14:30 · Поменялись планы')
+        self.assertEqual(rules.reschedule_text('invited_training', date(2026, 11, 23), date(2026, 11, 25), 'other', 'Сессия'),
+                         'Обучение перенесено: 23.11 → 25.11 · Другое\nСессия')
+        self.assertEqual(rules.reschedule_text('invited_office', None, datetime(2026, 11, 27, 9, 0), 'study'),
+                         'Визит перенесён: — → 27.11 09:00 · Учёба')
+        # Подписи ленты на экране — те же коды причин, что у сервера (экран берёт их из меты раздела).
+        meta = (ROOT / 'src' / 'components' / 'hiring' / 'hiringMeta.js').read_text(encoding='utf-8')
+        self.assertIn("export const SYSTEM_TOUCH_LABELS = { %s: 'Перенос даты' };" % rules.TOUCH_RESCHEDULED, meta)
 
     def test_channels_are_gone_from_code(self):
         """Понятия «Канал» больше нет (владелец 20.11.2026): ни ручек, ни меток в карточке, ни раздела настроек."""
@@ -332,6 +352,22 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertIn("visit: column.stage === 'invited_office' ? visitTime(card) : ''", self.board)
         # «Показаны N из M» — только у колонок без групп: у дней свёрнутые группы — не «недогрузка».
         self.assertIn('{!grouped && !dated && column.total > column.cards.length && (', self.board)
+
+    def test_reschedule_wiring(self):
+        """Владелец 24.11.2026: дату визита и обучения переносят с причиной — кнопкой в карточке и значком на карточке доски
+        (она открывается сразу с окном переноса); правка карточки дату визита больше не меняет."""
+        self.assertIn("await api.post(`/cards/${card.id}/reschedule`, body);", self.sheet)
+        self.assertIn('const problem = rescheduleProblem(form, office, reasons, current);', self.sheet)
+        self.assertIn('{reschedulable && (\n                                            <button type="button" onClick={() => setRescheduling(true)}',
+                      self.sheet)
+        self.assertIn('<RescheduleDialog open={rescheduling}', self.sheet)
+        self.assertIn("if (target === 'on_training') initial.date = trainingDay(card) || todayIso();", self.sheet)
+        edit = self.sheet[self.sheet.index('const EditDialog = '):self.sheet.index('const ReasonChoice = ')]
+        self.assertNotIn('office_visit_at', edit)
+        self.assertIn('const reschedule = (card) => onOpenCard(card.id, { reschedule: true });', self.board)
+        self.assertIn('reschedulable={canMoveDate(card)}', self.board)
+        self.assertIn('setOpenReschedule(Boolean(options?.reschedule));', self.view)
+        self.assertIn('initialReschedule={openReschedule}', self.view)
 
     def test_chat_handled_button_under_last_candidate_message(self):
         """Владелец 20.11.2026: «Ответ не нужен» — снизу под последним сообщением кандидата, как в «Чатах ОП», а не в

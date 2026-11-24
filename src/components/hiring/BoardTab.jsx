@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronRight, ChevronsLeft, ChevronsRight, Phone, Plus, RefreshCw, Repeat, Search, X } from 'lucide-react';
+import { CalendarClock, ChevronRight, ChevronsLeft, ChevronsRight, Phone, Plus, RefreshCw, Repeat, Search, X } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
 import { quickPeriods } from '../ui/periodRange';
 import {
-    ARCHIVE_STAGE, DATED_STAGES, POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, boardQuery, codeOf, columnCollapsed,
-    dayKey, dayLabel, daysSince, errorOf, groupCards, groupKey, initials, isPastDay, openDaysFrom, openICorePhoneCall, shortTime,
-    sourceTone, todayIso, toggleInList, visitTime, withExpanded, withExpandedDay,
+    ARCHIVE_STAGE, DATED_STAGES, POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, boardQuery, canReschedule, codeOf,
+    columnCollapsed, dayKey, dayLabel, daysSince, errorOf, groupCards, groupKey, initials, isPastDay, openDaysFrom, openICorePhoneCall,
+    shortTime, sourceTone, todayIso, toggleInList, visitTime, withExpanded, withExpandedDay,
 } from './hiringMeta';
 import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loading, Pill, SourcePill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
 
@@ -96,10 +96,13 @@ const saveStored = (key, value) => {
 };
 
 /* showSource — плашка источника на карточке; в группах «Откликов» её нет: источник уже в шапке группы. inGroup — карточка
-   под липкой шапкой группы; visit — время визита в офис, когда день визита уже в шапке. */
+   под липкой шапкой группы; visit — время визита в офис, когда день визита уже в шапке; reschedulable — значок переноса
+   даты (карточка откроется сразу с окном переноса). */
 const CardTile = ({
-    card, canTake, canCall, onOpen, onTake, onCall, draggable, onDragStart, onDragEnd, showSource = true, inGroup = false, visit = '',
+    card, canTake, canCall, reschedulable = false, onOpen, onTake, onCall, onReschedule, draggable, onDragStart, onDragEnd,
+    showSource = true, inGroup = false, visit = '',
 }) => {
+    const rescheduleLabel = card.stage === 'invited_office' ? 'Перенести визит' : 'Перенести обучение';
     const idle = card.last_touch_at || card.taken_at;
     const idleDays = idle && !POOL_STAGES.includes(card.stage) && !card.is_closed ? daysSince(idle) : null;
     const overdue = card.next_contact_at && !card.is_closed && daysSince(card.next_contact_at) > 0;
@@ -160,12 +163,25 @@ const CardTile = ({
                     </span>
                 )}
             </div>
-            {canCall && (
-                <button type="button" aria-label="Позвонить" title="Позвонить из iCore Phone"
-                        onClick={(event) => { event.stopPropagation(); onCall(card); }}
-                        className={`${ICON_BTN} absolute bottom-1.5 right-1.5 bg-white ring-1 ring-slate-200/70 ${HOVER_REVEAL}`}>
-                    <Phone size={14} />
-                </button>
+            {(canCall || reschedulable) && (
+                /* Действия по наведению (на сенсорном — всегда): перенос даты визита или обучения (владелец 24.11.2026)
+                   и звонок. */
+                <div className={`absolute bottom-1.5 right-1.5 flex gap-1 ${HOVER_REVEAL}`}>
+                    {reschedulable && (
+                        <button type="button" aria-label={rescheduleLabel} title={rescheduleLabel}
+                                onClick={(event) => { event.stopPropagation(); onReschedule(card); }}
+                                className={`${ICON_BTN} bg-white ring-1 ring-slate-200/70`}>
+                            <CalendarClock size={14} />
+                        </button>
+                    )}
+                    {canCall && (
+                        <button type="button" aria-label="Позвонить" title="Позвонить из iCore Phone"
+                                onClick={(event) => { event.stopPropagation(); onCall(card); }}
+                                className={`${ICON_BTN} bg-white ring-1 ring-slate-200/70`}>
+                            <Phone size={14} />
+                        </button>
+                    )}
+                </div>
             )}
         </article>
     );
@@ -214,7 +230,7 @@ const BoardGroup = ({ label, dot = '', muted = false, total, open, cards, expand
 
 const Column = ({
     column, caps, dropState, collapsed, onToggle, onOpen, onTake, onCall, canDrag, canCall, onDragStart, onDragEnd, onDrop,
-    openGroups = [], onToggleGroup, onExpandGroup, today, openDays = [], onToggleDay, onExpandDay,
+    canMoveDate = () => false, onReschedule, openGroups = [], onToggleGroup, onExpandGroup, today, openDays = [], onToggleDay, onExpandDay,
 }) => {
     const [over, setOver] = useState(false);
     const grouped = Array.isArray(column.groups);
@@ -243,8 +259,9 @@ const Column = ({
         );
     }
     const tile = (card, extra = {}) => (
-        <CardTile key={card.id} card={card} canTake={caps.take} canCall={canCall(card)} onOpen={onOpen} onTake={onTake} onCall={onCall}
-                  draggable={canDrag(card)} onDragStart={onDragStart} onDragEnd={onDragEnd} {...extra} />
+        <CardTile key={card.id} card={card} canTake={caps.take} canCall={canCall(card)} reschedulable={canMoveDate(card)} onOpen={onOpen}
+                  onTake={onTake} onCall={onCall} onReschedule={onReschedule} draggable={canDrag(card)} onDragStart={onDragStart}
+                  onDragEnd={onDragEnd} {...extra} />
     );
     // Дни колонки идут в порядке сервера: сегодня и дальше, ниже прошедшие — перед первым из них подпись «Прошедшие дни».
     const dayGroup = (group, index) => {
@@ -464,6 +481,9 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
 
     const isMineOrLead = (card) => caps.lead || Number(card.recruiter_id) === Number(boot.me?.id);
     const canCall = (card) => Boolean(card.phone) && !POOL_STAGES.includes(card.stage) && !card.is_closed && isMineOrLead(card);
+    // Перенос даты визита или обучения (владелец 24.11.2026) — значком на карточке: она откроется сразу с окном переноса.
+    const canMoveDate = (card) => canReschedule(card, isMineOrLead(card));
+    const reschedule = (card) => onOpenCard(card.id, { reschedule: true });
     const canDrag = (card) => {
         if (card.is_closed && !caps.lead) return false;
         if (POOL_STAGES.includes(card.stage)) return Boolean(caps.take);
@@ -578,6 +598,7 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
                             <Column key={column.stage} column={column} caps={caps} dropState={dropStateOf(column.stage)}
                                     collapsed={columnCollapsed(column.stage, collapsed, openedArchive)} onToggle={() => toggleCollapsed(column.stage)}
                                     onOpen={onOpenCard} onTake={take} onCall={call} canDrag={canDrag} canCall={canCall}
+                                    canMoveDate={canMoveDate} onReschedule={reschedule}
                                     onDragStart={onDragStart} onDragEnd={onDragEnd} onDrop={onDrop}
                                     {...(column.stage === 'responses' ? {
                                         openGroups, onToggleGroup: toggleGroup, onExpandGroup: expandGroup,

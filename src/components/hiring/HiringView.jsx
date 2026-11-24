@@ -137,6 +137,8 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
     const [openMove, setOpenMove] = useState(null);
     // «Позвонить» со стола или с доски: звонок уже ушёл в iCore Phone, карточка открывается с окном результата.
     const [openCall, setOpenCall] = useState(false);
+    // «Перенести» на доске (владелец 24.11.2026): карточка открывается сразу с окном переноса даты.
+    const [openReschedule, setOpenReschedule] = useState(false);
     // Растёт после любого изменения карточки — вкладки перечитывают свои списки.
     const [version, setVersion] = useState(0);
 
@@ -192,10 +194,12 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
     const openCard = useCallback((id, options) => {
         setOpenMove(options?.move || null);
         setOpenCall(Boolean(options?.call));
+        setOpenReschedule(Boolean(options?.reschedule));
         setOpenCardId(Number(id) || null);
     }, []);
     const moveConsumed = useCallback(() => setOpenMove(null), []);
     const callConsumed = useCallback(() => setOpenCall(false), []);
+    const rescheduleConsumed = useCallback(() => setOpenReschedule(false), []);
     // «WhatsApp» в карточке и на столе — переписка в окне «Чаты», а не WhatsApp Web (владелец 20.11.2026:
     // «при нажатии на ватсап … полноценный чат, мб просто переход на чаты»). Окно само спросит у сервера адрес чата.
     const [chatFocus, setChatFocus] = useState(null);
@@ -204,6 +208,7 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
         setOpenCardId(null);
         setOpenMove(null);
         setOpenCall(false);
+        setOpenReschedule(false);
         setChatFocus({ cardId: Number(id) });
         chooseTab('chats');
     };
@@ -267,13 +272,15 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
                 reloadBoot={reloadBoot}
                 caps={caps}
                 cardId={openCardId}
-                onClose={() => { setOpenCardId(null); setOpenMove(null); setOpenCall(false); }}
+                onClose={() => { setOpenCardId(null); setOpenMove(null); setOpenCall(false); setOpenReschedule(false); }}
                 onChanged={onChanged}
                 onOpenChat={onOpenChat}
                 initialMove={openMove}
                 onMoveConsumed={moveConsumed}
                 initialCall={openCall}
                 onCallConsumed={callConsumed}
+                initialReschedule={openReschedule}
+                onRescheduleConsumed={rescheduleConsumed}
             />
         </>,
     );

@@ -54,20 +54,48 @@ BOARD_COLUMNS = tuple(item for code, label in STAGES
                       for item in (((code, label), (HIRED_10, HIRED_10_LABEL)) if code == HIRED else ((code, label),)))
 # «Приглашен в офис» и «Приглашен на обучение» на доске поделены по дням (владелец 24.11.2026: «разбивку по датам
 # приглашения начиная от сегодня, чтобы можно было, как в откликах, раскрыть и посмотреть людей, которые приглашены к этому
-# дню»; «прошлые дни должны уходить вниз»). День в офисе — дата визита, на обучении — дата старта группы.
+# дню»; «прошлые дни должны уходить вниз»). День в офисе — дата визита, на обучении — своя дата кандидата, если обучение
+# переносили (training_date), иначе старт группы.
 DATED_STAGES = (INVITED_OFFICE, INVITED_TRAINING)
 
 
 def board_day(card):
-    """День карточки в колонке доски (DATED_STAGES): дата визита в офис или старта группы обучения; без даты и на других
-    этапах — None. То же правило, что выражение queries._BOARD_DAY, по которому база считает карточки дня."""
+    """День карточки в колонке доски (DATED_STAGES): дата визита в офис или дата обучения (перенесённая — своя, иначе
+    старт группы); без даты и на других этапах — None. То же правило, что выражение queries._BOARD_DAY, по которому база
+    считает карточки дня."""
     stage = card.get('stage')
     if stage == INVITED_OFFICE:
         moment = card.get('office_visit_at')
         return moment.date() if isinstance(moment, datetime) else moment
     if stage == INVITED_TRAINING:
-        return card.get('group_start_date')
+        return card.get('training_date') or card.get('group_start_date')
     return None
+
+
+# Перенос даты приглашения (владелец 24.11.2026: «в колонках Приглашен в офис и Приглашен в обучение возможность менять дату
+# приглашения с указанием причины в категориях — форс-мажор, поменялись планы, учёба, другое с комментом»; HR-6: «просто
+# изменить дату обучения в карточке кандидата… без необходимости создавать новое приглашение»). Визит — новые дата и время,
+# обучение — своя дата кандидата поверх старта группы (группа и место в ней остаются). Причина и прежняя дата — строкой в
+# ленте карточки: системное касание с исходом TOUCH_RESCHEDULED, данные — в его meta.
+RESCHEDULE_REASONS = (
+    ('force_majeure', 'Форс-мажор'),
+    ('plans', 'Поменялись планы'),
+    ('study', 'Учёба'),
+    ('other', 'Другое'),
+)
+RESCHEDULE_LABELS = dict(RESCHEDULE_REASONS)
+RESCHEDULE_NEEDS_COMMENT = ('other',)
+TOUCH_RESCHEDULED = 'rescheduled'
+
+
+def reschedule_text(stage, before, after, reason, comment=None):
+    """Строка ленты о переносе: «Визит перенесён: 25.11 10:00 → 27.11 14:00 · Поменялись планы», комментарий — ниже."""
+    office = stage == INVITED_OFFICE
+    fmt = '%d.%m %H:%M' if office else '%d.%m'
+    text = '%s: %s → %s · %s' % ('Визит перенесён' if office else 'Обучение перенесено',
+                                 before.strftime(fmt) if before else '—', after.strftime(fmt) if after else '—',
+                                 RESCHEDULE_LABELS.get(reason, reason))
+    return text + ('\n' + comment if comment else '')
 
 
 def day_order(days, today):
