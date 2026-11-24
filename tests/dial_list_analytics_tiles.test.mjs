@@ -13,10 +13,9 @@ import { availableLines, selfSignedLines } from '../src/components/dial_list/ana
 const NF = new Intl.NumberFormat('ru-RU');
 const fmt = (v) => NF.format(v).replace(/ /g, ' ');
 
-test('«Обзвонили»: ещё доступно — не звонили и ждут повтора', () => {
-    assert.deepEqual(availableLines({ open_new: 790, open_retry: 10662 }, fmt),
-        ['ещё доступно — 11 452', 'не звонили 790 · ждут повтора 10 662']);
-    assert.deepEqual(availableLines({ open_new: 0, open_retry: 0 }, fmt), ['ещё доступно — 0', 'не звонили 0 · ждут повтора 0']);
+test('«Обзвонили»: ещё доступно — кому ещё не звонили, и отдельно ждут повтора (не сумма)', () => {
+    assert.deepEqual(availableLines({ open_new: 663, open_retry: 10770 }, fmt), ['ещё доступно — 663', 'ждут повтора — 10 770']);
+    assert.deepEqual(availableLines({ open_new: 0, open_retry: 0 }, fmt), ['ещё доступно — 0', 'ждут повтора — 0']);
     // Прошлый месяц — его обзвон не выдаёт: строк нет. Старый сервер без чисел — тоже.
     assert.deepEqual(availableLines({ open_new: 5, open_retry: 7 }, fmt, false), []);
     assert.deepEqual(availableLines({ called: 10 }, fmt), []);
