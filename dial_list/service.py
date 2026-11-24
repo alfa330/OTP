@@ -8484,7 +8484,8 @@ class DialListService:
             return data
         with self.db._get_cursor() as cur:
             data = dial_analytics.department_analytics(cur, department_id, period,
-                                                       configured=self.sign_checker.configured())
+                                                       configured=self.sign_checker.configured(),
+                                                       max_attempts=settings["max_attempts"])
         doc_month = datetime.strptime(data["sign_check"]["doc_month"], "%Y-%m-%d").date()
         data["sign_check"]["doc_month_label"] = period_label(doc_month)
         data["sign_check"].update(self._sign_cycle(data["sign_check"]))

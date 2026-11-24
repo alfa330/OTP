@@ -7,6 +7,7 @@ import { Bar, Metric, PagedTable, Td, Th } from '../wiki/reportKit';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 import { SIGN_BREAKDOWN, signMeta } from './signStatus';
 import { clockOffset, reloadDelay, signCycleLine } from './signCycle';
+import { availableLines, selfSignedLines } from './analyticsTiles';
 import DialListSignReport from './DialListSignReport';
 
 /*
@@ -90,6 +91,23 @@ const RULES_HINT = 'Сервер по кругу спрашивает Sapar по
     + 'подписи Яндекса не ждём. Подписавший уходит из обзвона, а успешка сразу '
     + 'засчитывается оператору, который последним поговорил с ним не меньше 10 секунд до подписи. '
     + 'Подписал без такого разговора — «подписал сам», успешки нет.';
+
+// «Успешки»: строка «сами — …: до загрузки базы … · после …» (владелец, 24.11.2026).
+const SUCCESS_HINT = RULES_HINT + ' «Сами» — подписали без такого разговора: до загрузки базы — подписали раньше, чем '
+    + 'попали в базу месяца; после — уже из базы, но без нашего разговора от 10 секунд (не дозвонились или до них не '
+    + 'дошла очередь).';
+
+const CALLED_HINT = 'Водители, которым был хотя бы один звонок (кроме отменённых оператором до ответа). Ещё доступно — '
+    + 'кому обзвон в этом месяце ещё позвонит: не подписали, не исключены, не обработаны и попытки не кончились. Не '
+    + 'звонили — им ещё не было ни одного звонка; ждут повтора — звонили, но трубку не взяли или итог разговора вернул '
+    + 'их в список.';
+
+/** Подпись плитки из нескольких строк: каждая — своей строкой. */
+const HintLines = ({ lines }) => (
+    <>
+        {lines.filter(Boolean).map((line) => <span key={line} className="block">{line}</span>)}
+    </>
+);
 
 const Notice = ({ tone = 'amber', children }) => (
     <div className={`flex items-start gap-2 rounded-xl px-3.5 py-2.5 text-[12.5px] ring-1 ${
@@ -447,8 +465,9 @@ const DialListAnalytics = ({
                         <Metric
                             label="Обзвонили"
                             value={num(t.called)}
-                            hint={`${pctText(rates.called)} базы`}
-                            help="Водители, которым был хотя бы один звонок (кроме отменённых оператором до ответа)."
+                            hint={<HintLines lines={[`${pctText(rates.called)} базы`,
+                                ...availableLines(t, num, data.is_active_period !== false)]} />}
+                            help={CALLED_HINT}
                         />
                         <Metric
                             label="Поговорили"
@@ -460,8 +479,10 @@ const DialListAnalytics = ({
                             label="Успешки"
                             value={num(t.successes)}
                             tone={t.successes ? 'good' : null}
-                            hint={t.signed ? `подписали всего — ${num(t.signed)}` : 'подписавших пока нет'}
-                            help={RULES_HINT}
+                            hint={t.signed
+                                ? <HintLines lines={[`подписали всего — ${num(t.signed)}`, ...selfSignedLines(t, num)]} />
+                                : 'подписавших пока нет'}
+                            help={SUCCESS_HINT}
                         />
                         <Metric
                             label="Конверсия"

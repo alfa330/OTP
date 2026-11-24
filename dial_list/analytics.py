@@ -32,7 +32,8 @@ ANSWERED_SQL = ("ANSWER", "ANSWERED", "SUCCESS", "VM-SUCCESS")
 _LEADS_CTE = """
     leads AS (
         SELECT l.id, l.iin, l.status, l.sign_status, l.signed_at, l.success_attempt_id,
-               l.success_operator_id, l.success_resolved_at, l.created_at, l.sign_checked_at, l.sign_error
+               l.success_operator_id, l.success_resolved_at, l.created_at, l.sign_checked_at, l.sign_error,
+               l.attempts_total
         FROM dial_list_leads l
         WHERE l.department_id = %(department_id)s AND l.period = %(period)s
           -- Номер из реестра тестовых (test_numbers) — проверка обзвона, а не водитель.
@@ -88,6 +89,16 @@ _TOTALS_SQL = "WITH " + _LEADS_CTE + """,
         COUNT(*) FILTER (WHERE l.signed_at IS NULL AND l.iin <> '' AND l.sign_status = ''),
         COUNT(*) FILTER (WHERE l.status = 'excluded' AND l.signed_at IS NULL),
         COALESCE(SUM(p.attempts), 0),
+        -- Ещё доступно для обзвона (владелец, 24.11.2026: «тех, по которым ещё не производился звонок и ещё не
+        -- подписали, т.е. тех, кого ещё можно обзвонить, потом ждут повтора»): обзвон этому водителю ещё позвонит —
+        -- не подписал (и пакет не на проверке у Яндекса), в работе (не обработан и не исключён), попытки не кончились.
+        -- Не звонили — ни одного звонка; ждут повтора — звонили: не взял трубку или итог вернул его в список.
+        COUNT(*) FILTER (WHERE l.signed_at IS NULL AND l.sign_status <> 'processing'
+                           AND l.status IN ('new', 'in_progress') AND l.attempts_total < %(max_attempts)s
+                           AND COALESCE(p.attempts, 0) = 0),
+        COUNT(*) FILTER (WHERE l.signed_at IS NULL AND l.sign_status <> 'processing'
+                           AND l.status IN ('new', 'in_progress') AND l.attempts_total < %(max_attempts)s
+                           AND COALESCE(p.attempts, 0) > 0),
         MAX(l.sign_checked_at),
         COUNT(*) FILTER (WHERE l.iin <> '' AND l.signed_at IS NULL AND l.sign_error <> ''),
         COUNT(*) FILTER (WHERE l.iin <> '' AND l.signed_at IS NULL AND l.sign_checked_at IS NULL)
@@ -96,7 +107,9 @@ _TOTALS_SQL = "WITH " + _LEADS_CTE + """,
 """
 _TOTAL_KEYS = ("leads", "with_iin", "called", "answered", "talked", "signed", "successes", "self_signed",
                "signed_before_upload", "pending_attribution", "processing", "unsigned", "expired", "no_docs",
-               "not_checked", "excluded", "attempts")
+               "not_checked", "excluded", "attempts", "open_new", "open_retry")
+# Предел попыток, если отдел его не прислал (как dial_list.service.DEFAULT_MAX_ATTEMPTS — импорта сервиса здесь нет).
+DEFAULT_MAX_ATTEMPTS = 3
 
 _BY_DAY_SQL = "WITH " + _LEADS_CTE + """
     SELECT day, SUM(attempts), SUM(talked), SUM(talk_sec), SUM(signed), SUM(successes)
@@ -146,12 +159,14 @@ def _month_end(period):
     return signing.shift_month(period, 1) - timedelta(days=1)
 
 
-def department_analytics(cur, department_id, period, today=None, configured=None):
+def department_analytics(cur, department_id, period, today=None, configured=None, max_attempts=None):
     """Дашборд базы месяца `period` (date первого дня). `today` — дата по Алматы,
-    `configured` — есть ли доступ к Sapar (по умолчанию — по окружению)."""
+    `configured` — есть ли доступ к Sapar (по умолчанию — по окружению), `max_attempts` — предел попыток
+    отдела: по нему «ещё доступно для обзвона» (open_new, open_retry)."""
     today = today or datetime.now(signing.PERIOD_TZ).date()
     params = {"department_id": int(department_id), "period": period, "answered": ANSWERED_SQL,
-              "min_sec": signing.SUCCESS_MIN_BILLSEC}
+              "min_sec": signing.SUCCESS_MIN_BILLSEC,
+              "max_attempts": int(max_attempts or DEFAULT_MAX_ATTEMPTS)}
 
     cur.execute(_TOTALS_SQL, params)
     r = cur.fetchone() or (0,) * len(_TOTAL_KEYS) + (None, 0, 0)
