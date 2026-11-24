@@ -64,7 +64,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.35"
+VERSION = "1.0.36"
 
 IS_WINDOWS = sys.platform.startswith("win")
 

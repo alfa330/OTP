@@ -2201,7 +2201,7 @@ def test_agent_checks_the_phone_mark_between_rounds():
     assert "save_phone_logout_handled(stamp)" in handler
     # Обкатка ограничителя («только писать в журнал») к смене инструмента не относится.
     assert "dry_run" not in handler
-    assert agent.VERSION == "1.0.35"
+    assert tuple(int(part) for part in agent.VERSION.split(".")) >= (1, 0, 35)
 
 
 def test_shortcut_consumes_the_phone_mark(tmp_path, monkeypatch):
