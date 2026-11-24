@@ -44,6 +44,19 @@ test('у каждого среднего свой знаменатель', () =>
   assert.equal(empty.innerReplySeconds, null);
 });
 
+test('Syntony: первый ответ и SL — по чатам, начатым в этот день', () => {
+  // 10 чатов дня, 9 обслужены, но начаты сегодня только 6; первый ответ был у 5, в цель — 3.
+  const averages = chatBillingAverages({
+    chats: 10, answered: 9, answered_sl: 3, first_reply_seconds: 600, first_replied: 5,
+    sl_base: 6, inner_reply_seconds: 900, inner_replied: 9,
+  });
+  assert.equal(averages.firstReplySeconds, 120);
+  assert.equal(averages.sl, 0.5);
+  assert.equal(averages.innerReplySeconds, 100);
+  // Ноль новых чатов — SL не из чего, а не 0 %.
+  assert.equal(chatBillingAverages({ chats: 4, answered: 4, answered_sl: 0, sl_base: 0 }).sl, null);
+});
+
 test('час группировки — промежуток', () => {
   assert.equal(chatBillingHourLabel(9), '09:00–10:00');
   assert.equal(chatBillingHourLabel(23), '23:00–00:00');

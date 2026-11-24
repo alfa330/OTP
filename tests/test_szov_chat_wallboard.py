@@ -1089,7 +1089,8 @@ class ChatWallboardWiringTests(unittest.TestCase):
         # Ищем именно плитку, а не слова: почему её убрали, в файле остаётся комментарием.
         self.assertNotIn('label="Часов в цели"', self.board)
         self.assertNotIn('hoursInTarget', self.board)
-        self.assertIn('<Grid cols={statuses ? 3 : 4}>', self.board)
+        # У Syntony плиток дня четыре: к трём добавлены «Поступивших» (решение 20.11.2026).
+        self.assertIn('<Grid cols={syntony ? 4 : 3}>', self.board)
         tiles = (ROOT / "src" / "components" / "monitoring" / "SzovWallboardTiles.jsx").read_text(
             encoding="utf-8-sig")
         # Классы перечислены целиком: собранное в рантайме имя Tailwind в бандл не положит.

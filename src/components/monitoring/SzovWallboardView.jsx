@@ -1219,8 +1219,8 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, canManage
     // Источник называет сам снимок: Syntony или (откатом) Chat2Desk.
     const sourceLabel = snapshot?.source_label || 'Chat2Desk';
     const sourceClock = snapshot?.source_now || snapshot?.chat2desk_now;
-    // У Syntony нет статусов операторов — нет и перерывов, которые сверялись бы с графиком.
-    const statuses = snapshot?.statuses !== false;
+    // Перерывы с графиком сверяются только по статусам Chat2Desk: по Syntony журнала нарушений нет.
+    const syntony = snapshot?.source === 'syntony' || snapshot?.statuses === false;
     const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error, sourceLabel), [error, snapshot, sourceLabel]);
 
     const header = (
@@ -1239,7 +1239,7 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, canManage
             {/* Отбивка настраивается и без снимка: получатели и расписание живут на сервере,
                 а цифры для сообщения он берёт сам. Цель времени ответа передаём из снимка,
                 когда он есть, — иначе подсказка о норме назвала бы значение по умолчанию. */}
-            {statuses ? (
+            {!syntony ? (
                 <BreakViolationsControls
                     direction="chat"
                     apiBaseUrl={apiBaseUrl}
@@ -1263,7 +1263,7 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, canManage
                     withAccessTokenHeader={withAccessTokenHeader}
                     showToast={showToast}
                     snapshot={snapshot}
-                    hints={statuses ? CHAT_EXPORT_HINTS : CHAT_EXPORT_HINTS_SYNTONY}
+                    hints={syntony ? CHAT_EXPORT_HINTS_SYNTONY : CHAT_EXPORT_HINTS}
                 />
             ) : null}
         </WallboardHeader>

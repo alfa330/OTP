@@ -34,7 +34,8 @@ class ImportAliasTests(unittest.TestCase):
         for node in TREE.body:
             if isinstance(node, ast.ImportFrom) and node.module == 'syntony_chats':
                 aliases.update(alias.asname or alias.name for alias in node.names)
-        self.assertEqual(aliases, {'syntony_chats_szov'})
+        # Биллинг чата по Syntony (24.11.2026) — свой модуль рядом с табло.
+        self.assertEqual(aliases, {'syntony_chats_szov', 'syntony_chats_billing'})
         defined = set()
         for node in TREE.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -83,3 +84,15 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BillingWiringTests(unittest.TestCase):
+    def test_billing_days_are_built_by_the_scheduler(self):
+        # Сутки биллинга сворачиваются в «чаты дня» планировщиком раз в 10 минут, и даже при
+        # откате табло на Chat2Desk: биллинг с 18.11 читает только их.
+        job = _function('syntony_chat_billing_refresh_job')
+        self.assertIn('syntony_chats_szov.data_enabled()', job)
+        self.assertIn('syntony_chats_billing.refresh(', job)
+        self.assertIn('first_day=chat_billing_syntony_from()', job)
+        self.assertIn("id='syntony_chat_billing_refresh'", SOURCE)
+

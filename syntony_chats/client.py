@@ -137,6 +137,18 @@ def conversations_page(config, updated_since=None, offset=0, limit=500, **kwargs
     return get(config, '/conversations', params, **kwargs)
 
 
+def operator_statuses_page(config, start, end=None, cursor=None, limit=1000, **kwargs):
+    """Интервалы статусов операторов сети за [start, end] (метод /operator-statuses, 24.11.2026):
+    «оператор был в таком-то статусе с … по …», endedAt null — текущий статус. end не дальше
+    31 дня от start; без end — «сейчас». Страницы по курсору nextCursor."""
+    params = {'from': iso(start), 'limit': int(limit)}
+    if end is not None:
+        params['to'] = iso(end)
+    if cursor:
+        params['cursor'] = cursor
+    return get(config, '/operator-statuses', params, **kwargs)
+
+
 def conversation_messages_page(config, conversation_id, cursor=None, limit=1000, **kwargs):
     """Все сообщения одного диалога (§3.2), страницы по курсору."""
     params = {'limit': int(limit)}

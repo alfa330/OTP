@@ -310,8 +310,12 @@ class PackageSqlTests(unittest.TestCase):
     def test_resource_fte_chat(self):
         from resource_fte import chat
         day = date(2026, 10, 7)
-        where, _params = chat._chat_billing_window(day, day, 0, 1439)
-        self.assertIn(MARK, where)
+        # Биллинг: обе половины выборки — Chat2Desk до перехода и чаты дня Syntony после.
+        source, _params = chat._chat_billing_source(day, day, 0, 1439)
+        self.assertIn(MARK, source)
+        source, _params = chat._chat_billing_source(date(2026, 11, 20), date(2026, 11, 20), 0, 1439)
+        self.assertIn(MARK, source)
+        self.assertIn('syntony_chat_billing_chats', source)
         for call in (lambda c: chat._latest_chat_day_tx(c),
                      lambda c: chat._hourly_volume_tx(c, day, day),
                      lambda c: chat._reply_stats_tx(c, day, day, 60),

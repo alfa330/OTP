@@ -4,7 +4,13 @@
 те же 17 номеров с 16–19.11 подключены в Syntony, и чатники отвечают уже там. Формы
 данных — те же, что были у Chat2Desk (снимок табло now / today / hourly, данные отчёта),
 поэтому экраны, отбивка и выгрузка читают их одинаково; чего у Syntony нет, то пустое:
-статусов операторов (занят, перерыв, тренинг) и счётчика открытых чатов в её API нет.
+счётчика открытых чатов в её API нет.
+
+Статусы операторов — метод /operator-statuses (24.11.2026, statuses.py): пока их забирает
+сторож (отметка свежая), онлайн — статус «Онлайн», справа у человека точный статус Syntony и
+время в нём, люди на линии по часам — по статусу «Онлайн» (решение владельца 24.11.2026:
+линию держит только он). Статусов нет (метод не отвечает, отметка устарела) — как до них:
+онлайн = ответил водителю за 15 минут, `statuses: false`.
 
 Откатиться на Chat2Desk — SZOV_CHAT_SOURCE=chat2desk в окружении. Без ключа истории и без
 секрета вебхука Syntony источник тоже остаётся прежним: брать данные было бы неоткуда.
@@ -18,7 +24,7 @@ import re
 from datetime import datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import client, metrics, queries, rules, sync
+from . import client, metrics, queries, rules, statuses, sync
 
 SOURCE = 'syntony'
 SOURCE_LABEL = 'Syntony'
@@ -65,6 +71,18 @@ COVERAGE_GRACE = timedelta(minutes=30)
 # принадлежит вчерашним суткам; без его начала в базе ход «начался» бы с ночного сообщения
 # и попал бы в сегодня с заниженным ожиданием. Окно онлайна (15 минут) в этот запас входит.
 LOOKBACK = timedelta(hours=6)
+# Статусы живые, если сторож дочитал их до «сейчас» не дольше 10 минут назад (прогон — раз в
+# 3 минуты). Старше — человек мог уйти, а табло держало бы его онлайн.
+STATUSES_STALE_SECONDS = 10 * 60
+# «Не в системе с» по статусам — конец последнего интервала за неделю.
+LAST_SEEN_LOOKBACK = timedelta(days=7)
+# Подпись статуса → ключ цвета на табло (CHAT_STATUS_STYLE во фронте). Незнакомый статус
+# Syntony — как «занят»: человек в системе, но не на линии.
+STATUS_STYLE = {'available': 'online', 'busy': 'busy', 'training': 'training', 'break': 'break',
+                'technical': 'tech', 'offline_work': 'busy'}
+# Порядок людей на смене — как плитки: онлайн, перерыв, потом прочие статусы.
+DISPLAY_RANK = {'available': 0, 'break': 1, 'busy': 2, 'training': 3, 'technical': 4,
+                'offline_work': 5}
 
 
 def channel_ids(environ=None):
@@ -82,6 +100,12 @@ def channel_ids(environ=None):
 def _puller_on(environ=None):
     """Сторож API истории работает: ключ есть и выключатель не опущен (sync.start_worker)."""
     return client.is_configured(environ) and sync.is_enabled(environ)
+
+
+def data_enabled(environ=None):
+    """Переписка Syntony в базу идёт (сторож API или вебхук) — из неё можно собирать биллинг,
+    даже если табло откатили на Chat2Desk (SZOV_CHAT_SOURCE=chat2desk)."""
+    return _puller_on(environ) or bool(rules.load_secrets(environ))
 
 
 def source_enabled(environ=None):
@@ -214,6 +238,88 @@ def _covered_error(state, start):
     return None if gap is None else 'Нет данных Syntony за эти сутки: ' + gap
 
 
+def _statuses_live(state, now):
+    """Статусы дочитаны до «сейчас» (отметка сторожа свежая) — им можно верить сейчас."""
+    since = state.get('since')
+    if since is None:
+        return False
+    mark, written_at = since
+    return ((now - mark).total_seconds() <= STATUSES_STALE_SECONDS
+            and (now - written_at).total_seconds() <= STATUSES_STALE_SECONDS)
+
+
+def statuses_cover(state, start, end):
+    """Статусы есть за весь промежуток [start, end): первый забор не позже начала (с запасом)
+    и сторож дочитал до конца."""
+    since, origin = state.get('since'), state.get('from')
+    return (since is not None and origin is not None and origin <= start + COVERAGE_GRACE
+            and since[0] >= end)
+
+
+def _load_statuses(db, start, end, *, last_seen=False):
+    with db._get_cursor() as cursor:
+        state = statuses.state(cursor)
+        intervals = statuses.load_window(cursor, start, end) if state.get('since') else []
+        seen = (statuses.load_last_seen(cursor, start - LAST_SEEN_LOOKBACK)
+                if last_seen and state.get('since') else [])
+    return state, intervals, seen
+
+
+def _online_by_name(per_hour, ctx):
+    """{час: {id сотрудника: секунды}} → {час: {ФИО: секунды}} — форма графика по часам."""
+    names = {}
+    for operator in ctx.roster:
+        try:
+            names[int(operator['id'])] = operator.get('name') or ''
+        except (KeyError, TypeError, ValueError):
+            continue
+    return {hour: {names.get(operator_id, str(operator_id)): seconds
+                   for operator_id, seconds in people.items()}
+            for hour, people in per_hour.items()}
+
+
+def _status_people(ctx, now_status, seen, now):
+    """(на смене, не в системе, счётчики) по текущим статусам Syntony.
+
+    На смене — все чатники СЗоВ в любом статусе; сверху онлайн, ниже по рангу статуса, внутри —
+    кто сегодня взял больше чатов (порядок задаёт вызывающий). Не в системе — остальные
+    (уволенных нет), «с» — конец последнего интервала.
+    """
+    counts = {'online': 0, 'busy': 0, 'training': 0, 'break': 0, 'other': 0}
+    on_shift, offline = [], []
+    seen_ids = set()
+    for operator in ctx.roster:
+        operator_id = int(operator['id'])
+        if operator_id in seen_ids:
+            continue
+        seen_ids.add(operator_id)
+        status = now_status.get(operator_id)
+        if status is None:
+            if str(operator.get('status') or '') in ('fired', 'dismissal'):
+                continue
+            offline.append({'operator_id': operator_id, 'name': operator.get('name') or '',
+                            'since': seen.get(operator_id)})
+            continue
+        key = status['key']
+        bucket = {'available': 'online', 'busy': 'busy', 'training': 'training',
+                  'break': 'break'}.get(key, 'other')
+        counts[bucket] += 1
+        on_shift.append({
+            'operator_id': operator_id,
+            'name': operator.get('name') or '',
+            'status': status['label'],
+            'status_key': STATUS_STYLE.get(key, 'busy'),
+            'syntony_status': key,
+            'rank': DISPLAY_RANK.get(key, len(DISPLAY_RANK)),
+            'since': status['since'],
+            'seconds': int(max(0.0, (now - status['since']).total_seconds())),
+        })
+    offline.sort(key=lambda item: item['name'])
+    offline.sort(key=lambda item: item['since'].timestamp() if item['since'] else float('-inf'),
+                 reverse=True)
+    return on_shift, offline, counts
+
+
 def wallboard_snapshot(db, ctx, *, now=None, target_seconds=120):
     """Снимок табло «Чат» за сегодня: та же форма, что у Chat2Desk (_szov_chat_wallboard_fetch_snapshot)."""
     now = (now or datetime.now(timezone.utc)).astimezone(LOCAL_TZ)
@@ -228,49 +334,75 @@ def wallboard_snapshot(db, ctx, *, now=None, target_seconds=120):
         # как спад, поэтому табло говорит об этом словами.
         raise RuntimeError('Syntony: сутки неполные — ' + gap)
 
-    online, offline, _unused = metrics.presence_now(
-        activity, ctx.roster, ctx.resolve, now, ctx.window_seconds)
     end = now + timedelta(seconds=1)
     sums = metrics.window_sums(facts, day_start, end)
     total, new = metrics.chat_counts(facts, day_start, end)
     per_person = metrics.operator_sums(facts, day_start, end, ctx.display_name)
 
-    people = []
-    for item in online:
-        own = per_person.get(item['name']) or {}
-        people.append({
+    status_state, intervals, seen_intervals = _load_statuses(db, day_start, end, last_seen=True)
+    live = _statuses_live(status_state, now)
+    hourly_online = None
+    counts = None
+    if live:
+        match = statuses.matcher(ctx.roster, ctx.resolve)
+        people, offline, counts = _status_people(
+            ctx, statuses.current(intervals, match, now),
+            statuses.last_seen(list(intervals) + list(seen_intervals), match), now)
+        for item in people:
+            item['since'] = _stamp(item['since'])
+        offline_people = [{'operator_id': item['operator_id'], 'name': item['name'],
+                           'since': _stamp(item['since'])} for item in offline]
+        # Часы на линии — по статусу «Онлайн», если статусы есть с полуночи; иначе часы до
+        # первого забора статусов остались бы пустыми — тогда весь день по ответам.
+        if statuses_cover(status_state, day_start, now - timedelta(minutes=5)):
+            elapsed_hours = min(24, int((now - day_start).total_seconds() // 3600) + 1)
+            hourly_online = _online_by_name(statuses.line_seconds_by_hour(
+                intervals, match, day_start, elapsed_hours, until=now), ctx)
+    else:
+        online, offline, _unused = metrics.presence_now(
+            activity, ctx.roster, ctx.resolve, now, ctx.window_seconds)
+        people = [{
             'operator_id': item['operator_id'],
             'name': item['name'],
             'status': 'Онлайн',
             'status_key': 'online',
+            'rank': 0,
             'since': _stamp(item['since']),
             'seconds': item['seconds'],
             'last_reply_at': _stamp(item['last_reply_at']),
+        } for item in online]
+        offline_people = [{'operator_id': item['operator_id'], 'name': item['name'],
+                           'since': _stamp(item['since'])} for item in offline]
+    for item in people:
+        own = per_person.get(item['name']) or {}
+        item.update({
             'open_chats': None,
             'chats': int(own.get('chats') or 0),
             'first_reply_seconds': metrics.average(own, 'first'),
             'inner_reply_seconds': metrics.average(own, 'inner'),
         })
-    # Сверху — кто сегодня взял больше чатов: со стены видно, кто держит основной поток.
-    people.sort(key=lambda item: (-item['chats'], item['name']))
-    offline_people = [{'operator_id': item['operator_id'], 'name': item['name'],
-                       'since': _stamp(item['since'])} for item in offline]
+    # Сверху — онлайн, ниже по статусам; внутри — кто сегодня взял больше чатов: со стены
+    # видно, кто держит основной поток.
+    people.sort(key=lambda item: (item['rank'], -item['chats'], item['name']))
+    for item in people:
+        del item['rank']
 
     return {
         'day': now.strftime('%Y-%m-%d'),
         'source': SOURCE,
         'source_label': SOURCE_LABEL,
-        # Статусов операторов у Syntony нет: экран и отбивка прячут «Занят / Тренинг / Перерыв».
-        'statuses': False,
+        # Статусы Syntony забираются — плитки «Онлайн / Перерыв / Не в системе» и точный статус
+        # у человека; нет — онлайн по ответам за 15 минут, плиток статусов нет.
+        'statuses': bool(live),
         'source_now': now.strftime('%Y-%m-%d %H:%M:%S'),
         'target_seconds': target_seconds,
         'now': {
-            'operators_online': len(people),
-            'operators_busy': None,
-            'operators_on_training': None,
-            'operators_on_break': None,
+            'operators_online': counts['online'] if live else len(people),
+            'operators_busy': counts['busy'] if live else None,
+            'operators_on_training': counts['training'] if live else None,
+            'operators_on_break': counts['break'] if live else None,
             'operators_on_holiday': None,
-            'operators_other': None,
+            'operators_other': counts['other'] if live else None,
             'operators_offline': len(offline_people),
             'open_chats': None,
             'operators': people,
@@ -288,8 +420,11 @@ def wallboard_snapshot(db, ctx, *, now=None, target_seconds=120):
         },
         'hourly': metrics.hourly_rows(
             facts, activity, ctx.resolve, ctx.display_name, day_start, now=now,
-            online_min_seconds=ctx.online_min_seconds, window_seconds=ctx.window_seconds),
+            online_min_seconds=ctx.online_min_seconds, window_seconds=ctx.window_seconds,
+            online=hourly_online),
         'diagnostics': {
+            'line_source': 'statuses' if hourly_online is not None else 'replies',
+            'statuses_mark_at': _stamp((status_state.get('since') or (None, None))[1]),
             'unmatched_names': _unmatched(facts, ctx, day_start, end),
             'events_truncated': False,
             'coverage_error': None,
@@ -317,7 +452,8 @@ def day_block(db, ctx, day, *, now=None):
     total, new = metrics.chat_counts(facts, start, end)
     hourly = metrics.hourly_rows(facts, activity, ctx.resolve, ctx.display_name, start,
                                  full_day=True, online_min_seconds=ctx.online_min_seconds,
-                                 window_seconds=ctx.window_seconds)
+                                 window_seconds=ctx.window_seconds,
+                                 online=day_line_online(db, ctx, start, end))
     totals = {
         'chats': total,
         'chats_new': new,
@@ -332,7 +468,17 @@ def day_block(db, ctx, day, *, now=None):
     return hourly, totals, None
 
 
-_PRESENCE_RANK = {'online': 0, 'offline': 1, 'unknown': 2}
+def day_line_online(db, ctx, start, end):
+    """Прошедшие сутки: {час: {ФИО: секунды «Онлайн»}} по статусам, если они есть за все
+    сутки; иначе None — люди на линии по ответам, как до статусов."""
+    state, intervals, _seen = _load_statuses(db, start, end)
+    if not statuses_cover(state, start, end):
+        return None
+    match = statuses.matcher(ctx.roster, ctx.resolve)
+    return _online_by_name(statuses.line_seconds_by_hour(intervals, match, start, 24, until=end), ctx)
+
+
+_PRESENCE_RANK = {'online': 0, 'status': 1, 'offline': 2, 'unknown': 3}
 
 
 def hourly_report(db, ctx, *, now=None):
@@ -351,8 +497,22 @@ def hourly_report(db, ctx, *, now=None):
     facts, activity, state, messages = _load(db, ctx, day_start - LOOKBACK, now + timedelta(seconds=1))
     _check_fresh(state, messages, now)
 
-    online, offline, _unused = metrics.presence_now(
-        activity, ctx.roster, ctx.resolve, now, ctx.window_seconds)
+    status_state, intervals, _seen = _load_statuses(db, now - timedelta(seconds=1),
+                                                    now + timedelta(seconds=1))
+    other_status = {}
+    if _statuses_live(status_state, now):
+        # Статусы Syntony: онлайн — статус «Онлайн», остальные статусы — подписью Syntony,
+        # не в системе — без открытого интервала.
+        match = statuses.matcher(ctx.roster, ctx.resolve)
+        people, offline_people, _counts = _status_people(
+            ctx, statuses.current(intervals, match, now), {}, now)
+        online = [item for item in people if item['syntony_status'] == statuses.LINE_STATUS]
+        other_status = {item['name']: item['status'] for item in people
+                        if item['syntony_status'] != statuses.LINE_STATUS}
+        offline = offline_people
+    else:
+        online, offline, _unused = metrics.presence_now(
+            activity, ctx.roster, ctx.resolve, now, ctx.window_seconds)
     online_names = {item['name'] for item in online}
     roster_names = {str(item.get('name') or '') for item in ctx.roster}
 
@@ -364,11 +524,13 @@ def hourly_report(db, ctx, *, now=None):
     by_hour = metrics.operator_sums(facts, hour_start, hour_end, ctx.display_name)
 
     operators = []
-    for name in set(by_day) | online_names:
+    for name in set(by_day) | online_names | set(other_status):
         own_day = by_day.get(name) or {}
         own_hour = by_hour.get(name) or {}
         if name in online_names:
             status, presence = 'онлайн', 'online'
+        elif name in other_status:
+            status, presence = other_status[name].lower(), 'status'
         elif name in roster_names:
             status, presence = 'офлайн', 'offline'
         else:
@@ -408,7 +570,9 @@ def hourly_report(db, ctx, *, now=None):
         'operators': operators,
         'online': [{'name': item['name'], 'open_chats': None} for item in online],
         'offline_count': len(offline),
-        'on_status': [],
+        # В других статусах Syntony (перерыв, занят, тренинг…) — строкой «статус N».
+        'on_status': [{'name': name, 'status': label}
+                      for name, label in sorted(other_status.items())],
         'online_error': None,
         'coverage_error': _covered_error(state, day_start),
     }

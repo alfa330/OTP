@@ -493,7 +493,8 @@ export const CHAT_WALLBOARD_METRICS = [
     {
         key: 'chat_busy',
         group: 'now',
-        // Статус Chat2Desk: у Syntony статусов и открытых чатов нет (SZOV-12) — показатель прячется.
+        // Статус оператора: Chat2Desk или Syntony (метод статусов, 24.11.2026); пока статусов нет
+        // (`statuses: false`), показатель прячется.
         statusOnly: true,
         label: 'Занят',
         hint: 'В системе, но не на линии',
@@ -503,7 +504,8 @@ export const CHAT_WALLBOARD_METRICS = [
     {
         key: 'chat_training',
         group: 'now',
-        // Статус Chat2Desk: у Syntony статусов и открытых чатов нет (SZOV-12) — показатель прячется.
+        // Статус оператора: Chat2Desk или Syntony (метод статусов, 24.11.2026); пока статусов нет
+        // (`statuses: false`), показатель прячется.
         statusOnly: true,
         label: 'Тренинг',
         tone: 'good',
@@ -512,7 +514,8 @@ export const CHAT_WALLBOARD_METRICS = [
     {
         key: 'chat_break',
         group: 'now',
-        // Статус Chat2Desk: у Syntony статусов и открытых чатов нет (SZOV-12) — показатель прячется.
+        // Статус оператора: Chat2Desk или Syntony (метод статусов, 24.11.2026); пока статусов нет
+        // (`statuses: false`), показатель прячется.
         statusOnly: true,
         label: 'Перерыв',
         tone: 'warn',
@@ -521,8 +524,8 @@ export const CHAT_WALLBOARD_METRICS = [
     {
         key: 'chat_open',
         group: 'now',
-        // Статус Chat2Desk: у Syntony статусов и открытых чатов нет (SZOV-12) — показатель прячется.
-        statusOnly: true,
+        // Счётчик Chat2Desk: открытых чатов у Syntony нет вовсе (SZOV-12) — показатель прячется.
+        chat2deskOnly: true,
         label: 'Открыто чатов',
         hint: 'В работе у чатников',
         read: (now) => ({ value: formatInt(now.open_chats) }),
@@ -601,14 +604,16 @@ export const DEFAULT_CHAT_WIDGET_METRICS = [
 ];
 
 /*
- * Есть ли показатель у источника этого снимка. Syntony (SZOV-12) приходит со `statuses: false`:
- * статусов операторов и открытых чатов у неё нет. «Поступивших», наоборот, есть только у неё.
- * Без снимка показываем всё — источника ещё не знаем.
+ * Есть ли показатель у источника этого снимка. Syntony (SZOV-12) называет себя в `source`;
+ * статусы операторов у неё есть, пока сервер забирает их методом /operator-statuses, — иначе
+ * снимок приходит со `statuses: false`. Открытых чатов у Syntony нет вовсе, «поступивших»,
+ * наоборот, нет у Chat2Desk. Без снимка показываем всё — источника ещё не знаем.
  */
 export const chatMetricAvailable = (metric, snapshot) => {
     if (!snapshot) return true;
-    const syntony = snapshot.statuses === false;
-    if (metric.statusOnly && syntony) return false;
+    const syntony = snapshot.source === 'syntony' || snapshot.statuses === false;
+    if (metric.statusOnly && snapshot.statuses === false) return false;
+    if (metric.chat2deskOnly && syntony) return false;
     if (metric.syntonyOnly && !syntony) return false;
     return true;
 };

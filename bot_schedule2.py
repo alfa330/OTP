@@ -45,6 +45,7 @@ from syntony_leads import client as syntony_leads_client
 # Чаты СЗоВ по Syntony (SZOV-12, 20.11.2026): сборка табло «Чат» и почасового отчёта из
 # таблиц, которые пишут вебхук и сторож API истории. Без побочных действий на импорте.
 from syntony_chats import szov as syntony_chats_szov
+from syntony_chats import billing as syntony_chats_billing
 # Автоотчёт по проведённым тренингам (задача #261): чистая логика периода,
 # выборки и книги Excel. Импорт обычный, а не ленивый, как у остальных
 # модулей пакета: этот ничего не знает ни про базу, ни про схему раздела —
@@ -136,6 +137,7 @@ from resource_fte.chat import (
     get_chat_billing_operators,
     get_chat_billing_report,
     get_chat_billing_staff,
+    chat_billing_syntony_from,
     get_chat_day,
     get_chat_operator_availability,
     get_chat_overview,
@@ -11297,6 +11299,29 @@ def _chat_billing_export_ratio(numerator, denominator):
         return None
 
 
+def _chat_billing_first_reply_base(item):
+    """Знаменатель среднего первого ответа: у Chat2Desk — обслуженные обращения, у Syntony —
+    чаты, начатые в эти сутки, где первый ответ был (first_replied). Та же формула, что на экране
+    (chatBillingMetrics.js)."""
+    item = item or {}
+    return item.get('first_replied') if 'first_replied' in item else item.get('answered')
+
+
+def _chat_billing_sl_base(item):
+    """База SL: у Chat2Desk — все обращения, у Syntony — начатые в эти сутки чаты (sl_base)."""
+    item = item or {}
+    return item.get('sl_base') if 'sl_base' in item else item.get('chats')
+
+
+def _chat_billing_avg_first(item):
+    return _chat_billing_export_ratio((item or {}).get('first_reply_seconds'),
+                                      _chat_billing_first_reply_base(item))
+
+
+def _chat_billing_sl(item):
+    return _chat_billing_export_ratio((item or {}).get('answered_sl'), _chat_billing_sl_base(item))
+
+
 def _chat_billing_export_metrics(item):
     """Шесть значений строки в порядке _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS."""
     item = item or {}
@@ -11304,15 +11329,16 @@ def _chat_billing_export_metrics(item):
     answered = item.get('answered') or 0
     # Средняя первая реакция делится на ОТВЕТИВШИХ, а не на все обращения: у чата
     # без ответа времени реакции нет вовсе, и в среднее его класть нечем. Время
-    # ответа — так же, на обращения, где оно есть.
-    avg_first = _chat_billing_export_ratio(item.get('first_reply_seconds'), answered)
+    # ответа — так же, на обращения, где оно есть. У Syntony первый ответ и SL — по чатам,
+    # начатым в эти сутки (_chat_billing_first_reply_base, _chat_billing_sl_base).
+    avg_first = _chat_billing_avg_first(item)
     avg_inner = _chat_billing_export_ratio(item.get('inner_reply_seconds'), item.get('inner_replied'))
     return [
         chats,
         answered,
         item.get('no_reply') or 0,
         _chat_billing_minutes(avg_first),
-        _chat_billing_export_ratio(item.get('answered_sl'), chats),
+        _chat_billing_sl(item),
         _chat_billing_minutes(avg_inner),
     ]
 
@@ -11405,7 +11431,7 @@ def _chat_billing_day_comment(day):
     except ValueError:
         day_label = str(day.get('date') or '')
     plan = totals.get('plan_chats')
-    avg_first = _chat_billing_export_ratio(totals.get('first_reply_seconds'), totals.get('answered'))
+    avg_first = _chat_billing_avg_first(totals)
     return (
         f"Ежедневный отчет по чатам за {day_label}\n"
         f"План чатов: {'—' if plan is None else int(_chat_billing_round_half_up(plan, 0))}\n"
@@ -11421,7 +11447,7 @@ def _chat_billing_daily_values(item, day_date=None):
     _chat_billing_daily_workbook."""
     item = item or {}
     chats = int(item.get('chats') or 0)
-    avg_first = _chat_billing_export_ratio(item.get('first_reply_seconds'), item.get('answered'))
+    avg_first = _chat_billing_avg_first(item)
     avg_inner = _chat_billing_export_ratio(item.get('inner_reply_seconds'), item.get('inner_replied'))
     return {
         'date': day_date,
@@ -11632,7 +11658,7 @@ def _chat_billing_cumulative_values(item, label):
     """Строка листа — та же математика, что у экрана биллинга чата. Нечего считать — прочерк."""
     item = item or {}
     chats = int(item.get('chats') or 0)
-    avg_first = _chat_billing_export_ratio(item.get('first_reply_seconds'), item.get('answered'))
+    avg_first = _chat_billing_avg_first(item)
     avg_inner = _chat_billing_export_ratio(item.get('inner_reply_seconds'), item.get('inner_replied'))
 
     def _dash(value):
@@ -11643,7 +11669,7 @@ def _chat_billing_cumulative_values(item, label):
         chats,
         int(item.get('answered') or 0),
         int(item.get('no_reply') or 0),
-        _dash(_chat_billing_export_ratio(item.get('answered_sl'), chats)),
+        _dash(_chat_billing_sl(item)),
         _dash(_chat_billing_minutes(avg_first)),
         _dash(_chat_billing_minutes(avg_inner)),
     ]
@@ -11781,8 +11807,7 @@ def _chat_billing_hourly_workbook(params, reports):
                     'staff_planned': planned,
                     'staff_fact': fact,
                     'staff_delta': None if planned is None or fact is None else fact - planned,
-                    'first_reply': _chat_billing_minutes(_chat_billing_export_ratio(
-                        item.get('first_reply_seconds'), item.get('answered'))),
+                    'first_reply': _chat_billing_minutes(_chat_billing_avg_first(item)),
                     'inner_reply': _chat_billing_minutes(_chat_billing_export_ratio(
                         item.get('inner_reply_seconds'), item.get('inner_replied'))),
                 }
@@ -11800,8 +11825,7 @@ def _chat_billing_hourly_workbook(params, reports):
             totals = day.get('totals') or {}
             total_values = {
                 'chats': int(totals.get('chats') or 0),
-                'first_reply': _chat_billing_minutes(_chat_billing_export_ratio(
-                    totals.get('first_reply_seconds'), totals.get('answered'))),
+                'first_reply': _chat_billing_minutes(_chat_billing_avg_first(totals)),
                 'inner_reply': _chat_billing_minutes(_chat_billing_export_ratio(
                     totals.get('inner_reply_seconds'), totals.get('inner_replied'))),
             }
@@ -33341,11 +33365,21 @@ def _chat_hourly_text(data):
 def _chat_hourly_text_syntony(data, hour_label, day_words, pair):
     """Текст отчёта по Syntony (SZOV-12): первыми — пять показателей из ТЗ, в его порядке.
 
-    Онлайн — ответил водителю за последние 15 минут (статусов у Syntony нет); «всего» — чаты,
-    где водитель писал, «поступивших» — начатые в этом промежутке. Открытых чатов у Syntony нет."""
+    Онлайн — статус «Онлайн» в Syntony, а пока статусов нет — ответил водителю за последние
+    15 минут; офлайн — не в системе; «всего» — чаты, где водитель писал, «поступивших» — начатые
+    в этом промежутке. Открытых чатов у Syntony нет."""
     lines = [f"<b>Чаты</b> — {data['generated_at']}", ""]
     lines.append(f"<b>Операторов онлайн:</b> {len(data.get('online') or [])}")
     lines.append(f"<b>Операторов офлайн:</b> {int(data.get('offline_count') or 0)}")
+    on_status = data.get('on_status') or []
+    if on_status:
+        # Перерыв, занят, тренинг — в системе, но не на линии: строкой «статус N», по убыванию.
+        by_status = {}
+        for item in on_status:
+            label = str(item.get('status') or '').strip().lower() or 'другой статус'
+            by_status[label] = by_status.get(label, 0) + 1
+        lines.append("<b>В других статусах:</b> " + ", ".join(
+            f"{label} {count}" for label, count in sorted(by_status.items(), key=lambda kv: (-kv[1], kv[0]))))
     lines.append(f"<b>Всего чатов:</b> {data['chats_hour']} за {hour_label}, "
                  f"{data['chats_day']} {day_words}")
     lines.append(f"<b>Поступивших чатов:</b> {data.get('chats_new_hour') or 0} за {hour_label}, "
@@ -34710,8 +34744,10 @@ def _szov_chat_wallboard_snapshot():
 # Chat2Desk отключается, номера СЗоВ уже там. Правила счёта — syntony_chats/metrics.py, сборка —
 # syntony_chats/szov.py; здесь только переключатель и кто такие чатники СЗоВ. Откат —
 # SZOV_CHAT_SOURCE=chat2desk (без ключа истории и секрета вебхука Syntony — тоже Chat2Desk).
-# Статусов операторов у Syntony нет: онлайн — ответ водителю за последние 15 минут (решение
-# владельца 20.11.2026), перерывов вне графика по чату не разобрать.
+# Статусы операторов — метод Syntony /operator-statuses (24.11.2026, syntony_chats/statuses.py):
+# пока сторож их забирает, онлайн — статус «Онлайн», справа на табло точный статус Syntony; метод
+# не отвечает — онлайн по ответу водителю за последние 15 минут (решение владельца 20.11.2026).
+# Перерывы чатников с графиком по статусам Syntony пока не сверяются.
 SZOV_SYNTONY_WALLBOARD_TTL_SECONDS = _env_int('SZOV_SYNTONY_WALLBOARD_TTL_SECONDS', 60,
                                               minimum=15, maximum=600)
 
@@ -34747,6 +34783,38 @@ def _szov_chat_syntony_export_day(day_str):
     if day is None:
         return [], {}, 'Дата не разобралась'
     return syntony_chats_szov.day_block(db, _szov_syntony_context(), day)
+
+
+def syntony_chat_billing_refresh_job(now=None):
+    """Биллинг чата по Syntony: свернуть сутки в «чаты дня» (syntony_chats/billing.py).
+
+    С 18.11.2026 биллинг чата («Расчёт ресурсов → Чат → Биллинг») читает сутки не из
+    c2d_requests, а из этих строк: переписка Syntony живёт 30 дней, биллинг — сколько нужно.
+    Раз в 10 минут пересобираются сегодняшние сутки и несобранные прошлые (не больше трёх за
+    прогон). Собирается и при откате табло на Chat2Desk: сутки биллинга с 18.11 — всегда Syntony.
+    """
+    if not syntony_chats_szov.data_enabled():
+        return None
+    try:
+        results = syntony_chats_billing.refresh(
+            db, _szov_syntony_context(), first_day=chat_billing_syntony_from(), now=now)
+    except Exception:
+        logging.exception("Биллинг чата по Syntony: прогон упал")
+        return None
+    failed = [item for item in results if item.get('error')]
+    if failed:
+        logging.warning("Биллинг чата по Syntony: не собрались сутки %s",
+                        ', '.join('%s (%s)' % (item['day'], item['error']) for item in failed))
+    return results
+
+
+async def run_syntony_chat_billing_refresh_async():
+    loop = asyncio.get_event_loop()
+    try:
+        # Только база (своя переписка Syntony, без сети) — общий пул, сборка суток идёт секунды.
+        return await loop.run_in_executor(executor_pool, syntony_chat_billing_refresh_job)
+    except Exception:
+        logging.exception("Биллинг чата по Syntony: прогон упал")
 
 
 
@@ -60703,6 +60771,18 @@ if __name__ == '__main__':
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(minutes=6)
+    )
+
+    # Биллинг чата по Syntony: сутки сворачиваются в «чаты дня» раз в 10 минут, первый прогон
+    # через 4 минуты после старта — после первого забора чатов сторожем (90 с) и его догрузки.
+    scheduler.add_job(
+        run_syntony_chat_billing_refresh_async,
+        CronTrigger(minute='*/10', timezone=ZoneInfo('Asia/Almaty')),
+        id='syntony_chat_billing_refresh',
+        misfire_grace_time=600,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(minutes=4)
     )
 
     # Тесты в «Опросах»: раз в минуту добираем попытки, у которых истекло

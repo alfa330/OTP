@@ -51,6 +51,10 @@ FUNCTION_NAMES = (
     "_chat_billing_minutes",
     "_chat_billing_minutes_label",
     "_chat_billing_export_ratio",
+    "_chat_billing_first_reply_base",
+    "_chat_billing_sl_base",
+    "_chat_billing_avg_first",
+    "_chat_billing_sl",
     "_chat_billing_export_metrics",
     "_chat_billing_export_detail_values",
     "_chat_billing_sheet_title",
@@ -115,8 +119,13 @@ def _lot_parts_method():
     return ns["_hourly_lot_parts_for_date"]
 
 
-def _aggregates(chats, answered, answered_sl, reply_sum, inner_sum, inner_replied):
-    return (chats, answered, answered_sl, reply_sum, inner_sum, inner_replied)
+def _aggregates(chats, answered, answered_sl, reply_sum, inner_sum, inner_replied,
+                first_replied=None, sl_base=None):
+    """Восемь агрегатов выборки биллинга. По умолчанию — как у Chat2Desk: знаменатель
+    первого ответа — обслуженные, база SL — все поступившие."""
+    return (chats, answered, answered_sl, reply_sum,
+            answered if first_replied is None else first_replied,
+            chats if sl_base is None else sl_base, inner_sum, inner_replied)
 
 
 class _RowsCursor:
@@ -175,19 +184,25 @@ class ChatBillingMetricsTests(unittest.TestCase):
         report = get_chat_billing_report(db, date(2026, 9, 16), date(2026, 9, 16), sl_seconds=45)
         self.assertEqual(report["totals"], {
             "chats": 10, "answered": 9, "no_reply": 1, "answered_sl": 7,
-            "first_reply_seconds": 540, "inner_reply_seconds": 1201, "inner_replied": 8,
+            "first_reply_seconds": 540, "first_replied": 9, "sl_base": 10,
+            "inner_reply_seconds": 1201, "inner_replied": 8,
         })
         sql, params = db.cursor.calls[0]
         # Порог SL — первый параметр: он стоит в SELECT раньше условий WHERE.
         self.assertEqual(params[0], 45)
-        for fragment in ("SUM(r.average_replies_time)", "COUNT(r.average_replies_time)"):
+        for fragment in ("SUM(r.inner_reply)", "COUNT(r.inner_reply)",
+                         "c.average_replies_time::float8"):
             self.assertIn(fragment, sql)
-        # Средняя оценка водителей убрана из биллинга (просьба владельца 02.10.2026).
-        self.assertNotIn("rating_score", sql)
+        # Средняя оценка водителей убрана из биллинга (просьба владельца 02.10.2026): в
+        # агрегатах её нет (колонка выборки есть — она для оценки отдельного обращения).
+        self.assertNotIn("SUM(r.rating_score)", sql)
+        self.assertNotIn("COUNT(r.rating_score)", sql)
         # «Факт чатов» — обращения без автоматических опросов после чата: ручной отчёт
         # считал и строки request_type='rating', и завышал объём примерно вдвое.
-        self.assertIn("r.request_type = %s", sql)
+        self.assertIn("c.request_type = %s", sql)
         self.assertIn("common", params)
+        # Сентябрь — до перехода на Syntony: её половины в запросе нет вовсе.
+        self.assertNotIn("syntony_chat_billing", sql)
 
         operators = get_chat_billing_operators(_RowsDb([
             (date(2026, 9, 16), "Асель", *_aggregates(5, 5, 4, 100.0, 250.0, 5), 30, 20),
@@ -200,12 +215,25 @@ class ChatBillingMetricsTests(unittest.TestCase):
     def test_detail_row_carries_number_reply_time_and_rating(self):
         started = datetime(2026, 9, 16, 23, 59, 21)
         db = _RowsDb([(1, started, "Salam taxi", "whatsapp", "Бауржан", "77076825368",
-                       "Ерланов Темирлан", 24, 37.5, 5.0, 6, 4)])
+                       "Ерланов Темирлан", True, 24, 37.5, 5.0, 6, 4)])
         row = get_chat_billing_details(db, date(2026, 9, 16), date(2026, 9, 16))["rows"][0]
         self.assertEqual(row["client"], "Бауржан")
         self.assertEqual(row["client_number"], "77076825368")
+        self.assertEqual(row["first_reply_seconds"], 24)
         self.assertEqual(row["inner_reply_seconds"], 37.5)
         self.assertEqual(row["rating"], 5.0)
+        self.assertEqual((row["no_reply"], row["answered_sl"]), (0, 1))
+
+    def test_syntony_detail_row_answered_without_first_reply(self):
+        # Продолжение вчерашнего диалога Syntony: сотрудник ответил, а первого ответа у
+        # строки нет — он был в день начала диалога. Это «обслужено», не «без ответа».
+        started = datetime(2026, 11, 20, 10, 5)
+        db = _RowsDb([(5000000000001, started, "Ноль такси", "WhatsApp", "Бауржан",
+                       "77076825368", "Ерланов Темирлан", True, None, 80.0, None, 3, 2)])
+        row = get_chat_billing_details(db, date(2026, 11, 20), date(2026, 11, 20))["rows"][0]
+        self.assertEqual((row["first_reply_seconds"], row["no_reply"], row["answered_sl"]),
+                         (None, 0, 0))
+        self.assertEqual(row["id"], 5000000000001)
 
     def test_metric_keys_are_the_ones_the_screen_reads(self):
         source = VIEW_PATH.read_text(encoding="utf-8") + METRICS_JS_PATH.read_text(encoding="utf-8")
@@ -470,9 +498,9 @@ class ChatBillingStaffTests(unittest.TestCase):
                                               8 * 60, 19 * 60 + 59)
         self.assertEqual(base, {"2026-09-16": 1636, "2026-09-17": 1420})
         sql, params = db.cursor.calls[0]
-        # Тот же WHERE, что у факта: без опросов после чата и в том же окне времени.
-        self.assertIn("r.request_type = %s", sql)
-        self.assertIn("EXTRACT(HOUR FROM r.request_start)", sql)
+        # Та же выборка, что у факта: без опросов после чата и в том же окне времени.
+        self.assertIn("c.request_type = %s", sql)
+        self.assertIn("EXTRACT(HOUR FROM c.request_start)", sql)
         self.assertEqual(params, ["common", date(2026, 9, 9), date(2026, 9, 10), 480, 1199])
 
     def test_grouping_staff_is_per_hour(self):
@@ -524,6 +552,14 @@ class ChatBillingExportTests(unittest.TestCase):
             "first_reply_seconds": 1200, "inner_reply_seconds": 900, "inner_replied": 6,
         })
         self.assertEqual(values, [10, 8, 2, 2.5, 0.5, 2.5])
+        # Syntony (с 18.11.2026): первый ответ и SL — по чатам, начатым в этот день, — та же
+        # формула, что на экране (chatBillingMetrics.js).
+        values = self.ns["_chat_billing_export_metrics"]({
+            "chats": 10, "answered": 9, "no_reply": 1, "answered_sl": 3,
+            "first_reply_seconds": 600, "first_replied": 5, "sl_base": 6,
+            "inner_reply_seconds": 900, "inner_replied": 9,
+        })
+        self.assertEqual(values, [10, 9, 1, 2.0, 0.5, 1.7])
 
     def test_operator_export_has_no_average_rating(self):
         # Средняя оценка водителей убрана и из выгрузки «Чатников» (02.10.2026).

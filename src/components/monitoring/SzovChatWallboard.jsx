@@ -34,9 +34,12 @@ import {
  * людей справа и на графике по часам; ответ внутри чата показывается без оценки (правка
  * владельца 20.11.2026, до неё по цели красился ответ внутри чата).
  *
- * У Syntony нет статусов операторов (занят, тренинг, перерыв) и счётчика открытых чатов:
- * снимок приходит со `statuses: false`, и этих плиток на экране нет — нули на их месте
- * читались бы как «все свободны». Онлайн у Syntony — ответил водителю за последние 15 минут.
+ * Статусы операторов Syntony (метод /operator-statuses, 24.11.2026): пока сервер их забирает,
+ * плитки — «Онлайн / Перерыв / Не в системе» (просьба владельца: «чисто кто онлайн, кто на
+ * перерыве, справа точные статусы»), остальные статусы — строкой «ещё…», а справа у каждого —
+ * статус Syntony как есть и время в нём. Статусов нет (метод не отвечает) — снимок приходит со
+ * `statuses: false`, плиток статусов нет, онлайн — ответил водителю за последние 15 минут.
+ * Счётчика открытых чатов у Syntony нет вовсе — вместо «в работе» у человека чаты за сутки.
  *
  * Что показываем и почему именно это:
  *   - счётчики «сейчас» — сколько чатников на линии, сколько заняты, сколько на тренинге и
@@ -98,7 +101,7 @@ const OfflinePeopleList = ({ items, day, nameSize }) => (
  * управляет тело табло (`page`/`onPageChange`): её открывает и плитка «Не в системе» слева.
  */
 export const ChatPeopleColumn = ({ people, offlinePeople, day, targetSeconds, scale = 1, page, onPageChange,
-                                   statuses = true }) => {
+                                   openChats = true }) => {
     const items = Array.isArray(people) ? people : [];
     const offlineItems = Array.isArray(offlinePeople) ? offlinePeople : [];
     const nameSize = `clamp(1rem, ${(1.25 * scale).toFixed(2)}vw, ${(1.375 * scale).toFixed(3)}rem)`;
@@ -151,7 +154,7 @@ export const ChatPeopleColumn = ({ people, offlinePeople, day, targetSeconds, sc
                                         обрабатывает, а не просто счётчик неизвестно чего. */}
                                     {/* У Syntony открытых чатов нет — вместо них чаты за сутки. */}
                                     <span className="whitespace-nowrap text-slate-600">
-                                        {statuses ? (
+                                        {openChats ? (
                                             <>
                                                 {formatInt(item.open_chats)}{' '}
                                                 {pluralRu(item.open_chats, 'чат', 'чата', 'чатов')} в работе
@@ -427,12 +430,20 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
     // Единственный оценочный цвет табло — у первого ответа (регламент СЗоВ, 20.11.2026).
     const firstTone = first === null || first === undefined
         ? 'neutral' : (Number(first) <= targetSeconds ? 'good' : 'bad');
-    // Syntony (SZOV-12): статусов операторов и открытых чатов нет — снимок говорит это сам.
+    // Источник и статусы называет сам снимок: Syntony (с 20.11.2026) или откатом Chat2Desk;
+    // статусов нет, пока Syntony не отдаёт их методом (`statuses: false`).
+    const syntony = snapshot?.source === 'syntony' || snapshot?.statuses === false;
     const statuses = snapshot?.statuses !== false;
 
-    // Перерыв и «Закрытие чатов» своих плиток не имеют — как тренинг и тех.причина на
-    // «Линии», показываем их приглушённой строкой и только когда есть кого показывать.
-    const asideParts = !statuses ? [] : [
+    // Статусы без своей плитки показываем приглушённой строкой и только когда есть кого
+    // показывать — как тренинг и тех.причину на «Линии».
+    const asideParts = !statuses ? [] : (syntony ? [
+        // Syntony: плитки — онлайн и перерыв; занят, тренинг и прочее (техническая причина,
+        // офлайн-работа) — здесь, а точный статус у каждого справа.
+        [Number(now.operators_busy) || 0, pluralRu(now.operators_busy, 'занят', 'заняты', 'заняты')],
+        [Number(now.operators_on_training) || 0, 'на тренинге'],
+        [Number(now.operators_other) || 0, 'в прочих статусах'],
+    ] : [
         [Number(now.operators_on_break) || 0, 'на перерыве'],
         // `holiday` в Chat2Desk — не отпуск, а «Закрытие чатов»: человек дорабатывает открытые
         // и новых не берёт. Подпись сверена со справочником Chat2Desk, см. CHAT_STATUS_STYLE.
@@ -440,7 +451,7 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
         // «Прочее» — статус, которого мы ещё не видели: Chat2Desk завёл новый или переименовал.
         // Человек в нём не пропадает с табло, хотя своей плитки у такого статуса нет.
         [Number(now.operators_other) || 0, 'в прочих статусах'],
-    ].filter(([count]) => count > 0).map(([count, label]) => `${formatInt(count)} ${label}`);
+    ]).filter(([count]) => count > 0).map(([count, label]) => `${formatInt(count)} ${label}`);
 
     return (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]" style={{ fontFamily: APPLE_FONT }}>
@@ -449,7 +460,16 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                     {/* «Не в системе» — плиткой на самом табло (запрос владельца 02.10.2026: числа
                         только во вкладке справа мало). Стоит рядом с остальными людьми, до чатов;
                         нажатие открывает справа список — кто это и с какого момента. */}
-                    {statuses ? (
+                    {statuses && syntony ? (
+                        <Grid cols={3}>
+                            <KeyTile label="Онлайн" value={formatInt(now.operators_online)} tone="info" scale={scale}
+                                     hint="статус «Онлайн» в Syntony" />
+                            <KeyTile label="Перерыв" value={formatInt(now.operators_on_break)} tone="warn" scale={scale} />
+                            <KeyTile label="Не в системе" value={formatInt(now.operators_offline)} tone="neutral"
+                                     scale={scale} title="Показать, кто не в системе"
+                                     onClick={() => setPeoplePage('offline')} />
+                        </Grid>
+                    ) : statuses ? (
                         <Grid cols={5}>
                             <KeyTile label="Онлайн" value={formatInt(now.operators_online)} tone="info" scale={scale}
                                      hint="держат линию" />
@@ -485,9 +505,9 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                         на которые смена реагирует прямо сейчас. */}
                     {/* У Syntony плиток четыре: «чатов за сутки» — где водитель писал сегодня,
                         «поступивших» — начатые сегодня (решение владельца 20.11.2026). */}
-                    <Grid cols={statuses ? 3 : 4}>
+                    <Grid cols={syntony ? 4 : 3}>
                         <StatTile label="Чатов за сутки" value={formatInt(today.chats)} scale={scale} />
-                        {statuses ? null : (
+                        {!syntony ? null : (
                             <StatTile label="Поступивших" value={formatInt(today.chats_new)} scale={scale} />
                         )}
                         <StatTile label="Ответ внутри чата" value={formatMinutes(inner, 1, false)} unit="мин"
@@ -523,7 +543,7 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
             </div>
 
             <ChatPeopleColumn people={now.operators} offlinePeople={now.offline_operators} day={snapshot?.day}
-                              targetSeconds={targetSeconds} scale={scale} statuses={statuses}
+                              targetSeconds={targetSeconds} scale={scale} openChats={!syntony}
                               page={peoplePage} onPageChange={setPeoplePage} />
         </div>
     );

@@ -14,14 +14,21 @@ const roundHalfUp = (value, digits) => {
   return Math.floor(Number(value) * scale + 0.5) / scale;
 };
 
+// Знаменатели с сервера: с 18.11.2026 (Syntony) первый ответ и SL меряются по чатам, начатым
+// в этот день (first_replied, sl_base), а «поступило» — все чаты, где водитель писал. У
+// Chat2Desk их нет в старых ответах — тогда прежние «обслужено» и «поступило».
+const base = (item, key, fallback) => (
+  item && item[key] !== undefined && item[key] !== null ? item[key] : item?.[fallback]
+);
+
 // Средние всегда «сумма / сколько»: за период — по обращениям всех дней, а не
 // среднее средних. Знаменатель у каждого свой: первая реакция — у отвеченных,
 // время ответа — у обращений, где оператор отвечал. Средней оценки водителей в
 // биллинге нет (просьба владельца 02.10.2026).
 export const chatBillingAverages = (item = {}) => ({
-  firstReplySeconds: ratio(item?.first_reply_seconds, item?.answered),
+  firstReplySeconds: ratio(item?.first_reply_seconds, base(item, 'first_replied', 'answered')),
   innerReplySeconds: ratio(item?.inner_reply_seconds, item?.inner_replied),
-  sl: ratio(item?.answered_sl, item?.chats),
+  sl: ratio(item?.answered_sl, base(item, 'sl_base', 'chats')),
 });
 
 // Время — только в минутах с одним знаком: «2,5», «7», «12» (требование постановки).

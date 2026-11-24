@@ -357,7 +357,8 @@ def online_seconds_by_hour(activity, resolve, day_start, hours, now=None,
 
 
 def hourly_rows(facts, activity, resolve, display_name, day_start, *, now=None, full_day=False,
-                online_min_seconds=ONLINE_MIN_SECONDS, window_seconds=PRESENCE_WINDOW_SECONDS):
+                online_min_seconds=ONLINE_MIN_SECONDS, window_seconds=PRESENCE_WINDOW_SECONDS,
+                online=None):
     """Строки графика «По часам» — та же форма, что у Chat2Desk (_szov_chat_wallboard_hourly):
     hour, chats, first/inner_reply_seconds, operators_online (головы), operators (ФИО с
     секундами), operators_reply (суммы по отвечавшим), operators_under_minute,
@@ -365,14 +366,17 @@ def hourly_rows(facts, activity, resolve, display_name, day_start, *, now=None, 
 
     full_day — сутки закрыты: 24 часа целиком; иначе прошедшие часы и текущий, неполный.
     display_name(имя автора) → ФИО для разреза по отвечавшим.
+    online — готовые {час: {ФИО: секунды на линии}} (по статусам Syntony, statuses.py); без
+    них — онлайн по ответам за окно window_seconds, как до статусов.
     """
     if full_day:
         last_hour, until = 23, None
     else:
         elapsed = max(0.0, (now - day_start).total_seconds())
         last_hour, until = min(23, int(elapsed // 3600)), now
-    online = online_seconds_by_hour(activity, resolve, day_start, last_hour + 1, until,
-                                    window_seconds)
+    if online is None:
+        online = online_seconds_by_hour(activity, resolve, day_start, last_hour + 1, until,
+                                        window_seconds)
     rows = []
     for hour in range(last_hour + 1):
         start = day_start + timedelta(hours=hour)

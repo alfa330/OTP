@@ -1774,7 +1774,7 @@ const CHAT_BILLING_CELLS = {
     render: (item) => ({ value: formatInt(item.no_reply), className: 'text-rose-600' }),
   },
   first_reply: {
-    hint: 'От первого сообщения клиента до первого ответа оператора',
+    hint: 'От первого сообщения клиента до первого ответа оператора. С 18.11 (Syntony) — по чатам, начатым в этот день; если чат передал ИИ — от передачи',
     render: (item, averages) => ({ value: formatChatBillingMinutes(averages.firstReplySeconds), className: 'text-slate-700' }),
   },
   sl: {
@@ -2035,7 +2035,8 @@ const CHAT_DIRECTION = {
     slDefaultSeconds: CHAT_BILLING_SL_DEFAULT_SECONDS,
     arClass: chatBillingShareClass,
     title: 'Биллинг чатов',
-    text: 'Обращения из базы: объём и скорость ответа по дням за выбранный период и окно времени.',
+    // С 18.11.2026 сутки — чаты Syntony (решение владельца 24.11.2026), раньше — обращения Chat2Desk.
+    text: 'Обращения Chat2Desk, с 18.11 — чаты Syntony: объём и скорость ответа по дням за выбранный период и окно времени.',
     loadingText: 'Собираем обращения...',
     errorText: 'Не удалось получить данные по обращениям',
     detailTitle: 'Детализация обращений',
@@ -2065,14 +2066,14 @@ const CHAT_DIRECTION = {
       return parts.join(' · ');
     },
     modeHint: (mode, slSeconds) => {
-      const sl = `SL — доля обращений, где первая реакция уложилась в ≤ ${slSeconds} сек, от всех поступивших`;
+      const sl = `SL — доля обращений, где первая реакция уложилась в ≤ ${slSeconds} сек, от всех поступивших (с 18.11 — от чатов, начатых в этот день)`;
       if (mode === 'detail') return 'Одна строка — одно обращение; на странице 25 строк';
       // «Поступило» в этом разрезе меньше, чем в «Таксопарках», и это не ошибка:
       // ручка отбрасывает чаты без привязки к человеку (chat.py, WHERE … operator
       // IS NOT NULL). Раньше расхождение висело на экране без единого слова.
-      if (mode === 'operator') return `${sl}. Считаются только обращения, привязанные к чатнику, поэтому «Поступило» здесь меньше, чем по таксопаркам`;
+      if (mode === 'operator') return `${sl}. Считаются только обращения, привязанные к чатнику; с 18.11 чат засчитан каждому, кто в нём отвечал`;
       if (mode === 'grouping') return 'Час — по началу обращения; сотрудники — смены аукциона чата и онлайн хотя бы минуту';
-      return 'План — доля парка × чаты того же дня прошлой недели; факт — обращения без автоматических опросов после чата';
+      return 'План — доля парка × чаты того же дня прошлой недели; факт — обращения без автоопросов, с 18.11 — чаты, где водитель писал в этот день';
     },
     // Разрез в имени файла: выгрузка теперь слушает mode, и разные отчёты за один
     // период не должны ложиться в папку под одним именем. У «Группировки» по одному
@@ -3976,8 +3977,9 @@ const ResourceFteView = ({
   // Чат: доли считаются от числа обращений, а средний первый ответ — от тех,
   // кому ответили. Времени разговора и обработки в чатовой модели нет.
   const billingChatArRatio = billingTotals ? safeRatio(billingTotals.answered, billingTotals.chats) : null;
-  const billingChatSlRatio = billingTotals ? safeRatio(billingTotals.answered_sl, billingTotals.chats) : null;
   const billingChatAverages = chatBillingAverages(billingTotals || {});
+  // SL — той же формулой, что в таблице: у Syntony база — чаты, начатые в этот день.
+  const billingChatSlRatio = billingTotals ? billingChatAverages.sl : null;
   // Выбор таксопарка «Группировки»: парки периода по объёму, а выбранный — даже если
   // в новом периоде его нет, иначе поле показало бы пустоту вместо выбора.
   const billingGroupingParkOptions = useMemo(() => {
@@ -6270,7 +6272,7 @@ const ResourceFteView = ({
                     const showOcc = cfg.hasBillingTalkTime && billingMode === 'operator';
                     const showAr = cfg.hasBillingTalkTime && billingMode !== 'operator';
                     const daySl = !cfg.hasBillingTalkTime
-                      ? safeRatio(day.totals?.answered_sl, day.totals?.chats)
+                      ? chatBillingAverages(day.totals || {}).sl
                       : billingMode !== 'operator' ? safeRatio(day.totals?.served_sl, day.totals?.arrived) : null;
                     const dayAr = showAr ? safeRatio(day.totals?.lost, day.totals?.arrived) : null;
                     const dayOcc = showOcc ? billingOperatorActivity(day.totals || {}).occ : null;
@@ -8377,7 +8379,7 @@ const ResourceFteView = ({
                         icon={TrendingUp}
                         label="SL"
                         value={billingChatSlRatio === null ? '—' : formatPercent(billingChatSlRatio, 1)}
-                        hint={`Первая реакция за ≤ ${billingSlSeconds} сек от поступивших`}
+                        hint={`Первая реакция за ≤ ${billingSlSeconds} сек; с 18.11 — от начатых в этот день`}
                         tone={billingChatSlRatio !== null && billingChatSlRatio >= 0.8 ? 'emerald' : billingChatSlRatio !== null && billingChatSlRatio >= 0.6 ? 'amber' : 'rose'}
                       />
                       <StatCard
@@ -8537,7 +8539,7 @@ const ResourceFteView = ({
                         const dayAr = showArBadge ? safeRatio(day.totals?.lost, day.totals?.arrived) : null;
                         const daySl = !showSlBadge ? null : cfg.hasBillingTalkTime
                           ? safeRatio(day.totals?.served_sl, day.totals?.arrived)
-                          : safeRatio(day.totals?.answered_sl, day.totals?.chats);
+                          : chatBillingAverages(day.totals || {}).sl;
                         const dayOcc = showOccBadge ? billingOperatorActivity(day.totals || {}).occ : null;
                         return (
                           <section key={day.date} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">

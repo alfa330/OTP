@@ -154,7 +154,7 @@ test('Syntony: за день — всего, поступивших, ответ 
 });
 
 test('Syntony: у человека на смене — чаты за сутки, а не «в работе»', () => {
-    const html = column('shift', { statuses: false, people: SYNTONY_SNAPSHOT.now.operators });
+    const html = column('shift', { openChats: false, people: SYNTONY_SNAPSHOT.now.operators });
     const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
     assert.match(text, /12 чатов за сутки/);
     assert.doesNotMatch(text, /в работе/);
@@ -189,3 +189,50 @@ test('цель — у первого ответа: он красный, отве
     assert.match(tileValueClass(ok, 'Первый ответ'), /text-emerald-600/);
     assert.doesNotMatch(tileValueClass(ok, 'Ответ внутри чата'), /text-rose-600/);
 });
+
+// Статусы Syntony (метод /operator-statuses, 24.11.2026): плитки «Онлайн / Перерыв / Не в
+// системе», прочие статусы — строкой «ещё…», у человека — статус Syntony как есть, а вместо
+// «в работе» — чаты за сутки (открытых чатов у Syntony нет).
+const SYNTONY_STATUS_SNAPSHOT = {
+    ...SYNTONY_SNAPSHOT,
+    statuses: true,
+    now: {
+        ...SYNTONY_SNAPSHOT.now,
+        operators_online: 1, operators_on_break: 1, operators_busy: 2, operators_on_training: 0,
+        operators_other: 1, operators_on_holiday: null, open_chats: null,
+        operators: [
+            { ...ON_SHIFT[0], status: 'Онлайн', status_key: 'online', open_chats: null },
+            { ...ON_SHIFT[0], operator_id: 99, name: 'Перерывова Дана', status: 'Перерыв',
+              status_key: 'break', seconds: 600, chats: 0, open_chats: null },
+        ],
+    },
+};
+
+test('Syntony со статусами: плитки онлайн, перерыв и не в системе; прочее — строкой', () => {
+    const html = renderToStaticMarkup(React.createElement(SzovChatWallboardBody, { snapshot: SYNTONY_STATUS_SNAPSHOT }));
+    for (const label of ['Онлайн', 'Перерыв', 'Не в системе']) {
+        assert.match(html, new RegExp(`>${label}<`), label);
+    }
+    for (const label of ['Занят', 'Тренинг', 'Открыто чатов']) {
+        assert.doesNotMatch(html, new RegExp(`>${label}<`), label);
+    }
+    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    assert.match(text, /Ещё 2 заняты · 1 в прочих статусах/);
+    const one = renderToStaticMarkup(React.createElement(SzovChatWallboardBody, {
+        snapshot: { ...SYNTONY_STATUS_SNAPSHOT, now: { ...SYNTONY_STATUS_SNAPSHOT.now, operators_busy: 1, operators_other: 0 } },
+    })).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    assert.match(one, /Ещё 1 занят /);
+    assert.doesNotMatch(text, /на тренинге/);
+    assert.match(html, /статус «Онлайн» в Syntony/);
+    // «Поступивших» у Syntony есть и со статусами.
+    assert.match(html, />Поступивших</);
+});
+
+test('Syntony со статусами: у человека статус Syntony, время в нём и чаты за сутки', () => {
+    const html = renderToStaticMarkup(React.createElement(SzovChatWallboardBody, { snapshot: SYNTONY_STATUS_SNAPSHOT }));
+    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    assert.match(text, /Перерывова Дана Перерыв 10:00/);
+    assert.match(text, /чатов за сутки/);
+    assert.doesNotMatch(text, /в работе/);
+});
+

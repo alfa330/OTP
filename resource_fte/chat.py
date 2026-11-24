@@ -34,6 +34,7 @@
 принятых, ни вычета потерь в этой модели нет и быть не должно.
 """
 import math
+import os
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1937,6 +1938,49 @@ def get_chat_overview(db, week_start_value: Any = None,
 # Средней оценки водителей в биллинге нет — ни на экране, ни в выгрузках (просьба
 # владельца 02.10.2026). Оценка отдельного обращения осталась только в детализации;
 # официальная оценка чатника — в «Учёте часов».
+#
+# С 18.11.2026 чаты СЗоВ идут через Syntony (решение владельца 24.11.2026): сутки с этого дня
+# берутся из «чатов дня» Syntony (syntony_chats/billing.py), раньше — из c2d_requests, как
+# было; Chat2Desk за 18.11 и позже не берём. Обе половины — одна выборка с одинаковыми
+# колонками (_chat_billing_source), поэтому период через 18.11 считается одним запросом и
+# все разрезы читают её одинаково. Правила Syntony — «как на табло»: поступило — диалоги, где
+# водитель писал в эти сутки; обслужено — где ответил сотрудник; первый ответ и SL — по
+# диалогам, начатым в эти сутки. Поэтому знаменатели первого ответа (first_replied) и SL
+# (sl_base) у Syntony свои; у Chat2Desk они равны «обслужено» и «поступило», как и было.
+
+CHAT_BILLING_SYNTONY_FROM_DEFAULT = date(2026, 11, 18)
+CHAT_BILLING_SYNTONY_FROM_ENV = "CHAT_BILLING_SYNTONY_FROM"
+# Номера, которые после перехода остались в Chat2Desk, — их обращения идут в биллинг и после
+# 18.11 (решение владельца 24.11.2026): «Ноль такси» WABA через Gupshup (канал Chat2Desk 10908)
+# на 23.11 не переехал — ~100 обращений в день, отвечают чатники СЗоВ. Переедет — убрать отсюда
+# (или CHAT_BILLING_C2D_KEEP_CHANNEL_IDS в окружении: id каналов через запятую, пусто — ни одного).
+CHAT_BILLING_C2D_KEEP_CHANNEL_IDS_DEFAULT = (10908,)
+CHAT_BILLING_C2D_KEEP_CHANNEL_IDS_ENV = "CHAT_BILLING_C2D_KEEP_CHANNEL_IDS"
+
+
+def chat_billing_syntony_from(environ=None) -> date:
+    """С какого дня биллинг чата берёт Syntony (CHAT_BILLING_SYNTONY_FROM, ГГГГ-ММ-ДД)."""
+    environ = os.environ if environ is None else environ
+    raw = str(environ.get(CHAT_BILLING_SYNTONY_FROM_ENV) or "").strip()
+    try:
+        return date.fromisoformat(raw) if raw else CHAT_BILLING_SYNTONY_FROM_DEFAULT
+    except ValueError:
+        return CHAT_BILLING_SYNTONY_FROM_DEFAULT
+
+
+def chat_billing_c2d_keep_channel_ids(environ=None) -> Tuple[int, ...]:
+    """Каналы Chat2Desk, которые и после перехода на Syntony идут в биллинг."""
+    environ = os.environ if environ is None else environ
+    raw = environ.get(CHAT_BILLING_C2D_KEEP_CHANNEL_IDS_ENV)
+    if raw is None:
+        return CHAT_BILLING_C2D_KEEP_CHANNEL_IDS_DEFAULT
+    ids = []
+    for part in str(raw).replace(";", ",").replace(" ", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.append(int(part))
+    return tuple(ids)
+
 
 CHAT_BILLING_MAX_RANGE_DAYS = 31
 CHAT_BILLING_SL_SECONDS_LIMITS = (1, 600)
@@ -1953,8 +1997,8 @@ CHAT_BILLING_NO_TRANSPORT = "Без канала"
 # число округлялось бы дважды и таблица не сходилась бы с итогом. Средние за период
 # поэтому считаются по ОБРАЩЕНИЯМ всех дней (сумма / сколько), а не средним средних.
 CHAT_BILLING_METRICS = (
-    "chats", "answered", "no_reply", "answered_sl", "first_reply_seconds",
-    "inner_reply_seconds", "inner_replied",
+    "chats", "answered", "no_reply", "answered_sl", "first_reply_seconds", "first_replied",
+    "sl_base", "inner_reply_seconds", "inner_replied",
 )
 CHAT_BILLING_OPERATOR_METRICS = CHAT_BILLING_METRICS + (
     "incoming_messages", "outgoing_messages",
@@ -1967,34 +2011,116 @@ _CHAT_BILLING_TRANSPORT_SQL = (
     "COALESCE(NULLIF(r.transport, ''), '%s')" % CHAT_BILLING_NO_TRANSPORT)
 _CHAT_BILLING_OPERATOR_SQL = "COALESCE(NULLIF(u.name, ''), NULLIF(r.c2d_operator_name, ''))"
 
-# Шесть агрегатов в порядке _chat_billing_metrics_row. Один %s — порог SL, поэтому
-# параметры запроса всегда начинаются с него.
+# Восемь агрегатов в порядке _chat_billing_metrics_row над выборкой _chat_billing_source.
+# Один %s — порог SL, поэтому параметры запроса всегда начинаются с него.
+#   counted — строка идёт в «поступило» (у разреза по сотрудникам Syntony — он отвечал в эти
+#   сутки); answered — обслужено; first_reply — первый ответ (у Chat2Desk reaction_time);
+#   is_new — в базу SL (у Chat2Desk каждое обращение, у Syntony — начатый в эти сутки диалог).
 _CHAT_BILLING_METRICS_SQL = """
-    COUNT(*)::int,
-    COUNT(r.reaction_time)::int,
-    COUNT(*) FILTER (WHERE r.reaction_time <= %s)::int,
-    COALESCE(SUM(r.reaction_time), 0)::float,
-    COALESCE(SUM(r.average_replies_time), 0)::float,
-    COUNT(r.average_replies_time)::int
+    COUNT(*) FILTER (WHERE r.counted)::int,
+    COUNT(*) FILTER (WHERE r.counted AND r.answered)::int,
+    COUNT(*) FILTER (WHERE r.first_reply <= %s)::int,
+    COALESCE(SUM(r.first_reply), 0)::float,
+    COUNT(r.first_reply)::int,
+    COUNT(*) FILTER (WHERE r.is_new)::int,
+    COALESCE(SUM(r.inner_reply), 0)::float,
+    COUNT(r.inner_reply)::int
 """
-_CHAT_BILLING_METRICS_SQL_WIDTH = 6
+_CHAT_BILLING_METRICS_SQL_WIDTH = 8
+
+# Колонки выборки биллинга — у обеих половин одни и те же, в этом порядке.
+_CHAT_BILLING_SOURCE_COLUMNS = (
+    "request_id", "day", "request_start", "channel_name", "transport", "client_name",
+    "client_phone", "operator_id", "c2d_operator_name", "counted", "answered", "first_reply",
+    "is_new", "inner_reply", "rating_score", "incoming_messages", "outgoing_messages",
+)
+
+_CHAT_BILLING_C2D_SELECT = """
+    SELECT c.request_id, c.day, c.request_start, c.channel_name, c.transport, c.client_name,
+           c.client_phone, c.operator_id, c.c2d_operator_name, TRUE,
+           (c.reaction_time IS NOT NULL), c.reaction_time::float8, TRUE,
+           c.average_replies_time::float8, c.rating_score::float8, c.incoming_messages,
+           c.outgoing_messages
+      FROM c2d_requests c
+     WHERE c.request_type = %s AND c.request_start IS NOT NULL AND c.day BETWEEN %s AND %s
+       AND {not_test}{window}{kept}
+"""
+
+# Тестовые номера Syntony отсеяны при сборке суток, но реестр пополняется задним числом —
+# проверяем и при чтении, как у Chat2Desk.
+_CHAT_BILLING_SYNTONY_CHATS_SELECT = """
+    SELECT s.id, s.day, s.started_at, s.park, s.transport, s.client_name, s.client_phone,
+           s.operator_id, s.operator_name, TRUE, s.answered, s.first_reply_seconds::float8,
+           s.is_new, s.inner_reply_seconds::float8, NULL::float8, s.incoming_messages,
+           s.outgoing_messages
+      FROM syntony_chat_billing_chats s
+     WHERE s.day BETWEEN %s AND %s AND {not_test}{window}
+"""
+
+# Разрез «Чатники» по Syntony: строка — диалог дня × сотрудник. Чат засчитан каждому, кто
+# отвечал в эти сутки (replied), первый ответ — ответившему первым (правило табло).
+_CHAT_BILLING_SYNTONY_OPERATORS_SELECT = """
+    SELECT NULL::bigint, o.day, o.started_at, o.park, NULL::text, NULL::text, NULL::text,
+           o.operator_id, o.operator_name, o.replied, o.replied, o.first_reply_seconds::float8,
+           (o.first_reply_seconds IS NOT NULL), o.inner_reply_seconds::float8, NULL::float8,
+           o.incoming_messages, o.outgoing_messages
+      FROM syntony_chat_billing_operators o
+     WHERE o.day BETWEEN %s AND %s{window}
+"""
+
+_NOT_TEST_SQL_C = test_keys.sql_not_test_any('c.client_phone', 'c.assigned_phone', digits=True)
+_NOT_TEST_SQL_S = test_keys.sql_not_test('s.client_phone')
 
 
-def _chat_billing_window(day_from: date, day_to: date,
-                         minute_from: int, minute_to: int) -> Tuple[str, List[Any]]:
-    """Общий WHERE биллинга: период по дню плюс окно времени суток по началу чата.
-
-    Окно накладывается только когда оно уже полных суток: лишнее условие в WHERE
-    отрезает индекс по `day` и заставляет читать таблицу целиком.
-    """
-    where = ["r.request_type = %s", "r.request_start IS NOT NULL", "r.day BETWEEN %s AND %s",
-             _NOT_TEST_SQL_R]
-    params: List[Any] = [CHAT_REQUEST_TYPE, day_from, day_to]
+def _chat_billing_minute_window(column: str, minute_from: int, minute_to: int
+                                ) -> Tuple[str, List[Any]]:
+    """Окно времени суток по началу чата. Только когда оно уже полных суток: лишнее
+    условие в WHERE отрезает индекс по `day` и заставляет читать таблицу целиком."""
     if int(minute_from) > 0 or int(minute_to) < 1439:
-        where.append("(EXTRACT(HOUR FROM r.request_start)::int * 60"
-                     " + EXTRACT(MINUTE FROM r.request_start)::int) BETWEEN %s AND %s")
-        params.extend([int(minute_from), int(minute_to)])
-    return " AND ".join(where), params
+        return ((f" AND (EXTRACT(HOUR FROM {column})::int * 60"
+                 f" + EXTRACT(MINUTE FROM {column})::int) BETWEEN %s AND %s"),
+                [int(minute_from), int(minute_to)])
+    return "", []
+
+
+def _chat_billing_source(day_from: date, day_to: date, minute_from: int, minute_to: int,
+                         *, people: bool = False,
+                         syntony_from: Optional[date] = None) -> Tuple[str, List[Any]]:
+    """FROM-выражение «выборка биллинга r» за период → (sql, параметры).
+
+    До syntony_from — обращения Chat2Desk, с него — чаты дня Syntony (people=True — разрез
+    по сотрудникам) и обращения тех номеров Chat2Desk, что ещё не переехали
+    (chat_billing_c2d_keep_channel_ids). Половина вне периода в запрос не попадает вовсе.
+    """
+    cutover = syntony_from or chat_billing_syntony_from()
+    kept_ids = list(chat_billing_c2d_keep_channel_ids())
+    parts: List[str] = []
+    params: List[Any] = []
+    c2d_to = day_to if kept_ids else min(day_to, cutover - timedelta(days=1))
+    if day_from <= c2d_to:
+        window, window_params = _chat_billing_minute_window("c.request_start", minute_from, minute_to)
+        kept = ""
+        kept_params: List[Any] = []
+        if day_to >= cutover and kept_ids:
+            kept = " AND (c.day < %s OR c.channel_id = ANY(%s))"
+            kept_params = [cutover, kept_ids]
+        parts.append(_CHAT_BILLING_C2D_SELECT.format(not_test=_NOT_TEST_SQL_C, window=window,
+                                                     kept=kept))
+        params += [CHAT_REQUEST_TYPE, day_from, c2d_to] + window_params + kept_params
+    if day_to >= cutover:
+        if people:
+            window, window_params = _chat_billing_minute_window("o.started_at", minute_from, minute_to)
+            parts.append(_CHAT_BILLING_SYNTONY_OPERATORS_SELECT.format(window=window))
+        else:
+            window, window_params = _chat_billing_minute_window("s.started_at", minute_from, minute_to)
+            parts.append(_CHAT_BILLING_SYNTONY_CHATS_SELECT.format(not_test=_NOT_TEST_SQL_S,
+                                                                    window=window))
+        params += [max(day_from, cutover), day_to] + window_params
+    if not parts:
+        parts.append("SELECT " + ", ".join("NULL" for _ in _CHAT_BILLING_SOURCE_COLUMNS)
+                     + " WHERE FALSE")
+    return ("(" + " UNION ALL ".join(parts) + ") r(" + ", ".join(_CHAT_BILLING_SOURCE_COLUMNS) + ")",
+            params)
 
 
 def _chat_billing_blank(metrics: Tuple[str, ...]) -> Dict[str, int]:
@@ -2008,8 +2134,8 @@ def _chat_billing_merge(target: Dict[str, int], row: Dict[str, int],
 
 
 def _chat_billing_metrics_row(values: Tuple[Any, ...]) -> Dict[str, Any]:
-    """Счётчики из шести агрегатов _CHAT_BILLING_METRICS_SQL."""
-    (chats, answered, answered_sl, reply_sum,
+    """Счётчики из восьми агрегатов _CHAT_BILLING_METRICS_SQL."""
+    (chats, answered, answered_sl, reply_sum, first_replied, sl_base,
      inner_sum, inner_replied) = values
     chats = max(0, int(chats or 0))
     answered = max(0, int(answered or 0))
@@ -2021,6 +2147,10 @@ def _chat_billing_metrics_row(values: Tuple[Any, ...]) -> Dict[str, Any]:
         "no_reply": max(0, chats - answered),
         "answered_sl": max(0, int(answered_sl or 0)),
         "first_reply_seconds": int(round(_to_float(reply_sum, 0.0))),
+        # Знаменатели первого ответа и SL. У Chat2Desk — «обслужено» и «поступило»; у Syntony
+        # первый ответ и SL меряются только по диалогам, начатым в эти сутки.
+        "first_replied": max(0, int(first_replied or 0)),
+        "sl_base": max(0, int(sl_base or 0)),
         "inner_reply_seconds": int(round(_to_float(inner_sum, 0.0))),
         "inner_replied": max(0, int(inner_replied or 0)),
     }
@@ -2030,7 +2160,7 @@ def _chat_billing_rows_tx(cursor, day_from: date, day_to: date, minute_from: int
                           minute_to: int, sl_seconds: int,
                           group_by: str) -> List[Tuple[Any, ...]]:
     """Строки (день x парк [x транспорт]) за период."""
-    where, params = _chat_billing_window(day_from, day_to, minute_from, minute_to)
+    source, params = _chat_billing_source(day_from, day_to, minute_from, minute_to)
     transport_sql = _CHAT_BILLING_TRANSPORT_SQL if group_by == "transport" else "''"
     cursor.execute(
         f"""
@@ -2038,8 +2168,7 @@ def _chat_billing_rows_tx(cursor, day_from: date, day_to: date, minute_from: int
                {_CHAT_BILLING_PARK_SQL} AS park,
                {transport_sql} AS transport_name,
                {_CHAT_BILLING_METRICS_SQL}
-        FROM c2d_requests r
-        WHERE {where}
+        FROM {source}
         GROUP BY 1, 2, 3
         ORDER BY 1, 2, 3
         """,
@@ -2100,21 +2229,21 @@ def get_chat_billing_operators(db, day_from: date, day_to: date, minute_from: in
     """{days, operators, totals} — тот же разрез, но по чатникам.
 
     Имя берём из нашей карточки, а если чат ещё не привязан к человеку — из
-    Chat2Desk. Непривязанные чаты в разрез по людям не попадают: они не про то,
-    как работал конкретный чатник.
+    Chat2Desk (у Syntony — имя автора ответов). Непривязанные чаты в разрез по людям
+    не попадают: они не про то, как работал конкретный чатник.
     """
-    where, params = _chat_billing_window(day_from, day_to, minute_from, minute_to)
+    source, params = _chat_billing_source(day_from, day_to, minute_from, minute_to, people=True)
     with db._get_cursor() as cursor:
         cursor.execute(
             f"""
             SELECT r.day,
                    {_CHAT_BILLING_OPERATOR_SQL} AS operator_name,
                    {_CHAT_BILLING_METRICS_SQL},
-                   COALESCE(SUM(r.incoming_messages), 0)::int,
+                   COALESCE(SUM(r.incoming_messages) FILTER (WHERE r.counted), 0)::int,
                    COALESCE(SUM(r.outgoing_messages), 0)::int
-            FROM c2d_requests r
+            FROM {source}
             LEFT JOIN users u ON u.id = r.operator_id
-            WHERE {where} AND {_CHAT_BILLING_OPERATOR_SQL} IS NOT NULL
+            WHERE {_CHAT_BILLING_OPERATOR_SQL} IS NOT NULL
             GROUP BY 1, 2
             ORDER BY 1, 2
             """,
@@ -2212,15 +2341,14 @@ def build_chat_billing_grouping(raw_rows: List[Tuple[Any, ...]], minute_from: in
 def _chat_billing_grouping_rows_tx(cursor, day_from: date, day_to: date, minute_from: int,
                                    minute_to: int, sl_seconds: int) -> List[Tuple[Any, ...]]:
     """Строки (день x час начала x парк) за период — одним запросом на все парки."""
-    where, params = _chat_billing_window(day_from, day_to, minute_from, minute_to)
+    source, params = _chat_billing_source(day_from, day_to, minute_from, minute_to)
     cursor.execute(
         f"""
         SELECT r.day,
                EXTRACT(HOUR FROM r.request_start)::int AS hour,
                {_CHAT_BILLING_PARK_SQL} AS park,
                {_CHAT_BILLING_METRICS_SQL}
-        FROM c2d_requests r
-        WHERE {where}
+        FROM {source}
         GROUP BY 1, 2, 3
         ORDER BY 1, 2, 3
         """,
@@ -2319,12 +2447,11 @@ def _chat_billing_plan_base_tx(cursor, day_from: date, day_to: date, minute_from
     База плана — «факт (чатов)» итога дня неделей раньше, поэтому считается тем же
     WHERE, что и факт. День без обращений в базе отсутствует: плана на него нет."""
     shift = timedelta(days=CHAT_BILLING_PLAN_BASE_DAYS_BACK)
-    where, params = _chat_billing_window(day_from - shift, day_to - shift, minute_from, minute_to)
+    source, params = _chat_billing_source(day_from - shift, day_to - shift, minute_from, minute_to)
     cursor.execute(
         f"""
-        SELECT r.day, COUNT(*)::int
-        FROM c2d_requests r
-        WHERE {where}
+        SELECT r.day, COUNT(*) FILTER (WHERE r.counted)::int
+        FROM {source}
         GROUP BY 1
         """,
         params,
@@ -2333,8 +2460,28 @@ def _chat_billing_plan_base_tx(cursor, day_from: date, day_to: date, minute_from
             for day_value, count in cursor.fetchall() if count}
 
 
-def _chat_billing_fact_staff_tx(cursor, day_from: date, day_to: date) -> List[Tuple[Any, ...]]:
-    """(день, час, чатник, секунды онлайн) — те же сегменты, что факт чатнико-часов раздела."""
+def _chat_billing_fact_staff_tx(cursor, day_from: date, day_to: date,
+                                syntony_from: Optional[date] = None) -> List[Tuple[Any, ...]]:
+    """(день, час, чатник, секунды онлайн).
+
+    До syntony_from — те же сегменты статусов Chat2Desk, что факт чатнико-часов раздела; с
+    него — секунды «Онлайн» Syntony из сборки суток (syntony_chats/billing.py; за сутки без
+    статусов там онлайн по ответам за 15 минут).
+    """
+    cutover = syntony_from or chat_billing_syntony_from()
+    rows: List[Tuple[Any, ...]] = []
+    if day_to >= cutover:
+        cursor.execute(
+            """
+            SELECT day, hour::int, operator_id, online_seconds::float
+              FROM syntony_chat_billing_staff
+             WHERE day BETWEEN %s AND %s
+            """,
+            (max(day_from, cutover), day_to),
+        )
+        rows.extend(cursor.fetchall())
+    if day_from >= cutover:
+        return rows
     cursor.execute(
         """
         SELECT (g.slot)::date AS d,
@@ -2358,9 +2505,11 @@ def _chat_billing_fact_staff_tx(cursor, day_from: date, day_to: date) -> List[Tu
         GROUP BY 1, 2, 3
         """,
         (CHAT_ONLINE_STATUS_KEY, CHAT_DIRECTION_NAME_PATTERN,
-         day_from - timedelta(days=1), day_to),
+         day_from - timedelta(days=1), min(day_to, cutover - timedelta(days=1))),
     )
-    return cursor.fetchall()
+    # Ночная смена накануне перехода вылезает в его сутки — их считает Syntony.
+    rows.extend(row for row in cursor.fetchall() if row[0] is None or row[0] < cutover)
+    return rows
 
 
 def _chat_billing_planned_staff(db, day: date) -> Optional[Dict[str, List[Any]]]:
@@ -2760,8 +2909,11 @@ def get_chat_billing_daily(db, day_from: date, day_to: date, minute_from: int = 
 
 def _chat_billing_detail_row(raw: Tuple[Any, ...], sl_seconds: int) -> Dict[str, Any]:
     (request_id, started_at, park, transport_name, client, client_number, operator_name,
-     reply_seconds, inner_reply_seconds, rating, incoming, outgoing) = raw
-    answered = reply_seconds is not None
+     answered, reply_seconds, inner_reply_seconds, rating, incoming, outgoing) = raw
+    # У Syntony «обслужено» не равно «есть первый ответ»: продолжение вчерашнего диалога
+    # отвечено, а первого ответа у него нет — он был в день начала диалога.
+    answered = bool(answered)
+    has_first = reply_seconds is not None
     return {
         "id": int(request_id or 0),
         "started_at": started_at.strftime("%Y-%m-%d %H:%M:%S") if started_at else "",
@@ -2772,12 +2924,12 @@ def _chat_billing_detail_row(raw: Tuple[Any, ...], sl_seconds: int) -> Dict[str,
         # но сервер его не отдавал, и колонка всегда стояла пустой.
         "client_number": str(client_number or ""),
         "operator": str(operator_name or ""),
-        "first_reply_seconds": int(reply_seconds) if answered else None,
+        "first_reply_seconds": int(round(float(reply_seconds))) if has_first else None,
         "inner_reply_seconds": (float(inner_reply_seconds)
                                 if inner_reply_seconds is not None else None),
         "rating": float(rating) if rating is not None else None,
         "no_reply": 0 if answered else 1,
-        "answered_sl": 1 if answered and int(reply_seconds) <= int(sl_seconds) else 0,
+        "answered_sl": 1 if has_first and float(reply_seconds) <= int(sl_seconds) else 0,
         "incoming_messages": max(0, int(incoming or 0)),
         "outgoing_messages": max(0, int(outgoing or 0)),
     }
@@ -2791,8 +2943,9 @@ _CHAT_BILLING_DETAIL_SELECT = f"""
     COALESCE(NULLIF(r.client_name, ''), '') AS client,
     COALESCE(NULLIF(r.client_phone, ''), '') AS client_number,
     COALESCE({_CHAT_BILLING_OPERATOR_SQL}, '') AS operator_name,
-    r.reaction_time,
-    r.average_replies_time,
+    r.answered,
+    r.first_reply,
+    r.inner_reply,
     r.rating_score,
     r.incoming_messages,
     r.outgoing_messages
@@ -2807,21 +2960,23 @@ def get_chat_billing_details(db, day_from: date, day_to: date, minute_from: int 
     """Одна строка = один чат. Снимок по максимальному `request_id` держит выборку.
 
     Без снимка ночной синк Chat2Desk дописывает свежие чаты между переходами по
-    страницам, и уже просмотренные строки съезжают вниз.
+    страницам, и уже просмотренные строки съезжают вниз. У Syntony строка — чат дня, её id
+    из своей последовательности (с 5·10^12, выше любого request_id) и не меняется от пересборки.
     """
     page = max(1, int(page))
     low, high = CHAT_BILLING_PER_PAGE_LIMITS
     per_page = max(low, min(high, int(per_page)))
-    where, params = _chat_billing_window(day_from, day_to, minute_from, minute_to)
+    source, params = _chat_billing_source(day_from, day_to, minute_from, minute_to)
+    where = "TRUE"
     if snapshot_id is not None:
-        where += " AND r.request_id <= %s"
+        where = "r.request_id <= %s"
         params = params + [int(snapshot_id)]
 
     with db._get_cursor() as cursor:
         # Счётчик отдельным запросом, а не окном COUNT(*) OVER(): на странице за
         # хвостом выборки окно не возвращает ни строки, и общее число обнуляется.
         cursor.execute(
-            f"SELECT COUNT(*)::int, MAX(r.request_id) FROM c2d_requests r WHERE {where}",
+            f"SELECT COUNT(*)::int, MAX(r.request_id) FROM {source} WHERE {where}",
             params)
         head = cursor.fetchone() or (0, None)
         total = int(head[0] or 0)
@@ -2830,7 +2985,7 @@ def get_chat_billing_details(db, day_from: date, day_to: date, minute_from: int 
         cursor.execute(
             f"""
             SELECT {_CHAT_BILLING_DETAIL_SELECT}
-            FROM c2d_requests r
+            FROM {source}
             LEFT JOIN users u ON u.id = r.operator_id
             WHERE {where}
             ORDER BY r.request_start DESC, r.request_id DESC
@@ -2858,14 +3013,13 @@ def get_chat_billing_detail_export_rows(db, day_from: date, day_to: date,
                                         limit: int = CHAT_BILLING_DETAIL_EXPORT_LIMIT
                                         ) -> List[Dict[str, Any]]:
     """Построчная детализация для выгрузки: свежие чаты сверху, с потолком строк."""
-    where, params = _chat_billing_window(day_from, day_to, minute_from, minute_to)
+    source, params = _chat_billing_source(day_from, day_to, minute_from, minute_to)
     with db._get_cursor() as cursor:
         cursor.execute(
             f"""
             SELECT {_CHAT_BILLING_DETAIL_SELECT}
-            FROM c2d_requests r
+            FROM {source}
             LEFT JOIN users u ON u.id = r.operator_id
-            WHERE {where}
             ORDER BY r.request_start DESC, r.request_id DESC
             LIMIT %s
             """,

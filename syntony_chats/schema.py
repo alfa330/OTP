@@ -113,6 +113,113 @@ _STATEMENTS = [
     "ON syntony_chat_messages (created_at)",
     "CREATE INDEX IF NOT EXISTS idx_syntony_chat_conversations_created "
     "ON syntony_chat_conversations (created_at)",
+
+    # Статусы операторов сети (метод /operator-statuses, statuses.py): интервал «оператор был в
+    # статусе с … по …», ended_at IS NULL — статус сейчас. Строка переписывается, пока интервал
+    # открыт, потом закрывается один раз. partner_user_ids — id оператора в iCORE (то, что мы
+    # передаём в окно чатов); по нему человек находится без сверки ФИО. Срок хранения — тот же,
+    # что у переписки: часы на линии для биллинга сворачиваются в syntony_chat_billing_staff.
+    """
+    CREATE TABLE IF NOT EXISTS syntony_operator_statuses (
+        id                TEXT PRIMARY KEY,
+        operator_id       TEXT,
+        operator_name     TEXT,
+        partner_user_ids  TEXT[],
+        park_id           TEXT,
+        park_name         TEXT,
+        status_key        TEXT,
+        status_label      TEXT,
+        started_at        TIMESTAMPTZ,
+        ended_at          TIMESTAMPTZ,
+        duration_seconds  INTEGER,
+        extra             JSONB,
+        fetched_at        TIMESTAMPTZ,
+        first_seen_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    ) WITH (fillfactor = 80)
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_syntony_operator_statuses_started "
+    "ON syntony_operator_statuses (started_at)",
+    # Открытые интервалы читает каждый прогон сторожа и каждый снимок табло — их единицы.
+    "CREATE INDEX IF NOT EXISTS idx_syntony_operator_statuses_open "
+    "ON syntony_operator_statuses (started_at) WHERE ended_at IS NULL",
+
+    # Биллинг чата по Syntony (billing.py): переписка хранится 30 дней, а биллинг смотрят за
+    # любой месяц — поэтому сутки сворачиваются в «чат дня», как обращение Chat2Desk в
+    # c2d_requests. Строка — диалог СЗоВ, где водитель писал в эти сутки (правило табло,
+    # решение владельца 24.11.2026). id — из своей последовательности с 5·10^12: снимок
+    # «Детализации» сравнивает его с request_id Chat2Desk (до 10^8), строки одной выборки
+    # не должны сталкиваться. Сутки пересобираются upsert'ом — id строки не меняется.
+    "CREATE SEQUENCE IF NOT EXISTS syntony_chat_billing_id_seq START WITH 5000000000000",
+    """
+    CREATE TABLE IF NOT EXISTS syntony_chat_billing_chats (
+        day                  DATE NOT NULL,
+        conversation_id      TEXT NOT NULL,
+        id                   BIGINT NOT NULL DEFAULT nextval('syntony_chat_billing_id_seq'),
+        park                 TEXT,
+        channel_id           TEXT,
+        channel_name         TEXT,
+        transport            TEXT,
+        client_phone         TEXT,
+        client_name          TEXT,
+        started_at           TIMESTAMP NOT NULL,
+        is_new               BOOLEAN NOT NULL,
+        answered             BOOLEAN NOT NULL,
+        first_reply_seconds  REAL,
+        inner_reply_seconds  REAL,
+        operator_id          INTEGER,
+        operator_name        TEXT,
+        incoming_messages    INTEGER NOT NULL DEFAULT 0,
+        outgoing_messages    INTEGER NOT NULL DEFAULT 0,
+        built_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (day, conversation_id)
+    )
+    """,
+    # Разрез «Чатники»: диалог дня × сотрудник, который в нём отвечал (правило табло: чат
+    # засчитан каждому, кто отвечал; первый ответ — тому, кто ответил первым).
+    """
+    CREATE TABLE IF NOT EXISTS syntony_chat_billing_operators (
+        day                  DATE NOT NULL,
+        conversation_id      TEXT NOT NULL,
+        operator_key         TEXT NOT NULL,
+        operator_id          INTEGER,
+        operator_name        TEXT,
+        park                 TEXT,
+        started_at           TIMESTAMP NOT NULL,
+        -- FALSE — в эти сутки не отвечал, но первый ответ на начатый сегодня чат дал он (после
+        -- полуночи): в первый ответ идёт, в «чаты» сотрудника — нет (правило operator_sums).
+        replied              BOOLEAN NOT NULL DEFAULT TRUE,
+        first_reply_seconds  REAL,
+        inner_reply_seconds  REAL,
+        incoming_messages    INTEGER NOT NULL DEFAULT 0,
+        outgoing_messages    INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, conversation_id, operator_key)
+    )
+    """,
+    # Факт сотрудников «Группировки»: секунды «Онлайн» чатника СЗоВ в часе. source — status
+    # (по статусам Syntony) или replies (статусов за сутки нет — онлайн по ответам за 15 минут,
+    # как табло считало до статусов).
+    """
+    CREATE TABLE IF NOT EXISTS syntony_chat_billing_staff (
+        day             DATE NOT NULL,
+        hour            SMALLINT NOT NULL,
+        operator_id     INTEGER NOT NULL,
+        online_seconds  INTEGER NOT NULL,
+        source          TEXT NOT NULL,
+        PRIMARY KEY (day, hour, operator_id)
+    )
+    """,
+    # Журнал сборки суток: когда собраны и полные ли (сутки закрылись и данные были целиком).
+    """
+    CREATE TABLE IF NOT EXISTS syntony_chat_billing_days (
+        day           DATE PRIMARY KEY,
+        built_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        complete      BOOLEAN NOT NULL DEFAULT FALSE,
+        chats         INTEGER NOT NULL DEFAULT 0,
+        staff_source  TEXT,
+        error         TEXT
+    )
+    """,
 ]
 
 

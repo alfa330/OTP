@@ -36,7 +36,9 @@ BOT_PATH = source_cache.monolith_flat_path()
 
 FUNCTIONS = (
     "_chat_billing_round_half_up", "_chat_billing_minutes", "_chat_billing_minutes_label",
-    "_chat_billing_export_ratio", "_chat_billing_day_comment", "_chat_billing_daily_values",
+    "_chat_billing_export_ratio", "_chat_billing_first_reply_base", "_chat_billing_sl_base",
+    "_chat_billing_avg_first", "_chat_billing_sl", "_chat_billing_day_comment",
+    "_chat_billing_daily_values",
     "_chat_billing_daily_visible_day", "_chat_billing_daily_workbook",
     "_chat_billing_cumulative_values", "_chat_billing_cumulative_sheet_title",
     "_chat_billing_cumulative_sheet", "api_resource_fte_chat_billing_export",
@@ -99,7 +101,10 @@ class _RowsDb:
 
 
 def _row(day, park, chats, answered, answered_sl, reply_sum, inner_sum, inner_replied):
-    return (day, park, "", chats, answered, answered_sl, reply_sum, inner_sum, inner_replied)
+    # Восемь агрегатов выборки биллинга; у Chat2Desk знаменатель первого ответа — обслуженные,
+    # база SL — все поступившие.
+    return (day, park, "", chats, answered, answered_sl, reply_sum, answered, chats, inner_sum,
+            inner_replied)
 
 
 NOV_13, NOV_14 = date(2026, 11, 13), date(2026, 11, 14)

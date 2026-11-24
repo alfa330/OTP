@@ -51,6 +51,9 @@ class FakeSyntony:
         self.conversations = []
         self.threads = {}               # id диалога → сообщения
         self.errors = []                # очередь (путь, ответ), отдаётся раньше обычного
+        # Статусы операторов: None — метода нет (404, как у Syntony 24.11.2026); иначе
+        # cursor (None — первая) → (интервалы, nextCursor).
+        self.status_pages = None
 
     def get(self, url, params=None, headers=None, timeout=None, allow_redirects=True):
         path = urlsplit(url).path.split('/v1', 1)[1]
@@ -74,6 +77,10 @@ class FakeSyntony:
             conversation_id = path.split('/')[2]
             return _Response(200, {'apiVersion': 1, 'conversationId': conversation_id,
                                    'data': self.threads.get(conversation_id, []), 'nextCursor': None})
+        if path == '/operator-statuses' and self.status_pages is not None:
+            items, next_cursor = self.status_pages.get((params or {}).get('cursor'), ([], None))
+            return _Response(200, {'scope': {'parks': [{'id': 'park-1', 'name': 'Центр регистрации'}]},
+                                   'nextCursor': next_cursor, 'data': items})
         return _Response(404, {'error': 'not_found'})
 
 
@@ -229,7 +236,8 @@ def test_first_run_reads_feed_since_midnight_and_conversation_snapshots(db):
     fake.conversations = [CONVERSATION]
     sleeps = []
     summary = sync.run_once(db, environ=ENV, now=NOW, sleep=sleeps.append, session=fake)
-    assert summary == {'feed': (3, 2), 'conversations': 1}
+    # Метода статусов у подставной Syntony нет (как у настоящей 24.11.2026) — чаты это не держит.
+    assert summary == {'feed': (3, 2), 'conversations': 1, 'statuses_stopped': 'not_found'}
     feed_calls = [c for c in fake.calls if c['path'] == '/messages']
     # Полночь по Алматы = 19:00 UTC накануне.
     assert feed_calls[0]['params']['since'] == '2025-11-16T19:00:00Z'
@@ -320,7 +328,7 @@ def test_night_rereads_the_day_and_cleans_old_chats(db):
                                         msg(2, '2025-11-17T15:01:00Z')]
     summary = sync.run_once(db, environ=ENV, now=night, sleep=lambda s: None, session=fake)
     assert summary['reread'] == (1, 2)
-    assert summary['cleanup'] == (1, 1)
+    assert summary['cleanup'] == (1, 1, 0)
     first = db.message('m-0001')
     assert (first['status'], first['read_at'], first['first_seen_via']) == (
         'read', datetime(2025, 11, 17, 15, 30, tzinfo=timezone.utc), 'webhook')
@@ -340,7 +348,7 @@ def test_cleanup_works_in_batches(db, monkeypatch):
         for number in range(5):
             store.upsert_message(cur, rules.message_row(msg(number, '2025-09-01T10:00:00Z'), old, rules.VIA_API))
         store.upsert_message(cur, rules.message_row(msg(9, '2025-11-16T10:00:00Z'), old, rules.VIA_API))
-    assert sync.cleanup(db, now=NOW, days=45) == (5, 0)
+    assert sync.cleanup(db, now=NOW, days=45) == (5, 0, 0)
     assert count(db, 'syntony_chat_messages') == 1
 
 

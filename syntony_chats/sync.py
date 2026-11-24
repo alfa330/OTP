@@ -12,6 +12,8 @@
    свежие статусы и сообщения, записанные задним числом (шаблон рассылки, импорт истории).
 4. Ночью, раз в сутки — убрать переписку старше KEEP_DAYS (30 дней, SYNTONY_CHATS_KEEP_DAYS):
    Syntony хранит историю сама, у нас рабочая копия для отчётов, а диск боевой базы тесный.
+5. Статусы операторов /operator-statuses (statuses.py, 24.11.2026) — своим шагом после чатов:
+   отказ метода (его может не быть, нет прав) чатам не мешает, повтор через 15 минут.
 
 Первый прогон берёт сообщения с начала текущих суток по Алматы — не всю историю сети.
 Повтор того же сообщения ничего не портит (store.py). Транзакция — на страницу, а запрос
@@ -26,7 +28,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import client, rules, store
+from . import client, rules, statuses, store
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,7 @@ MARK_FEED = 'feed_since'
 MARK_CONVERSATIONS = 'conversations_since'
 MARK_REREAD = 'reread_at'
 MARK_CLEANUP = 'cleanup_at'
+MARK_STATUSES_RETRY = 'statuses_retry_at'
 
 
 def is_enabled(environ=None):
@@ -209,10 +212,11 @@ def reread_day(db, config, *, now, sleep, session=None):
 
 
 def cleanup(db, *, now, days):
-    """Шаг 4: переписка старше days — пачками, транзакция на пачку → (сообщений, диалогов)."""
+    """Шаг 4: переписка и статусы старше days — пачками, транзакция на пачку →
+    (сообщений, диалогов, интервалов статусов)."""
     cutoff = now - timedelta(days=days)
     removed = []
-    for delete in (store.delete_old_messages, store.delete_old_conversations):
+    for delete in (store.delete_old_messages, store.delete_old_conversations, statuses.delete_old):
         total = 0
         while True:
             with db._get_cursor() as cursor:
@@ -234,6 +238,28 @@ def night_due(mark, now):
     return mark is None or mark.astimezone(ALMATY).date() < local.date()
 
 
+# Отказы, после которых метод статусов не спрашиваем 15 минут: его нет или нет прав на него.
+# Сеть, лимит, сбой сервиса — повтор следующим прогоном.
+_STATUSES_ABSENT = ('http_401', 'http_403', 'http_404', 'http_405', 'not_found', 'forbidden',
+                    'insufficient_scope', 'invalid_key')
+
+
+def pull_statuses(db, config, *, now, marks, sleep, session=None):
+    """Шаг 5: статусы операторов → (записано, страниц, закрыто) или Stop."""
+    retry_at = marks.get(MARK_STATUSES_RETRY)
+    if retry_at is not None and now < retry_at:
+        return None
+    try:
+        return statuses.pull(db, config, now=now, marks=marks, sleep=sleep, call=_call,
+                             items_of=_items, utcnow=_utcnow, day_start=_day_start,
+                             session=session)
+    except Stop as stop:
+        if stop.code in _STATUSES_ABSENT:
+            with db._get_cursor() as cursor:
+                store.set_mark(cursor, MARK_STATUSES_RETRY, now + statuses.UNAVAILABLE_RETRY)
+        raise
+
+
 def run_once(db, *, environ=None, now=None, sleep=time.sleep, session=None):
     """Один прогон сторожа → сводка или {'skipped': 'not_configured'}."""
     config = client.load_config(environ)
@@ -251,6 +277,13 @@ def run_once(db, *, environ=None, now=None, sleep=time.sleep, session=None):
             summary['reread'] = reread_day(db, config, now=now, sleep=sleep, session=session)
     except Stop as stop:
         summary['stopped'] = stop.code
+    if 'stopped' not in summary:
+        try:
+            pulled = pull_statuses(db, config, now=now, marks=marks, sleep=sleep, session=session)
+            if pulled is not None:
+                summary['statuses'] = pulled
+        except Stop as stop:
+            summary['statuses_stopped'] = stop.code
     if night_due(marks.get(MARK_CLEANUP), now):
         summary['cleanup'] = cleanup(db, now=now, days=keep_days(environ))
     return summary
@@ -263,8 +296,9 @@ class _Journal:
     def __init__(self, clock=time.monotonic):
         self._clock = clock
         self._since = clock()
-        self._totals = {'runs': 0, 'messages': 0, 'pages': 0, 'conversations': 0}
+        self._totals = {'runs': 0, 'messages': 0, 'pages': 0, 'conversations': 0, 'statuses': 0}
         self._last_stop = None
+        self._last_statuses_stop = None
 
     def note(self, summary):
         if summary.get('skipped'):
@@ -275,20 +309,30 @@ class _Journal:
         totals['messages'] += written
         totals['pages'] += pages
         totals['conversations'] += summary.get('conversations', 0)
+        totals['statuses'] += (summary.get('statuses') or (0,))[0]
         stop = summary.get('stopped')
         if stop and stop != self._last_stop:
             logger.warning('Чаты Syntony, забор из API: прогон остановлен — %s', stop)
         self._last_stop = stop
+        # Отказ метода статусов — один раз на смену причины: его 404 шёл бы строкой раз в 15 минут.
+        statuses_stop = summary.get('statuses_stopped')
+        if statuses_stop and statuses_stop != self._last_statuses_stop:
+            logger.warning('Статусы операторов Syntony: метод не отвечает — %s; табло считает '
+                           'онлайн по ответам', statuses_stop)
+        elif 'statuses' in summary and self._last_statuses_stop:
+            logger.info('Статусы операторов Syntony: метод ответил, статусы снова идут')
+        if statuses_stop or 'statuses' in summary:
+            self._last_statuses_stop = statuses_stop
         if 'reread' in summary:
             logger.info('Чаты Syntony, забор из API: ночная перечитка — диалогов %s, '
                         'сообщений записано %s', *summary['reread'])
         if 'cleanup' in summary:
             logger.info('Чаты Syntony, забор из API: убрано старше срока — сообщений %s, '
-                        'диалогов %s', *summary['cleanup'])
+                        'диалогов %s, интервалов статусов %s', *summary['cleanup'])
         if self._clock() - self._since >= SUMMARY_EVERY_SECONDS:
             logger.info('Чаты Syntony, забор из API за час: прогонов %(runs)s, сообщений '
                         'записано %(messages)s (страниц ленты %(pages)s), снимков диалогов '
-                        '%(conversations)s', totals)
+                        '%(conversations)s, интервалов статусов %(statuses)s', totals)
             self._since = self._clock()
             self._totals = dict.fromkeys(totals, 0)
 
