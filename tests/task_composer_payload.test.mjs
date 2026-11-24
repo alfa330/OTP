@@ -306,3 +306,90 @@ test('новая задача повтор шлёт всегда — и без �
   assert.deepEqual(fields.filter(([key]) => RECURRENCE_KEYS.includes(key)),
     [['is_regulation', '0'], ['recurrence_type', ''], ['recurrence_interval', '1']]);
 });
+
+/* ── Чек-лист (HR-2, 24.11.2026) ──
+   Форма слала чек-лист при каждой правке, сервер пересоздавал пункты, и добавленный
+   исполнитель или поправленное описание снимали все отметки, а у пунктов менялись id.
+   Теперь чек-лист уходит, только когда его меняли, и с id пунктов, пришедших с сервера:
+   по ним сервер узнаёт пункт и оставляет его отметку. */
+const CHECKLIST_TASK = {
+  ...FULL,
+  checklist: [
+    { id: 117, title: 'диспетчерская', position: 0, is_required: true, is_done: true, completed_by: 2 },
+    { id: 118, title: 'бэкенд', position: 1, is_required: true, is_done: true, completed_by: 2 },
+    { id: 119, title: 'корп почта', position: 2, is_required: true, is_done: false },
+  ],
+};
+
+test('правка без смены чек-листа его не шлёт: ни тема, ни новый исполнитель', () => {
+  const form = toForm(CHECKLIST_TASK, 22);
+  assert.deepEqual(form.checklistItems, [
+    { id: 117, title: 'диспетчерская', is_required: true },
+    { id: 118, title: 'бэкенд', is_required: true },
+    { id: 119, title: 'корп почта', is_required: true },
+  ]);
+  assert.equal('checklist_items' in payloadOf({ ...form, subject: 'Увольнение' }), false);
+  assert.equal('checklist_items' in payloadOf({ ...form, assigneeIds: ['98', '99'] }), false);
+  assert.equal('checklist_items' in payloadOf({ ...form, description: 'закрыть доступы' }), false);
+});
+
+test('правленный чек-лист уходит целиком, с id пунктов с сервера', () => {
+  const form = toForm(CHECKLIST_TASK, 22);
+  const renamed = payloadOf({
+    ...form,
+    checklistItems: form.checklistItems.map((item) => (item.id === 119 ? { ...item, title: 'корпоративная почта' } : item)),
+  });
+  assert.deepEqual(renamed.checklist_items, [
+    { id: 117, title: 'диспетчерская', is_required: true },
+    { id: 118, title: 'бэкенд', is_required: true },
+    { id: 119, title: 'корпоративная почта', is_required: true },
+  ]);
+  const added = payloadOf({ ...form, checklistItems: [...form.checklistItems, { title: 'прокси', is_required: true }] });
+  assert.deepEqual(added.checklist_items.map((item) => [item.id || null, item.title]),
+    [[117, 'диспетчерская'], [118, 'бэкенд'], [119, 'корп почта'], [null, 'прокси']]);
+  const optional = payloadOf({
+    ...form,
+    checklistItems: form.checklistItems.map((item) => (item.id === 118 ? { ...item, is_required: false } : item)),
+  });
+  assert.equal(optional.checklist_items[1].is_required, false);
+  // Убрали все пункты — уходит пустой список: так чек-лист снимают.
+  const cleared = payloadOf({ ...form, checklistItems: [{ title: '', is_required: true }] });
+  assert.deepEqual(cleared.checklist_items, []);
+});
+
+test('пустая строка, добавленная и не заполненная, — не правка чек-листа', () => {
+  const form = toForm(CHECKLIST_TASK, 22);
+  const payload = payloadOf({ ...form, checklistItems: [...form.checklistItems, { title: '  ', is_required: true }] });
+  assert.equal('checklist_items' in payload, false);
+});
+
+test('быстрая правка закреплённой из слепка без чек-листа его не стирает', () => {
+  const unknown = toForm(SNAPSHOT, 22);
+  assert.equal(unknown.initialChecklist, null);
+  assert.equal('checklist_items' in payloadOf({ ...unknown, subject: 'тема из слепка' }), false);
+  // Даже если в такой форме что-то вписали в чек-лист — не уходит: сервер принял бы
+  // это за весь чек-лист и убрал бы пункты, которых слепок не знал.
+  const typed = payloadOf({ ...unknown, checklistItems: [{ title: 'акт', is_required: true }] });
+  assert.equal('checklist_items' in typed, false);
+  // Слепок с чек-листом: добавленный пункт уходит вместе с нынешними, а не вместо них.
+  const form = toForm({ ...SNAPSHOT, checklist: CHECKLIST_TASK.checklist }, 22);
+  const added = payloadOf({ ...form, checklistItems: [...form.checklistItems, { title: 'акт', is_required: true }] });
+  assert.deepEqual(added.checklist_items.map((item) => item.id || null), [117, 118, 119, null]);
+  // Пустой чек-лист — известно, что пунктов нет: первый пункт уходит.
+  const empty = toForm({ ...SNAPSHOT, checklist: [] }, 22);
+  assert.equal(empty.initialChecklist, '[]');
+  assert.deepEqual(payloadOf({ ...empty, checklistItems: [{ title: 'акт', is_required: true }] }).checklist_items,
+    [{ title: 'акт', is_required: true }]);
+});
+
+test('новая задача чек-лист шлёт всегда — и в JSON, и формой раздела', () => {
+  const plain = payloadOf(emptyForm({ subject: 'н', assigneeIds: ['98'] }));
+  assert.deepEqual(plain.checklist_items, []);
+  const withItems = payloadOf(emptyForm({
+    subject: 'н', assigneeIds: ['98'], checklistItems: [{ title: 'а', is_required: true }, { title: 'б', is_required: false }],
+  }));
+  assert.deepEqual(withItems.checklist_items, [{ title: 'а', is_required: true }, { title: 'б', is_required: false }]);
+  const fields = multipartOf(emptyForm({ subject: 'н', assigneeIds: ['98'], checklistItems: [{ title: 'а', is_required: true }] }));
+  assert.deepEqual(fields.filter(([key]) => key === 'checklist_items'),
+    [['checklist_items', JSON.stringify([{ title: 'а', is_required: true }])]]);
+});

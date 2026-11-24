@@ -1186,8 +1186,7 @@ def cmd_check(client, args):
     if item.get('result_note'):
         print(f'  результат: {item["result_note"]}')
     # Отметка чек-листа уходит в Telegram всем участникам задачи — это не тихая правка.
-    if result.get('warning'):
-        print(f'warning: {result["warning"]}')
+    # Недоставку уведомления сервер пишет в свой журнал, в ответ её не кладёт (HR-2, 24.11.2026).
 
 
 def cmd_inbox(client, args):

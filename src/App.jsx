@@ -258,6 +258,17 @@ const compactPinnedTaskForStorage = (task) => {
             name: task.project.name || '',
         } : null,
         key: task.key || null,
+        // Чек-лист (HR-2, 24.11.2026): быстрая правка из слепка, где его нет, не
+        // знала бы нынешних пунктов, и добавленный в ней пункт заменил бы их все.
+        checklist: Array.isArray(task.checklist)
+            ? task.checklist.filter(Boolean).map((item) => ({
+                id: item.id,
+                title: item.title || '',
+                position: item.position,
+                is_required: item.is_required !== false,
+                is_done: Boolean(item.is_done),
+            }))
+            : null,
     };
 };
 
@@ -47842,10 +47853,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             .map((row) => Number(row?.id || 0) === itemId ? { ...row, ...updatedItem } : row)
                     }));
                     showToast(isDone ? 'Пункт чек-листа выполнен' : 'Пункт чек-листа открыт', 'success');
-                    if (response?.data?.warning) showToast(response.data.warning, 'error');
                     setTaskRefreshToken((prev) => prev + 1);
                 } catch (error) {
                     showToast(error?.response?.data?.error || 'Не удалось обновить чек-лист', 'error');
+                    // Пункта уже нет — чек-лист поменяли: показываем нынешний. Новый
+                    // taskRefreshToken перечитывает и закреплённую задачу, и раздел.
+                    if (error?.response?.status === 404) setTaskRefreshToken((prev) => prev + 1);
                 } finally {
                     setPinnedTaskActionLoadingKey('');
                 }

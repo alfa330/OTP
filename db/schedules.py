@@ -3587,12 +3587,22 @@ class SchedulesMixin:
         normalized = []
         seen = set()
         for raw_item in checklist_items:
+            item_id = None
             if isinstance(raw_item, str):
                 title = raw_item.strip()
                 is_required = True
             elif isinstance(raw_item, dict):
                 title = str(raw_item.get('title') or raw_item.get('text') or '').strip()
                 is_required = bool(raw_item.get('is_required', True))
+                # id пункта, пришедшего с сервера: по нему правка узнаёт пункт и
+                # сохраняет его отметку (HR-2, task_checklist.plan_sync). При
+                # создании задачи не используется.
+                try:
+                    item_id = int(raw_item.get('id') or 0) or None
+                except (TypeError, ValueError):
+                    item_id = None
+                if item_id is not None and item_id < 0:
+                    item_id = None
             else:
                 continue
             if not title:
@@ -3603,6 +3613,7 @@ class SchedulesMixin:
                 continue
             seen.add(dedup_key)
             normalized.append({
+                "id": item_id,
                 "title": title,
                 "position": len(normalized),
                 "is_required": is_required

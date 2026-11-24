@@ -4444,13 +4444,22 @@ const normalizeChecklistItems = (items) => {
       const key = title.toLocaleLowerCase('ru-RU');
       if (seen.has(key)) return null;
       seen.add(key);
+      /* id пункта, пришедшего с сервера: по нему правка узнаёт пункт и не
+         снимает его отметку, даже если пункт переименовали (HR-2, 24.11.2026). */
+      const id = typeof item === 'object' ? Number(item?.id || 0) : 0;
       return {
+        ...(id > 0 ? { id } : {}),
         title,
         is_required: typeof item === 'object' ? item?.is_required !== false : true,
       };
     })
     .filter(Boolean);
 };
+
+/* Чек-лист — как его видит правка: какие пункты, в каком порядке, обязательны ли. */
+const checklistKey = (items) => JSON.stringify(
+  normalizeChecklistItems(items).map((item) => [item.id || 0, item.title, item.is_required]),
+);
 
 const checklistToFormItems = (items) => {
   const normalized = normalizeChecklistItems(items);
@@ -4708,6 +4717,8 @@ const EMPTY_TASK_FORM = {
   recurrenceType: '',
   recurrenceInterval: '1',
   checklistItems: [],
+  // С каким чек-листом задача пришла в правку ('' — новая задача, шлём всегда).
+  initialChecklist: '',
   isBacklog: false,
   estimateMinutes: '',
   requestedById: '',
@@ -4766,6 +4777,10 @@ const taskToTaskForm = (task, fallbackAssignedTo = '') => {
     recurrenceType: task?.recurrence_type || '',
     recurrenceInterval: String(task?.recurrence_interval || '1'),
     checklistItems: checklistToFormItems(task?.checklist),
+    /* null — чек-лист задачи неизвестен: слепок закреплённой задачи, записанный
+       прежней версией (без чек-листа), до первой синхронизации. Пустой массив —
+       пунктов правда нет. */
+    initialChecklist: Array.isArray(task?.checklist) ? checklistKey(task.checklist) : null,
     isBacklog: Boolean(task?.is_backlog),
     estimateMinutes: task?.estimate_minutes ? String(task.estimate_minutes) : '',
     requestedById: task?.requested_by?.id ? String(task.requested_by.id) : '',
@@ -4792,6 +4807,19 @@ const sameIdSet = (left, right) => {
 };
 
 const formChecklistItems = (items) => normalizeChecklistItems(items);
+
+/* Чек-лист уходит, только когда его меняли: у новой задачи — всегда (исходного
+   нет), в правке — против того, с чем задача пришла (HR-2, 24.11.2026). Прежняя
+   форма слала его при каждой правке, сервер пересоздавал пункты, и добавленный
+   исполнитель или поправленное описание снимали все отметки. Чек-лист задачи
+   неизвестен (initialChecklist null — слепок без него) — не уходит вовсе: сервер
+   принял бы присланное за весь чек-лист и убрал бы пункты, которых форма не знала. */
+const checklistPayload = (values) => {
+  if (values?.initialChecklist === null) return {};
+  return values?.initialChecklist && values.initialChecklist === checklistKey(values.checklistItems)
+    ? {}
+    : { checklist_items: formChecklistItems(values.checklistItems) };
+};
 
 const numberFieldValue = (value) => {
   const num = Number(value);
@@ -4878,7 +4906,7 @@ const buildTaskJsonPayload = (values) => ({
   assignee_ids: (values.assigneeIds || []).map(Number).filter((id) => id > 0),
   ...deadlinePayload(values),
   ...recurrencePayload(values),
-  checklist_items: formChecklistItems(values.checklistItems),
+  ...checklistPayload(values),
   estimate_minutes: numberFieldValue(values.estimateMinutes),
   // Пустые оба поля = своя инициатива; id имеет приоритет над свободным текстом.
   requested_by_id: values.requestedById ? String(values.requestedById) : '',
@@ -4914,7 +4942,7 @@ const appendTaskFormData = (body, values) => {
     body.append('recurrence_type', payload.recurrence_type);
     body.append('recurrence_interval', payload.recurrence_interval);
   }
-  body.append('checklist_items', JSON.stringify(payload.checklist_items));
+  if (payload.checklist_items) body.append('checklist_items', JSON.stringify(payload.checklist_items));
   body.append('estimate_minutes', payload.estimate_minutes);
   body.append('is_backlog', values.isBacklog ? '1' : '0');
   body.append('requested_by_id', payload.requested_by_id);
@@ -8838,15 +8866,19 @@ export const PinnedTaskWidget = React.memo(({
         )}
       </div>
       )}
-      <div className="tv-form-field">
-        <label>Чек-лист</label>
-        <ChecklistDraftEditor
-          compact
-          items={quickForm.checklistItems}
-          disabled={quickFormLoading}
-          onChange={updateQuickFormChecklist}
-        />
-      </div>
+      {/* Чек-лист задачи ещё неизвестен (слепок без него, до синхронизации) — его не
+          правят: присланный список сервер принял бы за весь чек-лист. */}
+      {quickForm.initialChecklist !== null && (
+        <div className="tv-form-field">
+          <label>Чек-лист</label>
+          <ChecklistDraftEditor
+            compact
+            items={quickForm.checklistItems}
+            disabled={quickFormLoading}
+            onChange={updateQuickFormChecklist}
+          />
+        </div>
+      )}
       {quickFormMode === 'create' ? (
         <div className="tv-form-field">
           <label>Вложения</label>
@@ -10190,13 +10222,15 @@ const TasksView = ({
           .map((row) => Number(row?.id || 0) === itemId ? { ...row, ...updatedItem } : row)
       }));
       notify(isDone ? 'Пункт чек-листа выполнен' : 'Пункт чек-листа открыт');
-      if (res?.data?.warning) notify(res.data.warning, 'error');
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось обновить чек-лист', 'error');
+      // Пункта уже нет — чек-лист поменяли, пока задача была открыта: показываем
+      // нынешний, иначе следующая галочка снова ушла бы мимо.
+      if (e?.response?.status === 404) refreshTasksData();
     } finally {
       setActionLoadingKey('');
     }
-  }, [apiBaseUrl, buildHeaders, notify, patchTaskEverywhere]);
+  }, [apiBaseUrl, buildHeaders, notify, patchTaskEverywhere, refreshTasksData]);
 
   const saveChecklistNote = useCallback(async (task, item, note) => {
     const taskId = Number(task?.id || 0);
@@ -10219,13 +10253,13 @@ const TasksView = ({
           .map((row) => Number(row?.id || 0) === itemId ? { ...row, ...updatedItem } : row)
       }));
       notify('Итог по пункту сохранён');
-      if (res?.data?.warning) notify(res.data.warning, 'error');
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось сохранить итог', 'error');
+      if (e?.response?.status === 404) refreshTasksData();
     } finally {
       setActionLoadingKey('');
     }
-  }, [apiBaseUrl, buildHeaders, notify, patchTaskEverywhere]);
+  }, [apiBaseUrl, buildHeaders, notify, patchTaskEverywhere, refreshTasksData]);
 
   useEffect(() => {
     if (!externalRefreshToken || !user || !canAccessTasks) return;

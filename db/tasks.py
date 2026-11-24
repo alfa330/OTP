@@ -10,10 +10,12 @@ from db.core import (  # noqa: F401
     calendar,
     datetime,
     defaultdict,
+    execute_values,
     Json,
     normalize_role_value,
     role_has_min,
     TASK_PERSONAL_SCOPE_ROLES,
+    task_checklist,
     task_production,
     task_production_queries,
     task_projects,
@@ -1152,6 +1154,81 @@ class TasksMixin:
             """, (task_id, item["title"], item["position"], item["is_required"]))
         return normalized
 
+    def _sync_task_checklist_items_tx(self, cursor, task_id, checklist_items):
+        """Чек-лист из правки задачи — поверх уже отмеченного (HR-2, 24.11.2026).
+
+        Прежде правка удаляла все пункты и вставляла их заново: любая правка задачи
+        снимала все галочки и меняла id пунктов. Теперь пункт узнаётся по id или по
+        названию (task_checklist.plan_sync) и сохраняет отметку, кто и когда её
+        поставил, и итог. Возвращает True, если чек-лист правда поменялся: иначе
+        база не трогается и правка не считается правкой чек-листа.
+        """
+        task_id = int(task_id)
+        incoming = self._normalize_task_checklist_items(checklist_items)
+        # Две правки чек-листа одной задачи разом (двойная отправка, две вкладки)
+        # идут по очереди: вторая ждёт здесь и сверяется уже с записанным первой.
+        # Без этого обе видели прежние пункты и вставляли новый на одно место —
+        # вторая падала на UNIQUE (task_id, position). NO KEY UPDATE — та же
+        # блокировка, что возьмёт UPDATE tasks ниже по правке, и она не держит
+        # чужие вставки со ссылкой на задачу (история, сообщения).
+        cursor.execute("SELECT 1 FROM tasks WHERE id = %s FOR NO KEY UPDATE", (task_id,))
+        # FOR UPDATE: галочка, пришедшая посреди правки, ждёт её конца, а не
+        # отмечает пункт, который эта правка сейчас убирает.
+        cursor.execute("""
+            SELECT id, title, position, is_required
+            FROM task_checklist_items
+            WHERE task_id = %s
+            ORDER BY position, id
+            FOR UPDATE
+        """, (task_id,))
+        current = [
+            {"id": int(row[0]), "title": row[1], "position": int(row[2] or 0), "is_required": bool(row[3])}
+            for row in cursor.fetchall()
+        ]
+        plan = task_checklist.plan_sync(current, incoming)
+        if not plan["changed"]:
+            return False
+
+        if plan["delete"]:
+            cursor.execute(
+                "DELETE FROM task_checklist_items WHERE task_id = %s AND id = ANY(%s)",
+                (task_id, plan["delete"]),
+            )
+        moved = any(item["moved"] for item in plan["keep"])
+        if moved:
+            # UNIQUE (task_id, position) проверяется на каждой строке: два пункта,
+            # поменявшиеся местами, одним UPDATE упали бы на дубле. Сначала уводим
+            # оставшиеся пункты на отрицательные места, потом ставим каждый на своё.
+            cursor.execute(
+                "UPDATE task_checklist_items SET position = -1 - position WHERE task_id = %s",
+                (task_id,),
+            )
+        rows = [
+            (item["id"], task_id, item["title"], item["is_required"], item["position"], item["content_changed"])
+            for item in plan["keep"]
+            if moved or item["content_changed"]
+        ]
+        if rows:
+            # updated_at двигаем только у пункта, у которого поменялись название
+            # или обязательность: переезд на другое место — не правка пункта.
+            execute_values(cursor, """
+                UPDATE task_checklist_items AS ci
+                SET title = v.title,
+                    is_required = v.is_required,
+                    position = v.position,
+                    updated_at = CASE WHEN v.content_changed
+                        THEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                        ELSE ci.updated_at END
+                FROM (VALUES %s) AS v(id, task_id, title, is_required, position, content_changed)
+                WHERE ci.id = v.id AND ci.task_id = v.task_id
+            """, rows)
+        if plan["insert"]:
+            execute_values(cursor, """
+                INSERT INTO task_checklist_items (task_id, title, position, is_required)
+                VALUES %s
+            """, [(task_id, item["title"], item["position"], item["is_required"]) for item in plan["insert"]])
+        return True
+
     def create_task(
             self,
             subject,
@@ -1659,7 +1736,10 @@ class TasksMixin:
                 changed_fields.append("deadline")
             if recurrence_schedule_changed:
                 changed_fields.append("recurrence")
-            if has_checklist:
+            # Чек-лист сверяется с нынешним прямо здесь, в той же транзакции:
+            # пришёл тот же — ничего не пишем и правкой чек-листа не считаем
+            # (иначе каждая правка рассылала бы «изменён чек-лист»).
+            if has_checklist and self._sync_task_checklist_items_tx(cursor, task_id, checklist_items):
                 changed_fields.append("checklist")
             if estimate_minutes_new != current_estimate_minutes:
                 changed_fields.append("estimate")
@@ -1799,10 +1879,6 @@ class TasksMixin:
                     "UPDATE task_assignees SET reminder_sent_at = NULL WHERE task_id = %s",
                     (task_id,)
                 )
-
-            if has_checklist:
-                cursor.execute("DELETE FROM task_checklist_items WHERE task_id = %s", (task_id,))
-                self._insert_task_checklist_items(cursor, task_id, checklist_items)
 
             return {
                 "task_id": task_id,

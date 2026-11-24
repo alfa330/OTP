@@ -127,9 +127,18 @@ def _parse_task_checklist_items(raw_value):
     items = []
     seen = set()
     for raw_item in raw_items:
+        item_id = None
         if isinstance(raw_item, dict):
             title = str(raw_item.get('title') or raw_item.get('text') or '').strip()
             is_required = bool(raw_item.get('is_required', True))
+            # id пункта с сервера: правка узнаёт по нему пункт и не снимает его
+            # отметку (HR-2, 24.11.2026; task_checklist.plan_sync).
+            try:
+                item_id = int(raw_item.get('id') or 0)
+            except (TypeError, ValueError):
+                item_id = None
+            if not item_id or item_id < 0:
+                item_id = None
         else:
             title = str(raw_item or '').strip()
             is_required = True
@@ -140,7 +149,10 @@ def _parse_task_checklist_items(raw_value):
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
-        items.append({"title": title, "is_required": is_required})
+        item = {"title": title, "is_required": is_required}
+        if item_id is not None:
+            item["id"] = item_id
+        items.append(item)
         if len(items) >= 50:
             break
     return items
@@ -2842,14 +2854,20 @@ def build_tasks_blueprint(
             except ValueError as value_error:
                 code = str(value_error)
                 if code == 'CHECKLIST_ITEM_NOT_FOUND':
-                    return jsonify({"error": "Checklist item not found"}), 404
+                    return jsonify({"error": "Этого пункта в чек-листе уже нет: чек-лист задачи изменили"}), 404
                 return jsonify({"error": code}), 400
             except PermissionError as permission_error:
                 code = str(permission_error)
                 if code == 'TASK_FORBIDDEN':
-                    return jsonify({"error": "You do not have access to this task"}), 403
+                    return jsonify({"error": "Нет доступа к задаче"}), 403
                 return jsonify({"error": code}), 403
 
+            # Отметка уже сохранена. Если уведомление кому-то из участников не
+            # дошло, это не ошибка того, кто ставит галочку: исправить это он не
+            # может. А красная плашка после каждой галочки читалась как «не
+            # сохранилось»: человек жал ещё раз и снимал отметку (HR-2, 24.11.2026,
+            # у двух исполнителей в карточке неверный Telegram). Поэтому в ответ не
+            # отдаём, только пишем в журнал сервера.
             telegram_warnings = []
             try:
                 task_ctx = _fetch_task_notification_context(task_id)
@@ -2880,18 +2898,20 @@ def build_tasks_blueprint(
             except Exception as notify_error:
                 telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
 
-            response_payload = {
+            if telegram_warnings:
+                logging.warning(
+                    "Task %s checklist item %s: Telegram notification not delivered: %s",
+                    task_id, item_id, _truncate_for_telegram(" | ".join(telegram_warnings), 1000),
+                )
+            return jsonify({
                 "status": "success",
                 "message": "Checklist item updated",
                 "item": item
-            }
-            if telegram_warnings:
-                response_payload["warning"] = _truncate_for_telegram(" | ".join(telegram_warnings), 1000)
-            return jsonify(response_payload), 200
+            }), 200
 
         except Exception as e:
             logging.error(f"Error in update_task_checklist_item: {e}", exc_info=True)
-            return jsonify({"error": "Internal server error"}), 500
+            return jsonify({"error": "Не удалось отметить пункт чек-листа, попробуйте ещё раз"}), 500
 
     @bp.route('/tasks/attachments/<int:attachment_id>/download', methods=['GET', 'OPTIONS'])
     @require_api_key
