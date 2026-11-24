@@ -223,7 +223,10 @@ TRANSITIONS = {
     (RESPONSES, IN_WORK): {'who': ('recruiter', 'lead'), 'take': True},
     (IN_WORK, INVITED_OFFICE): {'who': ('owner', 'lead'), 'needs_touch': True, 'needs': ('office',)},
     (IN_WORK, INVITED_TRAINING): {'who': ('owner', 'lead'), 'needs_touch': True, 'needs': ('group',)},
-    (IN_WORK, REFUSED): {'who': ('owner', 'lead'), 'needs_touch': True, 'needs': ('refusal',)},
+    # Отказ — без обязательной связи (владелец 24.11.2026: «убрать надобность обязательного обращения в ватсап или по
+    # звонку перед отказом (причины и т.д. обязательны)»; HR-6: кандидат отказался или не подошёл по звонку не с линии, а
+    # статус меняли только после сообщения в WhatsApp). Инициатор и причина по-прежнему обязательны.
+    (IN_WORK, REFUSED): {'who': ('owner', 'lead'), 'needs': ('refusal',)},
     (INVITED_OFFICE, INVITED_TRAINING): {'who': ('owner', 'lead'), 'substage_in': ('came',), 'needs': ('group',)},
     (INVITED_OFFICE, REFUSED): {'who': ('owner', 'lead'), 'needs': ('refusal',)},
     (INVITED_TRAINING, ON_TRAINING): {'who': ('trainer', 'owner', 'lead')},

@@ -438,6 +438,23 @@ class TransitionTests(unittest.TestCase):
             self.check(card, 'refused', ['owner'], payload={'initiator': 'ours'})
         self.assertEqual(caught.exception.code, 'HIRING_NEED_REASON')
 
+    def test_refusal_needs_no_touch_but_still_a_reason(self):
+        """Владелец 24.11.2026: отказ — без обязательного звонка или WhatsApp перед ним, причины обязательны."""
+        card = {'stage': 'in_work', 'recruiter_id': 7}
+        self.check(card, 'refused', ['owner'], has_touch=False, payload={'initiator': 'candidate', 'reason_id': 3})
+        with self.assertRaises(rules.TransitionError) as caught:
+            self.check(card, 'refused', ['owner'], has_touch=False, payload={'reason_id': 3})
+        self.assertEqual(caught.exception.code, 'HIRING_NEED_INITIATOR')
+        with self.assertRaises(rules.TransitionError) as caught:
+            self.check(card, 'refused', ['owner'], has_touch=False, payload={'initiator': 'ours'})
+        self.assertEqual(caught.exception.code, 'HIRING_NEED_REASON')
+        # Приглашения связь по-прежнему требуют.
+        for target, payload in (('invited_office', {'office_visit_at': '2026-11-01T10:00'}), ('invited_training', {'group_id': 1})):
+            with self.assertRaises(rules.TransitionError) as caught:
+                self.check(card, target, ['owner'], has_touch=False, payload=payload)
+            self.assertEqual(caught.exception.code, 'HIRING_NO_TOUCH')
+        self.assertEqual([pair for pair, rule in rules.TRANSITIONS.items() if pair[1] == 'refused' and rule.get('needs_touch')], [])
+
     def test_office_to_training_only_when_came(self):
         card = {'stage': 'invited_office', 'recruiter_id': 7, 'substage': 'no_show'}
         with self.assertRaises(rules.TransitionError) as caught:

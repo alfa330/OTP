@@ -2496,10 +2496,18 @@ def test_whatsapp_our_message_lets_card_leave_in_work(world):
     clock.now = NOW + timedelta(days=1)
     back = service.move(lead, back['id'], 'in_work', {'reactivate': True, 'recruiter_id': REC1})
     with pytest.raises(HiringError) as caught:
-        service.move(me, back['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})
+        service.move(me, back['id'], 'invited_office', office)
     assert caught.value.code == 'HIRING_NO_TOUCH'
     service.wa_events({'events': [wa_event('v2', phone='77055551033', from_me=True, ts=WA_TS + 86400 + 600, text='Вы ещё ищете работу?')]})
-    assert service.move(me, back['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})['stage'] == 'refused'
+    assert service.move(me, back['id'], 'invited_office', office)['stage'] == 'invited_office'
+    # Отказ — без обязательной связи (владелец 24.11.2026), причина и инициатор обязательны: взял и сразу отказал.
+    _outcome, quick = add_response(world, REC1, '8 705 555 10 34')
+    service.take(me, quick['id'])
+    with pytest.raises(HiringError) as caught:
+        service.move(me, quick['id'], 'refused', {'initiator': 'candidate'})
+    assert caught.value.code == 'HIRING_NEED_REASON'
+    refused = service.move(me, quick['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})
+    assert refused['stage'] == 'refused' and refused['close_reason_id'] == no_contact['id']
 
 
 def test_whatsapp_reply_clears_no_answer_and_pool_return_needs_new_contact(world):
