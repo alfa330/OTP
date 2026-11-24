@@ -763,6 +763,16 @@ TEZ_DEFAULT_SETTINGS = {
     "retry_after_hours": 0,
     "retry_schedule_min": [60, 180, 1440],
 }
+# Доля повторов в пачке (владелец, 24.11.2026: «таких повторов до окончания общего списка в выдаваемых пачках
+# должно быть не больше 20%… чтобы операторы не получали пачками повторы»). Повтор — водитель, с которым уже
+# говорили (answered_at) и которого итог с «перезвонить» (или руководитель) вернул в список: его операторы и
+# называют «дублем». Другие — новые и недозвоны (с ними ещё не говорили). Пока другие есть, повторов в пачке не
+# больше этой доли; других нет вовсе («общий список кончился») — пачка из повторов. 100 — без ограничения (как
+# было до 24.11.2026). У Тез свои сроки перезвона (owner_*), им доля не нужна. Почему так: 19.11 новые водители
+# базы ноября кончились, итоги с «перезвонить» обнуляют попытки и ставят водителя первым в пуле — с 20.11
+# пачки состояли из повторов целиком, 23.11 оператор 204 раза получил назад водителя, с которым сам говорил.
+REPEAT_SHARE_OFF = 100
+REPEAT_SHARE_DEFAULTS = {PROFILE_REMOTE_CC: 20, PROFILE_TEZ: REPEAT_SHARE_OFF}
 # Итог с датой (dial_list_outcomes.due_kind): 'callback' — «Перезвонить» (дата и время перезвона),
 # 'online' — «Согласен выйти на линию» (когда выйдет); '' — без даты. Итог с датой всегда
 # «перезвонить» (requeue): водитель ждёт своего срока, а не уходит в «обработанные».
@@ -1491,6 +1501,57 @@ def recall_verdict(columns, operator_id):
     if int(owner_id) != operator_id or taken_after:
         return "taken"
     return RECALL_OK
+
+
+def repeat_share_of(value, profile):
+    """Доля повторов в пачке отдела, % (REPEAT_SHARE_DEFAULTS): сохранённая руководителем (0–100) или, если её
+    не задавали (NULL), значение профиля по умолчанию."""
+    if value is not None:
+        try:
+            return max(0, min(REPEAT_SHARE_OFF, int(value)))
+        except (TypeError, ValueError):
+            pass
+    return REPEAT_SHARE_DEFAULTS.get(str(profile or PROFILE_REMOTE_CC).strip().lower(), REPEAT_SHARE_OFF)
+
+
+def repeat_quota(size, others, share_pct):
+    """Сколько повторов можно положить в пачку на `size` строк, если других водителей (новых и недозвонов) для
+    неё нашлось `others`. None — без ограничения: доля 100 % или других нет вовсе (общий список кончился —
+    пачка из повторов). Других меньше, чем мест под них, — пачка короче, а доля повторов в ней та же: строго
+    не больше share_pct от выданного."""
+    share_pct = int(share_pct)
+    if share_pct >= REPEAT_SHARE_OFF or others <= 0:
+        return None
+    full = size * share_pct // 100
+    if others >= size - full:
+        return full
+    return others * share_pct // (100 - share_pct)
+
+
+def pool_order_key(row, operator_id):
+    """Ключ порядка пула для строки (id, pinned_operator_id, attempts_total, last_attempt_at, created_at, …) —
+    зеркало ORDER BY в _POOL_SQL: свои закреплённые первыми, меньше попыток, давно не звонили (никогда — первыми),
+    раньше загружен."""
+    _id, pinned_to, attempts_total, last_attempt_at, created_at = row[:5]
+    own = pinned_to is not None and int(pinned_to) == int(operator_id)
+    return (not own, int(attempts_total or 0), last_attempt_at is not None,
+            last_attempt_at or created_at, created_at, str(_id))
+
+
+def compose_portion(others, repeats, size, share_pct, operator_id):
+    """Пачка из двух выборок пула в его порядке: others — водители, с которыми ещё не говорили (новые и
+    недозвоны), repeats — повторы (говорили, а итог вернул в список). Повторов — не больше repeat_quota, остальное
+    — другие; строки — в порядке пула (pool_order_key). Возвращает строки как пришли из выборок. Доля 100 % —
+    без ограничения: просто первые size строк пула, как одна выборка _POOL_SQL."""
+    if int(share_pct) >= REPEAT_SHARE_OFF:
+        merged = sorted(list(others) + list(repeats), key=lambda r: pool_order_key(r, operator_id))
+        return merged[:size]
+    quota = repeat_quota(size, len(others), share_pct)
+    take_repeats = min(len(repeats), size if quota is None else quota)
+    take_others = min(len(others), size - take_repeats)
+    chosen = list(others[:take_others]) + list(repeats[:take_repeats])
+    chosen.sort(key=lambda r: pool_order_key(r, operator_id))
+    return chosen
 
 
 def search_key(text):
@@ -2674,7 +2735,8 @@ class DialListService:
                 SELECT enabled, portion_size, max_attempts, retry_after_hours,
                        caller_id_for_employee, updated_at, binotel_company, active_period,
                        profile, auto_dial, call_interval_sec, wrapup_sec, retry_schedule_min,
-                       callback_own_minutes, followup_after_min, wa_license_id, wa_templates
+                       callback_own_minutes, followup_after_min, wa_license_id, wa_templates,
+                       repeat_share_pct
                 FROM dial_list_department_settings WHERE department_id = %s
             """, (int(department_id),))
             row = cur.fetchone()
@@ -2712,6 +2774,11 @@ class DialListService:
             "wa_license_id": int(tail[7]) if tail[7] is not None else None,
             "wa_templates": [t for t in (wa_templates or []) if isinstance(t, dict)],
         }
+        # Доля повторов в пачке (24.11.2026, REPEAT_SHARE_DEFAULTS): как задал руководитель, а не задавал (NULL) —
+        # по профилю. Сохранённое как есть — в _repeat_share_stored: сохранение формы без этого поля его не трогает.
+        stored_share = row[17] if row and len(row) > 17 else None
+        settings["repeat_share_pct"] = repeat_share_of(stored_share, settings["profile"])
+        settings["_repeat_share_stored"] = stored_share
         return settings
 
     def save_department_settings(self, department_id, payload, changed_by=None):
@@ -2791,6 +2858,13 @@ class DialListService:
         wa_license_id = current.get("wa_license_id")
         if "wa_license_id" in payload:
             wa_license_id = self._clean_license_id(payload.get("wa_license_id"))
+        # Доля повторов в пачке (24.11.2026): ключа нет — как было (в том числе «не задавали»: NULL, значение профиля).
+        # Смена профиля на tez без явного значения — снова по профилю (у Тез без ограничения).
+        repeat_share = current.get("_repeat_share_stored")
+        if payload.get("repeat_share_pct") is not None:
+            repeat_share = _int("repeat_share_pct", None, 0, REPEAT_SHARE_OFF)
+        elif switched_to_tez:
+            repeat_share = None
 
         with self.db._get_cursor() as cur:
             cur.execute("""
@@ -2798,10 +2872,10 @@ class DialListService:
                     department_id, enabled, portion_size, max_attempts, retry_after_hours,
                     caller_id_for_employee, binotel_company, active_period, updated_by, updated_at,
                     profile, auto_dial, call_interval_sec, wrapup_sec, retry_schedule_min,
-                    callback_own_minutes, followup_after_min, wa_license_id)
+                    callback_own_minutes, followup_after_min, wa_license_id, repeat_share_pct)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                         (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
-                        %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                        %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
                 ON CONFLICT (department_id) DO UPDATE SET
                     enabled = EXCLUDED.enabled,
                     portion_size = EXCLUDED.portion_size,
@@ -2819,11 +2893,12 @@ class DialListService:
                     retry_schedule_min = EXCLUDED.retry_schedule_min,
                     callback_own_minutes = EXCLUDED.callback_own_minutes,
                     followup_after_min = EXCLUDED.followup_after_min,
-                    wa_license_id = EXCLUDED.wa_license_id
+                    wa_license_id = EXCLUDED.wa_license_id,
+                    repeat_share_pct = EXCLUDED.repeat_share_pct
             """, (int(department_id), enabled, portion_size, max_attempts, retry_after_hours,
                   caller_id, company, active_period, changed_by,
                   profile, auto_dial, call_interval_sec, wrapup_sec, json.dumps(retry_schedule),
-                  callback_own_minutes, followup_after_min, wa_license_id))
+                  callback_own_minutes, followup_after_min, wa_license_id, repeat_share))
             # Точечная обработка (ревью 17.11.2026): сменился обзваниваемый месяц — отметки файлов отдела снимаются
             # все. Иначе отметки прежнего месяца при возврате к нему ожили бы сами, а снять их, пока месяц не
             # обзванивается, нельзя. Новый месяц начинается со всей базы.
@@ -5246,6 +5321,14 @@ class DialListService:
     # ИИН нужен лишь запросу в Sapar и из сервера не уходит.
     _POOL_CANDIDATES_SQL = _POOL_SQL.replace(
         "SELECT l.id", "SELECT l.id, l.iin, l.period, l.sign_checked_at, l.sign_error", 1).format(lock="")
+    # Доля повторов в пачке (24.11.2026, REPEAT_SHARE_DEFAULTS): тот же пул двумя выборками — водители, с которыми
+    # ещё не говорили ({answered} = NULL), и повторы ({answered} = NOT NULL), каждая в порядке пула и со своим
+    # пределом; пачку из них собирает compose_portion. Колонки порядка (pool_order_key) — первыми, {extra} — что
+    # ещё нужно вызывающему (проверке подписания — ИИН и отметки), {lock} — как у _POOL_SQL.
+    _POOL_KEY_COLUMNS = "l.id, l.pinned_operator_id, l.attempts_total, l.last_attempt_at, l.created_at"
+    _POOL_SPLIT_SQL = _POOL_SQL.replace("SELECT l.id", "SELECT " + _POOL_KEY_COLUMNS + "{extra}", 1).replace(
+        "        ORDER BY", "          AND l.answered_at IS {answered}\n        ORDER BY", 1)
+    _PRECHECK_EXTRA_COLUMNS = ", l.iin, l.period, l.sign_checked_at, l.sign_error"
 
     # ------------------------------------------------------------ оператор
     def operator_context(self, user_id):
@@ -6364,11 +6447,15 @@ class DialListService:
                 break
             now = _utcnow()
             with self.db._get_cursor() as cur:
-                cur.execute(self._POOL_CANDIDATES_SQL, params)
-                rows = cur.fetchall()
+                if self._repeat_share(ctx) >= REPEAT_SHARE_OFF:
+                    cur.execute(self._POOL_CANDIDATES_SQL, params)
+                    rows = cur.fetchall()
+                    head = {str(r[0]) for r in rows[:size]}
+                else:
+                    # Доля повторов (24.11.2026): кандидаты — те, кого выдаст compose_portion, и запас к ним.
+                    rows, head = self._precheck_candidates(cur, ctx, size, params[-1])
             due = [r for r in rows if str(r[0]) not in asked
                    and sign_check_due(r[1], r[3], r[4], now, SIGN_PRECHECK_FRESH_MINUTES)]
-            head = {str(r[0]) for r in rows[:size]}
             if not any(str(r[0]) in head for r in due):
                 break
             asked.update(str(r[0]) for r in due)
@@ -6455,10 +6542,14 @@ class DialListService:
                         # Все строки закрыты (или едут дальше), а выдача открыта — закрываем здесь.
                         cur.execute("UPDATE dial_list_portions SET closed_at = CURRENT_TIMESTAMP WHERE id = %s",
                                     (portion["id"],))
-                    cur.execute(self._POOL_SQL.format(lock="FOR UPDATE SKIP LOCKED"), (
-                        ctx["department_id"], settings["_period"], settings["retry_after_hours"],
-                        settings["max_attempts"], ctx["user_id"], ctx["user_id"], settings["portion_size"]))
-                    lead_ids = [str(r[0]) for r in cur.fetchall()]
+                    repeats = None
+                    if self._repeat_share(ctx) >= REPEAT_SHARE_OFF:
+                        cur.execute(self._POOL_SQL.format(lock="FOR UPDATE SKIP LOCKED"), (
+                            ctx["department_id"], settings["_period"], settings["retry_after_hours"],
+                            settings["max_attempts"], ctx["user_id"], ctx["user_id"], settings["portion_size"]))
+                        lead_ids = [str(r[0]) for r in cur.fetchall()]
+                    else:
+                        lead_ids, repeats = self._claim_with_repeat_share(cur, ctx)
                     if not lead_ids:
                         raise DialListError("Список пуст: водителей для обзвона сейчас нет", 404)
                     cur.execute("""
@@ -6480,9 +6571,58 @@ class DialListService:
                     raise
                 log.warning("dial_list: выдача оператору %s встретила взаимную блокировку — повторяем",
                             ctx["user_id"])
-        log.info("dial_list: оператору %s выдано %d строк (порция %s)%s", ctx["user_id"], len(lead_ids), portion_id,
+        log.info("dial_list: оператору %s выдано %d строк (порция %s)%s%s", ctx["user_id"], len(lead_ids), portion_id,
+                 "" if repeats is None else f", повторов {repeats} (доля не больше {self._repeat_share(ctx)} %)",
                  f", из прошлой выдачи переехало {len(carried)} — ждут исхода от АТС" if carried else "")
         return self.get_state(user_id, phone_version=phone_version)
+
+    # ------------------------------------------------------------ доля повторов в пачке (24.11.2026)
+    @staticmethod
+    def _repeat_share(ctx):
+        """Доля повторов в пачке отдела, % (REPEAT_SHARE_DEFAULTS). В настройках её нет (контекст собран без
+        department_settings) — без ограничения, как было."""
+        try:
+            return int((ctx.get("settings") or {}).get("repeat_share_pct", REPEAT_SHARE_OFF))
+        except (TypeError, ValueError):
+            return REPEAT_SHARE_OFF
+
+    def _pool_part(self, cur, ctx, answered, limit, lock="", extra=""):
+        """Одна из двух выборок пула оператора (_POOL_SPLIT_SQL): answered=False — водители, с которыми ещё не
+        говорили; True — повторы. В порядке пула, не больше limit строк. В транзакции вызывающего."""
+        if limit <= 0:
+            return []
+        settings = ctx["settings"]
+        cur.execute(self._POOL_SPLIT_SQL.format(lock=lock, extra=extra, answered="NOT NULL" if answered else "NULL"),
+                    (ctx["department_id"], settings["_period"], settings["retry_after_hours"],
+                     settings["max_attempts"], ctx["user_id"], ctx["user_id"], int(limit)))
+        return cur.fetchall()
+
+    def _claim_with_repeat_share(self, cur, ctx):
+        """Строки новой пачки при доле повторов меньше 100 %: сначала водители, с которыми ещё не говорили, затем
+        повторы — сколько позволяет repeat_quota (других нет вовсе — повторами до полной пачки). Обе выборки под
+        FOR UPDATE SKIP LOCKED, как у _POOL_SQL. Возвращает (id водителей в порядке пула, сколько среди них повторов)."""
+        size = int(ctx["settings"]["portion_size"])
+        share = self._repeat_share(ctx)
+        lock = "FOR UPDATE SKIP LOCKED"
+        others = self._pool_part(cur, ctx, False, size, lock=lock)
+        quota = repeat_quota(size, len(others), share)
+        repeats = self._pool_part(cur, ctx, True, size if quota is None else quota, lock=lock)
+        chosen = compose_portion(others, repeats, size, share, ctx["user_id"])
+        repeat_ids = {str(r[0]) for r in repeats}
+        lead_ids = [str(r[0]) for r in chosen]
+        return lead_ids, sum(1 for lead_id in lead_ids if lead_id in repeat_ids)
+
+    def _precheck_candidates(self, cur, ctx, size, limit):
+        """Кандидаты проверки подписания перед «Ещё» при доле повторов меньше 100 %: та же сборка, что у выдачи
+        (compose_portion), на limit строк с запасом; head — id тех, кого выдача возьмёт в пачку на size строк.
+        Строки — (id, iin, period, sign_checked_at, sign_error), как у _POOL_CANDIDATES_SQL. Без блокировки."""
+        share = self._repeat_share(ctx)
+        extra = self._PRECHECK_EXTRA_COLUMNS
+        others = self._pool_part(cur, ctx, False, limit, extra=extra)
+        repeats = self._pool_part(cur, ctx, True, limit, extra=extra)
+        rows = compose_portion(others, repeats, limit, share, ctx["user_id"])
+        head = {str(r[0]) for r in compose_portion(others, repeats, size, share, ctx["user_id"])}
+        return [tuple(r[:1]) + tuple(r[5:9]) for r in rows], head
 
     def recall_lead(self, user_id, lead_id, phone_version=None):
         """«Позвонить ещё раз» (владелец, 12.10.2026; с 11.10.2026 это был «Перезвонить»

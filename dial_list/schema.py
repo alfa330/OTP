@@ -609,6 +609,11 @@ DDL = [
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS pinned_operator_id INTEGER",
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS pinned_by INTEGER",
+    # Доля повторов в пачке (владелец, 24.11.2026: «таких повторов до окончания общего списка в выдаваемых пачках
+    # должно быть не больше 20%… чтобы операторы не получали пачками повторы»): повтор — водитель, с которым уже
+    # говорили (answered_at) и которого итог вернул в список. NULL — значение профиля по умолчанию
+    # (REPEAT_SHARE_DEFAULTS в service.py: удалённый КЦ — 20, Тез — без ограничения).
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS repeat_share_pct SMALLINT",
     # Индексов по отметкам проверок (sign_checked_at, trip_checked_at) нет НАМЕРЕННО.
     # Отметку пишет каждая проверка подписи и поездок — у каждого неподписавшего раз в
     # час-три, ~100 тыс. обновлений в сутки. Пока отметка стояла в индексе, обновление было

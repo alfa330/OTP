@@ -6,6 +6,7 @@ import CustomSelect from '../ui/CustomSelect';
 import useStableCallback from '../wiki/useStableCallback';
 import { buildPeriodOptions, monthLabel } from '../dial_list/dialListPeriods';
 import { citiesSummary } from '../dial_list/signReport';
+import { REPEAT_SHARE_MAX, repeatShareHint, repeatShareValue } from '../dial_list/repeatShare';
 import {
     batchProgress, batchRowState, focusErrorText, focusHint, focusStateText, focusWaitingText, goalLabel,
     summaryMatchesScope, toggledFocus, uploadFocusNote, withFocusDraft,
@@ -349,6 +350,7 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
             portion_size: String(settings.portion_size ?? 20),
             max_attempts: String(settings.max_attempts ?? 3),
             retry_after_hours: String(settings.retry_after_hours ?? 24),
+            repeat_share_pct: String(settings.repeat_share_pct ?? REPEAT_SHARE_MAX),
             caller_id_for_employee: settings.caller_id_for_employee || '',
             active_period: settings.active_period || '',
             ...(isTez ? tezSettingsForm(settings) : {}),
@@ -371,6 +373,7 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
                 portion_size: numOr(form.portion_size, 20),
                 max_attempts: numOr(form.max_attempts, 3),
                 retry_after_hours: numOr(form.retry_after_hours, 24),
+                repeat_share_pct: repeatShareValue(form.repeat_share_pct, settings?.repeat_share_pct ?? REPEAT_SHARE_MAX),
                 caller_id_for_employee: form.caller_id_for_employee.trim(),
                 active_period: form.active_period || '',
             };
@@ -423,6 +426,13 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
                         <Row label="Строк за раз" hint="Сколько ФИО оператор получает одной порцией">{numberInput('portion_size', 1, 100)}</Row>
                         <Row label="Попыток на номер" hint="После этого водитель в список не возвращается">{numberInput('max_attempts', 1, 20)}</Row>
                         <Row label="Повтор через, часов" hint="Через сколько недозвон снова попадёт в порции">{numberInput('retry_after_hours', 0, 720)}</Row>
+                        <Row
+                            label="Повторов в пачке, не больше, %"
+                            hint={repeatShareHint(form.repeat_share_pct, form.portion_size)}
+                            info="Повтор — водитель, с которым уже говорили и которого итог с «перезвонить» вернул в список. Пока есть водители, с которыми ещё не говорили (новые и недозвоны), повторов в пачке не больше этой доли. Такие водители кончились — пачка из повторов. 100 — без ограничения."
+                        >
+                            {numberInput('repeat_share_pct', 0, REPEAT_SHARE_MAX)}
+                        </Row>
                     </div>
                 </section>
             )}

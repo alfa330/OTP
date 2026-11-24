@@ -304,7 +304,12 @@ def test_pin_takes_the_driver_off_another_operators_list_but_not_during_a_call(e
     events = env.q("SELECT kind, note, actor_id FROM dial_list_lead_events WHERE lead_id = %s",
                    (env.lead(PHONES[1]),))
     assert events == [('requeue', 'Закреплён за оператором Фронтова Фарида', 1)]
-    assert sorted(env.issue(FRONT_A)) == [PHONES[0], PHONES[1]]
+    # С ним уже говорили — это повтор (доля повторов в пачке, 24.11.2026: у удалённого КЦ не больше 20 %, пока есть
+    # другие водители). Других у менеджера один — пачка из него, повтор ждёт; другие кончились — повтор выдаётся.
+    assert env.issue(FRONT_A) == [PHONES[0]]
+    env.close_rows(FRONT_A)
+    env.q("UPDATE dial_list_leads SET status = 'done' WHERE phone_norm = %s", (PHONES[0],))
+    assert env.issue(FRONT_A) == [PHONES[1]]
 
 
 def test_already_on_the_managers_list_keeps_its_counters(env):
