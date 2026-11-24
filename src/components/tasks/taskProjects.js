@@ -164,47 +164,60 @@ export const keepWatchersForProject = (watcherIds, project) => {
   return (Array.isArray(watcherIds) ? watcherIds : []).filter((id) => allowed.has(String(id)));
 };
 
-/* ─── Исполнители доски (владелец 24.11.2026) ───
-   «По каждой доске должна быть своя привязка: можно выбрать только тех, кто есть
-   в проекте как исполнитель». Отметку ставят в окне «Проекты»; пока у доски никто
-   не отмечен, форма предлагает исполнителей как раньше. Сервер держит то же
-   правило (task_projects.py, _require_task_project_assignees_tx). */
+/* ─── Люди доски для постановки (владелец 24.11.2026) ───
+   «По каждой доске должна быть своя привязка» и «если человека нет в данном
+   проекте, зачем выводить его в исполнителях». Задачу доски поручают её людям:
+   отмеченным исполнителям, а если их не отметили — любому из состава доски.
+   Доска совсем без людей — как раньше, все, кому вы вправе поручать: иначе на неё
+   не поставить ни одной задачи. Сервер держит то же правило
+   (task_projects.py, _task_project_assignable_ids_tx). */
 
-/** Исполнители доски по имени. Пусто — у доски исполнители не отмечены. */
+const byName = (left, right) => String(left?.name || '').localeCompare(String(right?.name || ''), 'ru');
+
+/** Отмеченные исполнители доски по имени. */
 export const projectExecutors = (project) => (Array.isArray(project?.members) ? project.members : [])
   .filter((person) => person?.is_executor && Number(person?.id) > 0)
   .slice()
-  .sort((left, right) => String(left?.name || '').localeCompare(String(right?.name || ''), 'ru'));
+  .sort(byName);
 
-/** У доски своя привязка исполнителей — поручить её задачу можно только им. */
-export const hasExecutorBinding = (project) => projectExecutors(project).length > 0;
+/** Кому ставят задачи доски: исполнители, а без отметок — весь состав. Пусто — у доски нет людей. */
+export const boardAssignees = (project) => {
+  const executors = projectExecutors(project);
+  if (executors.length) return executors;
+  return (Array.isArray(project?.members) ? project.members : [])
+    .filter((person) => Number(person?.id) > 0)
+    .slice()
+    .sort(byName);
+};
+
+/** Поручить задачу доски можно только её людям. */
+export const hasBoardAssignees = (project) => boardAssignees(project).length > 0;
 
 /**
- * Кого ставит «Все»: каждого исполнителя доски, кроме постановщика. Себя
+ * Кого ставит «Все»: каждого из людей доски, кроме постановщика. Себя
  * исполнителем делают кнопкой «Себе»: задача, где постановщик среди исполнителей,
  * считается его собственной инициативой. allowedIds — сужение (у «Продакшна»
  * исполнители только из маркетинга); null — без сужения.
  */
-export const allExecutorIds = (project, { currentUserId = 0, allowedIds = null } = {}) => projectExecutors(project)
+export const allBoardAssigneeIds = (project, { currentUserId = 0, allowedIds = null } = {}) => boardAssignees(project)
   .map((person) => String(person.id))
   .filter((id) => id !== String(currentUserId || '') && (!allowedIds || allowedIds.has(id)));
 
-/** Исполнители задачи, которые остаются при смене доски: у доски с привязкой — только её исполнители. */
+/** Исполнители задачи, которые остаются при смене доски: только люди новой доски. */
 export const keepAssigneesForProject = (assigneeIds, project) => {
   const list = Array.isArray(assigneeIds) ? assigneeIds.map(String) : [];
-  if (!hasExecutorBinding(project)) return list;
-  const allowed = new Set(projectExecutors(project).map((person) => String(person.id)));
+  if (!hasBoardAssignees(project)) return list;
+  const allowed = new Set(boardAssignees(project).map((person) => String(person.id)));
   return list.filter((id) => allowed.has(id));
 };
 
 /**
- * Задача поставлена всем исполнителям доски: в составе каждый из «Все» и никого
- * сверх них (кроме самого постановщика). Так форма правки узнаёт, какой сегмент
- * показать. Двоих из двоих тоже честно назвать «все» — но выбор показываем,
- * только когда исполнителей хотя бы двое.
+ * Задача поставлена всем людям доски: в составе каждый из «Все» и никого сверх
+ * них (кроме самого постановщика). Так форма правки узнаёт, какой сегмент
+ * показать. Выбор «Все» есть, только когда людей у доски хотя бы двое.
  */
-export const isAllExecutorsSelection = (assigneeIds, project, { currentUserId = 0, allowedIds = null } = {}) => {
-  const everyone = allExecutorIds(project, { currentUserId, allowedIds });
+export const isAllBoardAssigneesSelection = (assigneeIds, project, { currentUserId = 0, allowedIds = null } = {}) => {
+  const everyone = allBoardAssigneeIds(project, { currentUserId, allowedIds });
   if (everyone.length < 2) return false;
   const chosen = new Set((assigneeIds || []).map(String));
   chosen.delete(String(currentUserId || ''));
@@ -214,10 +227,10 @@ export const isAllExecutorsSelection = (assigneeIds, project, { currentUserId = 
 /**
  * Исполнители после смены доски — для выбора человеком и для доски, которую
  * форма подставила сама. «Все» остаётся «всеми» уже новой доски; у доски без
- * привязки «Все» нет — форма возвращается к выбору людей с чистым полем (люди
- * чужой доски могли быть и не из тех, кому вы ставите задачи). Выбранные поштучно
- * остаются, если они исполнители новой доски, а у доски без привязки — если они
- * среди тех, кому вы вправе поручать (recipientIds; null — не сверяем).
+ * выбора «Все» форма возвращается к выбору людей с чистым полем (люди чужой доски
+ * могли быть и не из тех, кому вы ставите задачи). Выбранные поштучно остаются,
+ * если они люди новой доски, а у доски без людей — если они среди тех, кому вы
+ * вправе поручать (recipientIds; null — не сверяем).
  */
 export const assigneesAfterProjectChange = (values, project, {
   currentUserId = 0, allowedIds = null, recipientIds = null,
@@ -225,15 +238,15 @@ export const assigneesAfterProjectChange = (values, project, {
   const current = Array.isArray(values?.assigneeIds) ? values.assigneeIds.map(String) : [];
   const me = String(currentUserId || '');
   if (values?.assignAll) {
-    const everyone = allExecutorIds(project, { currentUserId, allowedIds });
+    const everyone = allBoardAssigneeIds(project, { currentUserId, allowedIds });
     if (everyone.length >= 2) {
-      // «Себе» переживает смену доски, если вы исполнитель и новой.
-      const keepMe = current.includes(me) && projectExecutors(project).some((person) => String(person.id) === me);
+      // «Себе» переживает смену доски, если вы из людей и новой доски.
+      const keepMe = current.includes(me) && boardAssignees(project).some((person) => String(person.id) === me);
       return { assignAll: true, assigneeIds: keepMe ? [...everyone, me] : everyone };
     }
     return { assignAll: false, assigneeIds: [] };
   }
-  if (hasExecutorBinding(project) || !recipientIds) {
+  if (hasBoardAssignees(project) || !recipientIds) {
     return { assignAll: false, assigneeIds: keepAssigneesForProject(current, project) };
   }
   return { assignAll: false, assigneeIds: current.filter((id) => recipientIds.has(id)) };

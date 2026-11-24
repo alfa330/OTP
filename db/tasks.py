@@ -490,35 +490,39 @@ class TasksMixin:
         if any(int(person_id) not in allowed for person_id in watcher_ids):
             raise ValueError("WATCHER_NO_PROJECT_ACCESS")
 
-    def _task_project_executor_ids_tx(self, cursor, project_id):
-        """Исполнители доски — кому ставят её задачи (владелец 24.11.2026).
+    def _task_project_assignable_ids_tx(self, cursor, project_id):
+        """Люди доски — кому ставят её задачи (владелец 24.11.2026).
 
-        Уволенных не считаем: в форме их нет, и поручить им ничего нельзя.
-        Пусто — у доски исполнители не отмечены (или задача без проекта):
-        задачу поручают как раньше, по списку получателей.
+        «По каждой доске своя привязка» и «если человека нет в данном проекте, зачем
+        выводить его в исполнителях»: отмеченные исполнители доски, а если их не
+        отметили — весь её состав. Уволенных не считаем: в форме их нет. Пусто — у
+        доски нет людей вовсе (или задача без проекта): задачу поручают как раньше,
+        по списку получателей, иначе на доску без состава не поставить ни одной задачи.
         """
         if project_id is None:
             return set()
         cursor.execute("""
-            SELECT pm.user_id
+            SELECT pm.user_id, pm.is_executor
               FROM task_project_members pm
               JOIN users u ON u.id = pm.user_id
              WHERE pm.project_id = %s
-               AND pm.is_executor
                AND COALESCE(u.status, 'working') <> 'fired'
         """, (int(project_id),))
-        return {int(row[0]) for row in cursor.fetchall()}
+        rows = cursor.fetchall()
+        executors = {int(row[0]) for row in rows if row[1]}
+        return executors or {int(row[0]) for row in rows}
 
     def _require_task_project_assignees_tx(self, cursor, project_id, assignee_ids,
                                            current_ids=(), recheck_all=False):
         """Кого можно сделать исполнителем задачи доски и сколько их бывает.
 
         Два правила владельца от 24.11.2026, один поход в базу:
-          * у доски отмечены исполнители — новым в составе может быть только
-            исполнитель этой доски (ASSIGNEE_NOT_PROJECT_EXECUTOR);
-          * больше TASK_MAX_ASSIGNEES — только когда каждый новый в составе —
-            исполнитель доски: так задачу ставят всем исполнителям разом, а
-            рассылку на кого попало потолок по-прежнему не пускает.
+          * у доски есть люди — новым в составе может быть только человек этой
+            доски: отмеченный исполнитель, а без отметок — любой из состава
+            (ASSIGNEE_NOT_PROJECT_EXECUTOR);
+          * больше TASK_MAX_ASSIGNEES — только когда каждый новый в составе — из
+            людей доски: так задачу ставят всем разом («Все»), а рассылку на кого
+            попало потолок по-прежнему не пускает.
         Сверяем НОВЫХ, а не весь состав: задачу, поставленную до привязки, и
         исполнителя, которого с тех пор сняли с доски, любая правка иначе
         запирала бы — то же правило у наблюдателей. recheck_all — задачу
@@ -531,10 +535,10 @@ class TasksMixin:
         checked = ids if recheck_all else added
         if not checked:
             return
-        executors = self._task_project_executor_ids_tx(cursor, project_id)
-        if executors and any(person_id not in executors for person_id in checked):
+        board_people = self._task_project_assignable_ids_tx(cursor, project_id)
+        if board_people and any(person_id not in board_people for person_id in checked):
             raise ValueError("ASSIGNEE_NOT_PROJECT_EXECUTOR")
-        if len(ids) > self.TASK_MAX_ASSIGNEES and any(person_id not in executors for person_id in added):
+        if len(ids) > self.TASK_MAX_ASSIGNEES and any(person_id not in board_people for person_id in added):
             raise ValueError("TOO_MANY_ASSIGNEES")
 
     def get_task_extra_assignable_ids(self, requester_id, requester_role, project_id=None, task_id=None):
@@ -545,9 +549,10 @@ class TasksMixin:
             уже в составе: человека могли перевести в другой отдел или снять с
             исполнителей доски, а правка темы или срока не должна запираться
             (то же правило в _require_task_project_assignees_tx);
-          * исполнители доски — только если смотрящий вправе ставить задачи на эту
-            доску (_require_task_project_tx: доска не в архиве, он в составе или
-            админ раздела). Снятый с доски постановщик обходом больше не пользуется.
+          * люди доски (исполнители, а без отметок — состав) — только если
+            смотрящий вправе ставить задачи на эту доску (_require_task_project_tx:
+            доска не в архиве, он в составе или админ раздела). Снятый с доски
+            постановщик обходом больше не пользуется.
         Доска — project_id, а без него — доска задачи task_id (правка без переноса).
         """
         extra = set()
@@ -564,7 +569,7 @@ class TasksMixin:
                 self._require_task_project_tx(cursor, project_id, requester_id, requester_role)
             except ValueError:
                 return extra
-            extra.update(self._task_project_executor_ids_tx(cursor, project_id))
+            extra.update(self._task_project_assignable_ids_tx(cursor, project_id))
         return extra
 
     def _sync_task_watchers_tx(self, cursor, task_id, watcher_ids, added_by=None):

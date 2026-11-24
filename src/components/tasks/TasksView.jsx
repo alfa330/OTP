@@ -83,15 +83,16 @@ import { stripTechnicalQueryParams } from '../../utils/urlHygiene';
 import {
   TASK_PROJECT_ALL,
   TASK_SECTION_ALL,
-  allExecutorIds,
+  allBoardAssigneeIds,
   assigneesAfterProjectChange,
+  boardAssignees,
   buildProjectOptions,
   buildSectionOptions,
   composerProjectStorageKey,
   creatableProjects,
   findProject,
   hasProjectBoards,
-  isAllExecutorsSelection,
+  isAllBoardAssigneesSelection,
   keepAssigneesForProject,
   keepWatchersForProject,
   mergeSelectedProject,
@@ -4685,9 +4686,9 @@ const EMPTY_TASK_FORM = {
   tag: 'task',
   priority: 'normal',
   assigneeIds: [],
-  /* «Все исполнители доски» (владелец 24.11.2026): состав держит сама форма —
-     каждый исполнитель выбранной доски, кроме постановщика (себя — «Себе»). На
-     сервер уходит тем же списком assignee_ids; false — люди выбраны поштучно. */
+  /* «Все» (владелец 24.11.2026): состав держит сама форма — все люди выбранной
+     доски (исполнители, а без отметок — состав), кроме постановщика (себя —
+     «Себе»). На сервер уходит тем же списком assignee_ids; false — поштучно. */
   assignAll: false,
   /* Дедлайн — днём и временем, строкой поля «ГГГГ-ММ-ДДTЧЧ:ММ» по часам Алматы
      (так же их отдаёт и принимает сервер); '' — без срока. initial* — с чем
@@ -5363,7 +5364,7 @@ const AssigneeField = ({
   );
 };
 
-/* «Все исполнители доски» в форме: кому именно уйдёт задача — лица и имя первого,
+/* «Все» в форме: кому именно из людей доски уйдёт задача — лица и имя первого,
    весь список — в подсказке. Это не поле выбора: состав держит сама форма, а
    поменять его — сегментом «Конкретные люди». Высотой с селектор рядом, чтобы
    строка не прыгала при переключении. */
@@ -6225,17 +6226,19 @@ const TaskComposerForm = ({
       ? [{ value: '', label: 'Без раздела' }, ...list.map((section) => ({ value: String(section.id), label: section.name }))]
       : [];
   }, [selectedProject]);
-  /* Исполнители доски (владелец 24.11.2026): у доски, где их отметили, задачу
-     поручают только им — всем разом («Все») или поштучно. Без привязки поле
-     прежнее: все, кому вы вправе поручать. */
-  const executors = useMemo(() => projectExecutors(selectedProject), [selectedProject]);
-  const hasBinding = executors.length > 0;
+  /* Люди доски (владелец 24.11.2026): задачу доски поручают только им — всем
+     разом («Все») или поштучно. Это отмеченные исполнители, а если их не
+     отметили — весь состав доски: «если человека нет в данном проекте, зачем
+     выводить его в исполнителях». Доска без людей — поле прежнее. */
+  const boardPeople = useMemo(() => boardAssignees(selectedProject), [selectedProject]);
+  const executorsMarked = useMemo(() => projectExecutors(selectedProject).length > 0, [selectedProject]);
+  const hasBinding = boardPeople.length > 0;
   /* Продакшн (задача #354) виден в «Типе» всегда, а исполнители у него — только
      сотрудники маркетинга (уточнение владельца 16.10.2026): при этом типе в
      выборе исполнителя остаются одни маркетологи. Маркетолога узнаём и среди
-     исполнителей доски: в ваших получателях их может не быть. */
+     людей доски: в ваших получателях их может не быть. */
   const isProduction = values.tag === PRODUCTION_TAG;
-  const marketingIds = useMemo(() => productionPersonIds([...recipients, ...executors]), [recipients, executors]);
+  const marketingIds = useMemo(() => productionPersonIds([...recipients, ...boardPeople]), [recipients, boardPeople]);
   // Пока получатели грузятся (список пуст), при смене доски никого не выкидываем.
   const recipientIds = useMemo(
     () => (recipients.length ? new Set(recipients.map((person) => String(person.id))) : null),
@@ -6243,10 +6246,10 @@ const TaskComposerForm = ({
   );
   const me = String(currentUserId || '');
   const everyoneIds = useMemo(
-    () => allExecutorIds(selectedProject, { currentUserId, allowedIds: isProduction ? marketingIds : null }),
+    () => allBoardAssigneeIds(selectedProject, { currentUserId, allowedIds: isProduction ? marketingIds : null }),
     [selectedProject, currentUserId, isProduction, marketingIds]
   );
-  // Выбор «Все / Конкретные люди» — когда исполнителей хотя бы двое: «все» из одного — не выбор.
+  // Выбор «Все / Конкретные люди» — когда людей у доски хотя бы двое: «все» из одного — не выбор.
   const offersAll = hasBinding && everyoneIds.length >= 2;
   const isAll = offersAll && Boolean(values.assignAll);
   const pickProject = (next) => {
@@ -6254,9 +6257,9 @@ const TaskComposerForm = ({
     const nextProject = findProject(projects, projectId);
     const sameProject = projectId === String(values.projectId || '');
     // Сменили доску — остаются наблюдатели, у кого есть доступ к новой, а раздел
-    // сбрасывается: разделы у каждой доски свои. Исполнители — те, кто исполнитель
-    // и новой доски; «Все» — все исполнители уже новой доски. Выбор человека форма
-    // больше не подменяет своей подсказкой.
+    // сбрасывается: разделы у каждой доски свои. Исполнители — те, кто из людей и
+    // новой доски; «Все» — все люди уже новой доски. Выбор человека форма больше не
+    // подменяет своей подсказкой.
     onChange({
       projectId,
       projectAuto: false,
@@ -6264,7 +6267,7 @@ const TaskComposerForm = ({
       watcherIds: keepWatchersForProject(watcherIds, nextProject),
       ...(sameProject ? {} : assigneesAfterProjectChange(values, nextProject, {
         currentUserId,
-        allowedIds: isProduction ? productionPersonIds([...recipients, ...projectExecutors(nextProject)]) : null,
+        allowedIds: isProduction ? productionPersonIds([...recipients, ...boardAssignees(nextProject)]) : null,
         recipientIds,
       })),
     });
@@ -6282,12 +6285,12 @@ const TaskComposerForm = ({
   );
   const sectionCtx = useMemo(() => ({ recipients }), [recipients]);
   const assigneeSelectId = useId();
-  /* Кому можно поручить: у доски с привязкой — её исполнители, иначе — все
-     получатели. Уже выбранные остаются в списке, даже если они не исполнители
-     (задачу поставили до привязки): их можно снять, а правка не выкинет их молча. */
+  /* Кому можно поручить: у доски с людьми — только они, у доски без людей — все
+     получатели. Уже выбранные остаются в списке, даже если их нет среди людей
+     доски (задачу поставили раньше): их можно снять, а правка не выкинет их молча. */
   const assignablePeople = useMemo(() => {
     if (!hasBinding) return recipients;
-    const byId = new Map(executors.map((person) => [String(person.id), person]));
+    const byId = new Map(boardPeople.map((person) => [String(person.id), person]));
     assigneeIds.forEach((id) => {
       const key = String(id);
       if (byId.has(key)) return;
@@ -6295,8 +6298,8 @@ const TaskComposerForm = ({
       if (known) byId.set(key, known);
     });
     return [...byId.values()];
-  }, [hasBinding, executors, recipients, assigneeIds]);
-  // Имена и лица в кнопке поля — и исполнителей доски, и получателей.
+  }, [hasBinding, boardPeople, recipients, assigneeIds]);
+  // Имена и лица в кнопке поля — и людей доски, и получателей.
   const fieldPeople = useMemo(
     () => (hasBinding ? [...recipients, ...assignablePeople] : recipients),
     [hasBinding, recipients, assignablePeople]
@@ -6326,7 +6329,7 @@ const TaskComposerForm = ({
       : recipientOptions),
     [isProduction, recipientOptions, marketingIds, assigneeIds]
   );
-  // «Себе» — если вам можно поручить: у доски с привязкой — только её исполнителю.
+  // «Себе» — если вам можно поручить: у доски с людьми — только если вы из них.
   const canAssignSelf = Number(currentUserId) > 0
     && assignablePeople.some((person) => Number(person.id) === Number(currentUserId))
     && (!isProduction || marketingIds.has(String(currentUserId)));
@@ -6373,12 +6376,15 @@ const TaskComposerForm = ({
     const byId = new Map(fieldPeople.map((person) => [String(person.id), person]));
     return assigneeIds.map((id) => byId.get(String(id))).filter(Boolean);
   }, [isAll, fieldPeople, assigneeIds]);
-  const iAmExecutor = executors.some((person) => String(person.id) === me);
+  const iAmOnBoard = boardPeople.some((person) => String(person.id) === me);
   /* Под «i» у выбора — зачем он и по строке на вариант (правило владельца для
      выбора сегментами). Без выбора строка поля прежняя, без «i». */
   const assigneeHint = [
-    'У этой доски свои исполнители — поручить её задачу можно только им. Кто исполнитель, решают админы раздела в окне «Проекты».',
-    `«Все» — одна задача на всех исполнителей доски: взять и сдать её может любой из них.${iAmExecutor ? ' Себя «Все» не включает — для этого кнопка «Себе».' : ''}`,
+    executorsMarked
+      ? 'У этой доски отмечены исполнители — поручить её задачу можно только им.'
+      : 'Поручить задачу этой доски можно только людям её проекта.',
+    'Состав доски и исполнителей настраивают админы раздела в окне «Проекты».',
+    `«Все» — одна задача на всех: взять и сдать её может любой из них.${iAmOnBoard ? ' Себя «Все» не включает — для этого кнопка «Себе».' : ''}`,
     `«Конкретные люди» — только отмеченные, до ${TASK_MAX_ASSIGNEES} человек.`,
   ].join(' ');
 
@@ -10343,9 +10349,9 @@ const TasksView = ({
       ? productionBriefIssues(values.productionBrief, values.description, {
         productionAllowed: productionAllowedFor(
           values.assigneeIds,
-          // Исполнители доски — тоже люди, которым можно поручить (24.11.2026):
-          // маркетолога среди них узнаём по отделу, даже если его нет в получателях.
-          [...recipients, ...projectExecutors(findProject(projects, values.projectId))],
+          // Люди доски — тоже те, кому можно поручить (24.11.2026): маркетолога
+          // среди них узнаём по отделу, даже если его нет в получателях.
+          [...recipients, ...boardAssignees(findProject(projects, values.projectId))],
           modal ? { tag: modal.initialTag, assigneeIds: modal.initialAssigneeIds } : null
         ),
       })
@@ -10392,12 +10398,12 @@ const TasksView = ({
         projectAuto: true,
         sectionId: composerDefaultSection,
         watcherIds: keepWatchersForProject(prev.watcherIds, nextProject),
-        // Исполнители — как при выборе доски руками: у доски с привязкой только её
-        // исполнители (24.11.2026). Та же доска — состав не трогаем.
+        // Исполнители — как при выборе доски руками: только люди этой доски
+        // (24.11.2026). Та же доска — состав не трогаем.
         ...(prev.projectId === composerDefaultProject ? {} : assigneesAfterProjectChange(prev, nextProject, {
           currentUserId,
           allowedIds: prev.tag === PRODUCTION_TAG
-            ? productionPersonIds([...recipients, ...projectExecutors(nextProject)])
+            ? productionPersonIds([...recipients, ...boardAssignees(nextProject)])
             : null,
           // Пока получатели грузятся (список пуст), никого не выкидываем.
           recipientIds: recipients.length ? new Set(recipients.map((person) => String(person.id))) : null,
@@ -10447,14 +10453,14 @@ const TasksView = ({
   const openEditModal = useCallback((task) => {
     if (!task?.id) return;
     const nextForm = taskToTaskForm(task);
-    // Задача поставлена всем исполнителям доски — правка открывается на «Все» (24.11.2026).
+    // Задача поставлена всем людям доски — правка открывается на «Все» (24.11.2026).
     const taskProject = findProject(projects, nextForm.projectId);
     const productionIds = nextForm.tag === PRODUCTION_TAG
-      ? productionPersonIds([...recipients, ...projectExecutors(taskProject)])
+      ? productionPersonIds([...recipients, ...boardAssignees(taskProject)])
       : null;
     setEditForm({
       ...nextForm,
-      assignAll: isAllExecutorsSelection(nextForm.assigneeIds, taskProject, { currentUserId, allowedIds: productionIds }),
+      assignAll: isAllBoardAssigneesSelection(nextForm.assigneeIds, taskProject, { currentUserId, allowedIds: productionIds }),
     });
     setEditModal({
       open: true,

@@ -56,7 +56,7 @@ BASE_DDL = '''
     INSERT INTO task_assignees (task_id, user_id, position) VALUES (300, 5, 0), (300, 2, 1);
 '''
 
-NAMES = ['TASK_MAX_ASSIGNEES', '_task_project_executor_ids_tx', '_require_task_project_assignees_tx',
+NAMES = ['TASK_MAX_ASSIGNEES', '_task_project_assignable_ids_tx', '_require_task_project_assignees_tx',
          '_replace_task_project_members_tx', '_task_projects_admin', '_require_task_project_tx',
          '_task_assignee_ids_tx', 'get_task_extra_assignable_ids']
 
@@ -142,7 +142,10 @@ def _flags(cur, project_id):
 
 def test_migration_keeps_old_rows_and_marks_nobody(cur):
     assert _flags(cur, HR) == [(ANNA, False), (BORIS, False), (FIRED, False)]
-    assert DB._task_project_executor_ids_tx(cur, HR) == set()
+    # Никто не отмечен — люди доски весь её состав, кроме уволенного.
+    assert DB._task_project_assignable_ids_tx(cur, HR) == {ANNA, BORIS}
+    # Доска без людей — пусто: задачу поручают как раньше.
+    assert DB._task_project_assignable_ids_tx(cur, 30) == set()
 
 
 def test_settings_mark_executors_and_old_tab_keeps_them(cur):
@@ -154,7 +157,7 @@ def test_settings_mark_executors_and_old_tab_keeps_them(cur):
     ], ADMIN)
     assert _flags(cur, HR) == [(ANNA, True), (BORIS, True), (GLEB, False), (FIRED, True)]
     # Уволенный исполнителем не считается: поручить ему нельзя.
-    assert DB._task_project_executor_ids_tx(cur, HR) == {ANNA, BORIS}
+    assert DB._task_project_assignable_ids_tx(cur, HR) == {ANNA, BORIS}
     # Вкладка, открытая до отметки, шлёт состав без неё — исполнители на месте.
     DB._replace_task_project_members_tx(cur, HR, [
         {'user_id': ANNA, 'access_level': 'board'},
@@ -174,10 +177,14 @@ def test_rule_on_real_executors(cur):
     DB._require_task_project_assignees_tx(cur, HR, [ANNA])
     with pytest.raises(ValueError, match='ASSIGNEE_NOT_PROJECT_EXECUTOR'):
         DB._require_task_project_assignees_tx(cur, HR, [ANNA, BORIS])
-    # У доски без привязки — как раньше, но больше десяти — нет.
-    DB._require_task_project_assignees_tx(cur, FIN, [BORIS, VERA])
+    # Доска FIN без отметок — только её состав (Вера).
+    DB._require_task_project_assignees_tx(cur, FIN, [VERA])
+    with pytest.raises(ValueError, match='ASSIGNEE_NOT_PROJECT_EXECUTOR'):
+        DB._require_task_project_assignees_tx(cur, FIN, [BORIS, VERA])
+    # Доска без людей — как раньше, но больше десяти — нет.
+    DB._require_task_project_assignees_tx(cur, 30, [BORIS, VERA])
     with pytest.raises(ValueError, match='TOO_MANY_ASSIGNEES'):
-        DB._require_task_project_assignees_tx(cur, FIN, list(range(100, 111)))
+        DB._require_task_project_assignees_tx(cur, 30, list(range(100, 111)))
 
 
 def test_everyone_on_a_big_board_is_one_task(cur):
