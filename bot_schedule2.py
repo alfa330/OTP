@@ -56768,6 +56768,23 @@ except Exception:
 # несколько секунд присылает снимок табло подписанным запросом — тем же ключом, что мост
 # «Касаний». Пока снимок свеж, табло к мосту Oktell (HTTP /query) не ходит; текст запроса —
 # общий, cdr/oktell_wallboard.py. От портала коннектору уходят только параметры снимка.
+#
+# Очередь запросов к Oktell — общая для всех процессов портала (oktell_live/shared.py): в облаке
+# портал — две копии api и worker, и ответ коннектора, пришедший не в ту копию, терялся (25.11.2026:
+# «Не удалось получить данные из Oktell» в биллинге через раз), а запросы worker до коннектора не
+# доходили вовсе. Включается до сборки ручки коннектора — та запоминает очередь при сборке — и
+# отдельно от неё: не включилась — очередь остаётся в памяти процесса, ручка работает как раньше.
+try:
+    from oktell_live import shared as oktell_live_shared  # noqa: E402
+
+    oktell_live_shared.configure(
+        cursor=db._get_cursor,
+        # Своё соединение для LISTEN oktell_jobs — вне общего пула, как у колокола и «АТС».
+        listen_connect=lambda: psycopg2.connect(**{**_build_postgres_connection_params(),
+                                                   'tcp_user_timeout': 30000}))
+except Exception:
+    logging.exception("Очередь запросов Oktell: общая очередь НЕ включена — очередь в памяти процесса")
+
 try:
     from oktell_live.routes import build_oktell_live_blueprint  # noqa: E402
 

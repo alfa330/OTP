@@ -20,11 +20,14 @@
 коннектор строит сам, из своей копии каталога, и исполняет, только если отпечаток совпал.
 Обычная строка SQL без имени набора на шлюз не попадёт никак: `can_run` её не берёт.
 
-Память процесса, а не таблица
------------------------------
-Задание живёт секунды и нужно только потоку, который его ждёт. Портал поднимается одним
-процессом, поэтому очередь в памяти видят и ждущий поток, и ручка коннектора. Перезапуск портала
-очередь теряет вместе с ждущими потоками — терять нечего.
+Память процесса — только для одного процесса
+--------------------------------------------
+Этот класс держит очередь в памяти: её видят и ждущий поток, и ручка коннектора, только пока
+портал — один процесс (так было на Render). В облаке портал — две копии api и отдельный worker,
+и с 25.11.2026 очередь у портала общая, в базе (`shared.py`, включает её `shared.configure`):
+ответ исполнителя, пришедший в другую копию, здесь бы выбрасывался, а запросы worker до
+исполнителя не доходили бы вовсе. Логика ответов и отказов — здесь, общая очередь меняет только
+то, где лежат задания, результаты и сведения об исполнителях.
 
 Отказы
 ------
@@ -297,12 +300,17 @@ class Jobs:
         return [info for info in self._workers.values()
                 if info['waiting'] or now - info['seen_at'] <= WORKER_SILENT_SECONDS]
 
+    def _alive(self):
+        """Исполнители на связи — описания (datasets, unreadable, records). Общая очередь
+        (shared.py) берёт их из базы: опрос мог прийти в другую копию портала."""
+        with self._cond:
+            return self._alive_workers(self._clock())
+
     def known(self):
         """Есть ли на связи исполнитель — то есть можно ли читать Oktell через VM шлюза."""
         if not enabled():
             return False
-        with self._cond:
-            return bool(self._alive_workers(self._clock()))
+        return bool(self._alive())
 
     def can_run(self, query):
         """Возьмётся ли шлюз за этот запрос: рубильник включён, у текста есть имя набора,
@@ -317,8 +325,7 @@ class Jobs:
         if not isinstance(query, oktell_datasets.Query) or dataset not in oktell_datasets.DATASETS:
             return 'у запроса нет набора каталога'
         tables = set(oktell_datasets.tables_of(dataset, getattr(query, 'params', None)))
-        with self._cond:
-            alive = self._alive_workers(self._clock())
+        alive = self._alive()
         if not alive:
             return 'коннектор Oktell на VM шлюза не на связи'
         knowing = [info for info in alive if info['datasets'] is None or dataset in info['datasets']]
@@ -337,8 +344,7 @@ class Jobs:
         """Почему запись разговора не попросить у шлюза — словами; пусто, если можно."""
         if not enabled():
             return 'запросы на VM шлюза выключены (%s)' % ENABLED_ENV
-        with self._cond:
-            alive = self._alive_workers(self._clock())
+        alive = self._alive()
         if not alive:
             return 'коннектор Oktell на VM шлюза не на связи'
         if any(info.get('records') for info in alive):
@@ -547,12 +553,41 @@ class Jobs:
 
 jobs = Jobs()
 
+
+def use(queue):
+    """Сделать `queue` очередью процесса. Так портал включает общую очередь через базу
+    (shared.configure) — до сборки ручки коннектора: она запоминает очередь при сборке."""
+    global jobs
+    jobs = queue
+    return queue
+
+
 # Монолит зовёт эти функции локальным импортом пакета (тесты вырезают функции монолита через AST
-# и исполняют в своём пространстве имён — помощников уровня монолита там нет).
-can_run = jobs.can_run
-why_not = jobs.why_not
-run = jobs.run
-known = jobs.known
-status = jobs.status
-records_why_not = jobs.records_why_not
-fetch_record = jobs.fetch_record
+# и исполняют в своём пространстве имён — помощников уровня монолита там нет). Каждая обращается
+# к очереди процесса в момент вызова: после use() — уже к общей.
+def can_run(query):
+    return jobs.can_run(query)
+
+
+def why_not(query):
+    return jobs.why_not(query)
+
+
+def run(query, timeout):
+    return jobs.run(query, timeout)
+
+
+def known():
+    return jobs.known()
+
+
+def status():
+    return jobs.status()
+
+
+def records_why_not():
+    return jobs.records_why_not()
+
+
+def fetch_record(paths, timeout):
+    return jobs.fetch_record(paths, timeout)

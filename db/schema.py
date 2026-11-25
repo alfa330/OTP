@@ -5922,6 +5922,7 @@ class SchemaMixin:
             self._init_water_schema_tx(cursor)
             self._init_thermoboxes_schema_tx(cursor)
             self._init_honor_board_schema_tx(cursor)
+            self._init_oktell_live_schema_tx(cursor)
             self._init_test_numbers_schema_tx(cursor)
             self._init_baiga_schema_tx(cursor)
             self._init_twofa_schema_tx(cursor)
@@ -8690,6 +8691,27 @@ class SchemaMixin:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT thermoboxes_schema")
+
+    def _init_oktell_live_schema_tx(self, cursor):
+        """Общая очередь запросов к Oktell (oktell_live/shared.py) — своим SAVEPOINT'ом.
+
+        Задания и ответы коннектора Oktell лежат в базе, чтобы их видели все процессы портала
+        (две копии api и worker в облаке). Не развернулась — очередь отказывает, запросы идут
+        запасным путём (мост Oktell), остальное приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT oktell_live_schema")
+        try:
+            from oktell_live.schema import init_oktell_live_schema
+            init_oktell_live_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT oktell_live_schema")
+            logging.exception("Схема очереди запросов Oktell не применилась — запросы пойдут мосту Oktell")
+        else:
+            cursor.execute("RELEASE SAVEPOINT oktell_live_schema")
 
     def _init_honor_board_schema_tx(self, cursor):
         """Схема «Доски почёта» во вкладке «Ивентов» (#318) — своим SAVEPOINT'ом.
