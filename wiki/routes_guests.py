@@ -26,6 +26,12 @@ access.GUEST_GRANT_CEILING (супервайзер и выше), а параме
 ПОЛУЧАТЕЛЬ. Свой подчинённый: и по чину (потолок должности), и по отделу.
 «Если СВ из СЗоВ, то он и видит операторов из СЗоВ» — решение владельца.
 
+СРОК. До 14 дней у всех — и «Бессрочно» у супер-админа на любой объект, при
+выдаче и при продлении (решение владельца 25.11.2026,
+access.may_grant_guest_permanent). Признак can_grant_permanent уезжает в форму
+готовым — та же причина, что у can_grant_space: вторая формула во фронте
+однажды показала бы кнопку тому, кому сервер ответит 403.
+
 Списки для формы (кому, что) считаются ТЕМИ ЖЕ правилами, что и проверки на
 записи. Иначе форма предложит то, что сервер отвергнет, — молчаливый отказ с
 обратной стороны стола, который в этом разделе уже случался дважды
@@ -54,6 +60,11 @@ _NO_RIGHT = 'Гостевой доступ выдают супервайзер �
 # человек видит сам.
 _NOTHING_TO_SHARE = ('В вашей ветке отдела нет разделов, которые вы могли бы '
                      'открыть гостю')
+
+# «Бессрочно» просит тот, кому оно не положено. Кнопки у него в форме нет —
+# это ответ на прямой запрос, и одна строка на обе двери (выдача и продление).
+_NO_PERMANENT_RIGHT = 'Бессрочный гостевой доступ выдаёт только супер-администратор'
+_PERMANENT_RIGHT_CODE = 'WIKI_GUEST_PERMANENT_RIGHT'
 
 
 def _body():
@@ -105,6 +116,35 @@ def register(bp, wiki_route, db, log_ip):
         раздаст пространства (см. access.may_grant_guest_space).
         """
         return wiki_access.may_grant_guest_space(ctx['otp_role'])
+
+    def _may_grant_permanent(ctx):
+        """Вправе ли человек выдать гостевой доступ бессрочно. Только супер-админ.
+
+        Отдельно от _may_grant_space по той же причине, по какой отдельны их
+        функции в access: два решения владельца, и одно не тянет за собой
+        другое (access.may_grant_guest_permanent).
+        """
+        return wiki_access.may_grant_guest_permanent(ctx['otp_role'])
+
+    def _term(ctx, data):
+        """Срок из тела запроса — одна дверь на выдачу и продление.
+
+        Возвращает (срок, бессрочно ли, ответ-отказ). «Бессрочно» — только
+        булево true: строка "false" из чужого клиента иначе прочиталась бы как
+        «да». Право проверяется ДО разбора срока, чтобы тот, кому бессрочное
+        не положено, услышал именно это, а не «уберите день».
+        """
+        permanent = data.get('permanent') is True
+        if permanent and not _may_grant_permanent(ctx):
+            return None, permanent, _forbidden(_NO_PERMANENT_RIGHT, _PERMANENT_RIGHT_CODE)
+        try:
+            expires_at = wiki_guests.resolve_term(
+                wiki_guests.now_almaty(),
+                days=data.get('days'), until=data.get('until'),
+                at_time=data.get('at_time'), permanent=permanent)
+        except ValueError as exc:
+            return None, permanent, (jsonify({"error": str(exc)}), 400)
+        return expires_at, permanent, None
 
     def _shareable(cursor, ctx):
         """Разделы, которые человек вправе открыть гостю. None — любые."""
@@ -160,6 +200,9 @@ def register(bp, wiki_route, db, log_ip):
             # формула во фронте однажды разойдётся с этой, и переключатель
             # «Пространство» появится у того, кому сервер ответит 403.
             "can_grant_space": _may_grant_space(ctx),
+            # «Бессрочно» рядом с «14 дней» — тоже по признаку сервера
+            # (решение владельца 25.11.2026: супер-админ, любой объект).
+            "can_grant_permanent": _may_grant_permanent(ctx),
             "max_days": MAX_GUEST_DAYS,
             # Календарные рамки считает СЕРВЕР, и форма берёт их только отсюда.
             # У браузера западнее Алматы «сегодня» на сутки раньше нашего, и
@@ -320,14 +363,18 @@ def register(bp, wiki_route, db, log_ip):
                               'доступ выдают своим подчинённым',
                               'WIKI_GUEST_DEPARTMENT')
 
-        # СРОК.
-        try:
-            expires_at = wiki_guests.resolve_expiry(
-                wiki_guests.now_almaty(),
-                days=data.get('days'), until=data.get('until'),
-                at_time=data.get('at_time'))
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+        # СРОК — дни, дата с часом или «Бессрочно» (последнее — только
+        # супер-админу, решение владельца 25.11.2026).
+        expires_at, permanent, refusal = _term(ctx, data)
+        if refusal:
+            return refusal
+
+        # Дальше — проверка и запись одной очередью на пару «человек + объект»:
+        # иначе две одновременные выдачи (бессрочная и на неделю) заводили бы
+        # две действующие строки (wiki/guests.py: lock_grant_object).
+        wiki_guests.lock_grant_object(
+            cursor, user_id=target_id, section_id=section_id,
+            article_id=article_id, space_id=space_id)
 
         # Бессрочная выдача того же объекта уже есть (wiki/guests.py:
         # PERMANENT_EXPIRES_AT). Повторную выдачу create_grant считает
@@ -355,13 +402,17 @@ def register(bp, wiki_route, db, log_ip):
             space_id=space_id, granted_by=ctx['user_id'], expires_at=expires_at,
             reason=reason, include_subsections=deep)
 
+        # Срок в ответе и в журнале — одной формой: у бессрочной даты нет вовсе
+        # (метка 9999-12-31 — способ сказать «никогда», а не срок), есть признак.
+        # Журнал по нему пишет «бессрочно» (auditEvents.js), форма — тост.
+        until = None if permanent else expires_at.isoformat()
         queries.log_action(
             cursor, actor_id=ctx['user_id'],
             action='guest.grant' if created else 'guest.extend',
             entity_type=('space' if space_id else 'section' if section_id else 'article'),
             entity_id=space_id or section_id or article_id,
             target_user_id=target_id,
-            details={'grant_id': grant_id, 'expires_at': expires_at.isoformat(),
+            details={'grant_id': grant_id, 'expires_at': until, 'permanent': permanent,
                      'include_subsections': deep, 'reason': reason,
                      'user_name': target_name},
             ip_address=log_ip())
@@ -373,7 +424,7 @@ def register(bp, wiki_route, db, log_ip):
         # получателя через неделю: «доступ до 5 сентября» и «каждый раз зови
         # старшего» иначе расходятся молча.
         return jsonify({"status": "ok", "id": grant_id, "created": created,
-                        "expires_at": expires_at.isoformat(),
+                        "expires_at": until, "permanent": permanent,
                         "needs_qr": wiki_access.requires_sensitive_qr(
                             target_role, is_department_head=bool(target_heads))})
 
@@ -447,20 +498,24 @@ def register(bp, wiki_route, db, log_ip):
         if wiki_guests.is_permanent(grant['expires_at']):
             return jsonify({"error": "Выдача бессрочная — продлевать её не нужно",
                             "code": "WIKI_GUEST_PERMANENT"}), 400
-        data = _body()
-        try:
-            expires_at = wiki_guests.resolve_expiry(
-                wiki_guests.now_almaty(),
-                days=data.get('days'), until=data.get('until'),
-                at_time=data.get('at_time'))
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+        # «Бессрочно» в продлении — та же кнопка и то же право, что в выдаче:
+        # временную выдачу супер-админ делает бессрочной, не отзывая её.
+        expires_at, permanent, refusal = _term(ctx, _body())
+        if refusal:
+            return refusal
 
-        wiki_guests.extend_grant(cursor, grant_id, expires_at)
+        # Строку не тронули — значит, пока шёл запрос, выдачу уже сделали
+        # бессрочной (вторая вкладка, второй супер-админ): extend_grant её не
+        # укорачивает. Отвечать «продлён до …» и писать это в журнал было бы
+        # неправдой о выдаче, которая на деле бессрочная.
+        if not wiki_guests.extend_grant(cursor, grant_id, expires_at):
+            return jsonify({"error": "Выдача уже бессрочная — продлевать её не нужно",
+                            "code": "WIKI_GUEST_PERMANENT"}), 409
+        until = None if permanent else expires_at.isoformat()
         queries.log_action(
             cursor, actor_id=ctx['user_id'], action='guest.extend',
             entity_type=entity_type, entity_id=entity_id,
             target_user_id=grant['user_id'],
-            details={'grant_id': grant_id, 'expires_at': expires_at.isoformat()},
+            details={'grant_id': grant_id, 'expires_at': until, 'permanent': permanent},
             ip_address=log_ip())
-        return jsonify({"status": "extended", "expires_at": expires_at.isoformat()})
+        return jsonify({"status": "extended", "expires_at": until, "permanent": permanent})

@@ -16,8 +16,9 @@ import SectionTreeSelect from './SectionTreeSelect';
 import useStableCallback from './useStableCallback';
 import { spaceIcon } from './spaceIdentity';
 import {
-    STATUS_FILTERS, STATUS_META, clampDate, daysLeftLabel, deadlineLabel, fmtDeadline,
-    isPermanent, plural, presetLabel, presetsWithin, targetLabel, urgency,
+    STATUS_FILTERS, STATUS_META, clampDate, daysLeftLabel, deadlineLabel, extendDoneText,
+    fmtDeadline, grantDoneText, isPermanent, plural, presetLabel, presetsWithin,
+    targetLabel, termChosen, termPayload, urgency,
 } from './guestAccess';
 
 /* Четвёртая половина вкладки «Статьи»: гостевой доступ.
@@ -49,6 +50,10 @@ import {
  * разные дни западнее нас, и пикер, построенный от new Date(), предложил бы
  * дату, которую сервер тут же отвергнет со словами «уже прошла». Рамки
  * приезжают полями today и max_until (см. guestAccess.js).
+ *
+ * «БЕССРОЧНО» — кнопка рядом с «14 дней» у супер-админа, на любой объект, в
+ * выдаче и в продлении (решение владельца 25.11.2026). Показывает её признак
+ * сервера can_grant_permanent — по той же причине, что и выбор пространства.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
@@ -84,35 +89,61 @@ const Empty = ({ icon: Icon, title, hint }) => (
  * и какой из них уедет на сервер, видно только из кода (сервер такое и не
  * принимает: resolve_expiry отвергает оба поля сразу).
  */
-const TermPicker = ({ meta, days, until, atTime, onDays, onUntil, onTime }) => {
+const presetClass = (on) => `rounded-xl px-3 py-1.5 text-[12.5px] font-medium transition ${
+    on ? 'bg-indigo-600 text-white shadow-sm'
+       : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`;
+
+export const TermPicker = ({
+    meta, days, until, atTime, permanent = false,
+    onDays, onUntil, onTime, onPermanent,
+}) => {
     /* Час ограничиваем снизу только на СЕГОДНЯШНЕМ дне: прошедшие часы сервер
        всё равно отвергнет («это время уже прошло»), и предлагать их — обещать
        отказ. «Сегодня» — это либо пресет «сегодня» (0 дней), либо дата, равная
        сегодняшней; на любом другом дне доступен весь сутки. */
     const today = meta?.today;
     const isToday = until ? until === today : days === 0;
+    const maxDays = meta?.max_days || 14;
+    /* «Бессрочно» — только у того, кому его разрешил сервер (can_grant_permanent:
+       супер-админ, решение владельца 25.11.2026). Состояние без права не
+       считается выбранным, даже если его как-то передали: кнопки на экране нет,
+       а выбранным оно было бы невидимо. */
+    const canPermanent = !!meta?.can_grant_permanent;
+    const forever = canPermanent && !!permanent;
+    const choosePreset = (value) => { onDays(value); onUntil(''); onPermanent?.(false); };
     return (
     <div className="space-y-2.5">
         <div className={iosGroupLabel}>На сколько</div>
         <div className="flex flex-wrap items-center gap-1.5">
             {presetsWithin(meta?.max_days).map((value) => {
-                const on = days === value && !until;
+                const on = days === value && !until && !forever;
                 return (
                     <button
                         key={value}
                         type="button"
                         aria-pressed={on}
-                        onClick={() => { onDays(value); onUntil(''); }}
-                        className={`rounded-xl px-3 py-1.5 text-[12.5px] font-medium transition ${
-                            on ? 'bg-indigo-600 text-white shadow-sm'
-                               : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                        }`}
+                        onClick={() => choosePreset(value)}
+                        className={presetClass(on)}
                     >
                         {presetLabel(value)}
                     </button>
                 );
             })}
-            <div className="ml-auto w-full sm:ml-2 sm:w-auto">
+            {canPermanent && (
+                <button
+                    type="button"
+                    aria-pressed={forever}
+                    onClick={() => { onPermanent?.(true); onUntil(''); }}
+                    className={presetClass(forever)}
+                >
+                    Бессрочно
+                </button>
+            )}
+            {/* С «Бессрочно» шесть кнопок и дата в строку окна не входят, и дата
+                уходит второй строкой — тогда она встаёт ровно под кнопками, без
+                отступа ml-2, который в строке держал её от «14 дней». */}
+            <div className={canPermanent ? 'w-full sm:w-auto'
+                                         : 'ml-auto w-full sm:ml-2 sm:w-auto'}>
                 <IosDatePicker
                     value={until}
                     min={meta?.today}
@@ -121,40 +152,71 @@ const TermPicker = ({ meta, days, until, atTime, onDays, onUntil, onTime }) => {
                     placeholder="до даты"
                     ariaLabel="Дата, до которой действует гостевой доступ"
                     /* Панель умеет отдать день мимо min/max своими пресетами
-                       (ловушка из OfficeDayModal) — подтягиваем сами. */
-                    onChange={(iso) => onUntil(clampDate(iso, meta?.today, meta?.max_until))}
+                       (ловушка из OfficeDayModal) — подтягиваем сами. Выбранная
+                       дата снимает «Бессрочно»: два ответа на один вопрос сервер
+                       не примет. */
+                    onChange={(iso) => {
+                        const value = clampDate(iso, meta?.today, meta?.max_until);
+                        onUntil(value);
+                        if (value) onPermanent?.(false);
+                    }}
                 />
             </div>
         </div>
 
         {/* Час — УТОЧНЕНИЕ выбранного дня, а не отдельный вид срока, поэтому он
             стоит строкой ниже и по умолчанию пуст. Пустой = до конца дня: это
-            и есть обычная выдача, и заставлять называть 23:59 незачем. */}
+            и есть обычная выдача, и заставлять называть 23:59 незачем.
+            У «Бессрочно» дня нет — и час гаснет, а не исчезает: карточка той же
+            высоты, окно не прыгает при переключении. Названный раньше час не
+            стирается — вернёшься к дням, он на месте; на сервер он с
+            бессрочной не уезжает (termPayload). */}
         <div className={`${iosCard} flex flex-wrap items-center gap-3 p-3`}>
             <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-medium text-slate-900">До какого часа</div>
-                <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
-                    Не указан — доступ живёт до конца дня. «Сегодня до 18:00» — это
-                    пресет «сегодня» и час здесь.
-                </p>
+                <div className={`text-[13px] font-medium ${forever ? 'text-slate-400' : 'text-slate-900'}`}>
+                    До какого часа
+                </div>
+                {/* Обе подписи лежат в ОДНОЙ клетке сетки, видна одна: высота
+                    клетки — по большей из них. Подписи разной длины, и в узком
+                    окне «Продлить» замена одной на другую меняла высоту на
+                    строку — окно прыгало на 18 px (замер стенда 25.11.2026). */}
+                <div className="mt-0.5 grid text-[11.5px] leading-relaxed text-slate-500">
+                    <p className={`col-start-1 row-start-1 ${forever ? 'invisible' : ''}`}>
+                        Не указан — доступ живёт до конца дня. «Сегодня до 18:00» — это
+                        пресет «сегодня» и час здесь.
+                    </p>
+                    {canPermanent && (
+                        <p className={`col-start-1 row-start-1 ${forever ? '' : 'invisible'}`}>
+                            У бессрочного доступа часа нет: он действует, пока его не отзовут.
+                        </p>
+                    )}
+                </div>
             </div>
             <IosTimePicker
-                value={atTime}
+                value={forever ? '' : atTime}
                 onChange={onTime}
                 min={isToday ? meta?.now_time : undefined}
                 allowEmpty
                 step={30}
-                placeholder="до конца дня"
+                disabled={forever}
+                /* Прочерк, а не «без срока»: в поле шириной 104 px длинная
+                   подпись обрезалась бы, а «без срока» уже сказано строкой слева. */
+                placeholder={forever ? '—' : 'до конца дня'}
                 ariaLabel="Час, до которого действует гостевой доступ"
                 className="w-full sm:w-32"
             />
         </div>
 
+        {/* Про супер-администратора — только когда сервер ПРЯМО ответил «права
+            нет» (false). Поля нет вовсе — это сервер старше фронта (фронт
+            выкладывается раньше), и супер-админ прочёл бы, что бессрочное
+            выдаёт он сам, без кнопки рядом. */}
         <p className="text-[11.5px] leading-relaxed text-slate-500">
-            Дольше {meta?.max_days || 14}
-            {' '}{plural(meta?.max_days || 14, 'дня', 'дней', 'дней')} выдать нельзя:
-            бессрочный «гостевой» доступ перестаёт быть гостевым и подменяет собой
-            правило раздела.
+            Дольше {maxDays} {plural(maxDays, 'дня', 'дней', 'дней')}
+            {canPermanent ? ' — только «Бессрочно».'
+                : meta?.can_grant_permanent === false
+                    ? ' выдать нельзя. Бессрочный доступ выдаёт супер-администратор.'
+                    : ' выдать нельзя.'}
         </p>
     </div>
     );
@@ -308,11 +370,14 @@ export default function WikiGuests({ base, headers, space = null, showToast = nu
                 <div className="min-w-0 flex-1">
                     <div className="text-[14px] font-semibold text-slate-900">Гостевой доступ</div>
                     <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
-                        Временный доступ к разделу или статье вашего отдела
+                        {meta?.can_grant_permanent ? 'Доступ' : 'Временный доступ'} к
+                        разделу или статье вашего отдела
                         {meta?.can_grant_space ? ' — или к целому пространству' : ''} —
                         своим подчинённым: на срок до
                         {' '}{meta?.max_days || 14} {plural(meta?.max_days || 14, 'дня', 'дней', 'дней')}
-                        {' '}или до названного часа, хоть до 18:00 сегодня.
+                        {meta?.can_grant_permanent
+                            ? ', до названного часа или бессрочно.'
+                            : ' или до названного часа, хоть до 18:00 сегодня.'}
                     </p>
                 </div>
                 {meta?.can_grant && (
@@ -473,6 +538,7 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
     const [days, setDays] = useState(7);
     const [until, setUntil] = useState('');
     const [atTime, setAtTime] = useState('');
+    const [permanent, setPermanent] = useState(false);
     const [reason, setReason] = useState('');
     const [busy, setBusy] = useState(false);
 
@@ -532,7 +598,10 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
 
     const chosenTarget = kind === 'section' ? sectionId
         : kind === 'space' ? spaceId : articleId;
-    const ready = !!userId && !!chosenTarget && (!!days || !!until);
+    /* «Бессрочно» без права не уезжает: кнопки у такого человека нет, и
+       состояние могло бы остаться только ошибкой. */
+    const forever = !!meta?.can_grant_permanent && permanent;
+    const ready = !!userId && !!chosenTarget && termChosen({ days, until, permanent: forever });
 
     const submit = () => {
         setBusy(true);
@@ -542,16 +611,15 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
             article_id: kind === 'article' ? Number(articleId) : null,
             space_id: kind === 'space' ? Number(spaceId) : null,
             include_subsections: kind === 'section' ? deep : false,
-            // Ровно одно поле ДНЯ: сервер отвергает оба сразу, и это правильно —
-            // умолчание пришлось бы выбрать за человека. Час к дню не относится
-            // как альтернатива, он его уточняет, и едет отдельным полем.
-            ...(until ? { until } : { days }),
-            ...(atTime ? { at_time: atTime } : {}),
+            // Ровно один ответ на «до какого срока» — бессрочно, дата или дни:
+            // сервер отвергает два сразу, и это правильно — умолчание пришлось
+            // бы выбрать за человека. Час уточняет день и едет отдельным полем,
+            // а у бессрочной не едет вовсе (guestAccess.js: termPayload).
+            ...termPayload({ days, until, atTime, permanent: forever }),
             reason: reason.trim() || null,
         }, { headers })
             .then((r) => {
-                const label = r.data?.created ? 'Гостевой доступ выдан' : 'Срок доступа продлён';
-                toast?.(`${label} — до ${fmtDeadline(r.data?.expires_at)}`, 'success');
+                toast?.(grantDoneText(r.data), 'success');
                 /* Оператору вики открывается только после QR-подтверждения
                    сессии, и подтверждать его нужно каждый раз заново. Выдача
                    этого не отменяет, и узнать про это выдающий обязан здесь, а
@@ -693,7 +761,9 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
                 )}
 
                 <TermPicker meta={meta} days={days} until={until} atTime={atTime}
-                            onDays={setDays} onUntil={setUntil} onTime={setAtTime} />
+                            permanent={permanent}
+                            onDays={setDays} onUntil={setUntil} onTime={setAtTime}
+                            onPermanent={setPermanent} />
 
                 <div className="space-y-2">
                     <div className={iosGroupLabel}>Зачем (необязательно)</div>
@@ -725,16 +795,17 @@ const ExtendModal = ({ base, headers, meta, item, onClose, onDone, toast }) => {
     const [days, setDays] = useState(7);
     const [until, setUntil] = useState('');
     const [atTime, setAtTime] = useState('');
+    const [permanent, setPermanent] = useState(false);
     const [busy, setBusy] = useState(false);
+    // То же правило, что в форме выдачи: без права «Бессрочно» не уезжает.
+    const forever = !!meta?.can_grant_permanent && permanent;
 
     const submit = () => {
         setBusy(true);
-        axios.patch(`${base}/guests/${item.id}`, {
-            ...(until ? { until } : { days }),
-            ...(atTime ? { at_time: atTime } : {}),
-        }, { headers })
+        axios.patch(`${base}/guests/${item.id}`,
+            termPayload({ days, until, atTime, permanent: forever }), { headers })
             .then((r) => {
-                toast?.(`Срок продлён до ${fmtDeadline(r.data?.expires_at)}`, 'success');
+                toast?.(extendDoneText(r.data), 'success');
                 onDone();
             })
             .catch((e) => toast?.(errText(e, 'Не удалось продлить доступ'), 'error'))
@@ -754,7 +825,8 @@ const ExtendModal = ({ base, headers, meta, item, onClose, onDone, toast }) => {
                         Отмена
                     </button>
                     <button type="button" className={iosBtnPrimary}
-                            disabled={busy || (!days && !until)} onClick={submit}>
+                            disabled={busy || !termChosen({ days, until, permanent: forever })}
+                            onClick={submit}>
                         {busy ? <Loader2 size={15} className="animate-spin" /> : <CalendarClock size={15} />}
                         {' '}Продлить
                     </button>
@@ -770,7 +842,9 @@ const ExtendModal = ({ base, headers, meta, item, onClose, onDone, toast }) => {
                     к прежнему.
                 </div>
                 <TermPicker meta={meta} days={days} until={until} atTime={atTime}
-                            onDays={setDays} onUntil={setUntil} onTime={setAtTime} />
+                            permanent={permanent}
+                            onDays={setDays} onUntil={setUntil} onTime={setAtTime}
+                            onPermanent={setPermanent} />
             </div>
         </IosModal>
     );

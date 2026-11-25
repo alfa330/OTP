@@ -85,6 +85,43 @@ export const isPermanent = (item) => item?.permanent === true;
 export const deadlineLabel = (item) => (
     isPermanent(item) ? 'бессрочно' : `до ${fmtDeadline(item?.expires_at)}`);
 
+/* «Бессрочно» в форме (решение владельца 25.11.2026: супер-админ, любой объект,
+   при выдаче и при продлении). Кнопку показывает признак сервера
+   can_grant_permanent; здесь — что из формы уезжает на сервер.
+ *
+ * Ровно ОДИН ответ на «до какого срока»: бессрочно, дата или дни. Сервер
+ * отвергает два сразу (wiki/guests.py: resolve_term), и это правильно —
+ * умолчание пришлось бы выбрать за человека. Час — уточнение дня, у бессрочной
+ * выдачи дня нет, и час с ней не едет. */
+export const termPayload = ({ days, until, atTime, permanent } = {}) => {
+    if (permanent) return { permanent: true };
+    return {
+        ...(until ? { until } : { days }),
+        ...(atTime ? { at_time: atTime } : {}),
+    };
+};
+
+/* Назван ли срок — можно ли жать «Выдать». Ноль дней — тоже срок: пресет
+   «сегодня», ради которого и появился час. Проверка «!!days» его теряла, и
+   кнопка гасла ровно на «сегодня до 18:00». */
+export const termChosen = ({ days, until, permanent } = {}) => (
+    !!permanent || !!until || (Number.isInteger(days) && days >= 0));
+
+/* Тосты после выдачи и продления — одной функцией с сервером: что получилось
+   на самом деле, а не что просили. Повторная выдача того же объекта продлевает
+   прежнюю (created: false), и «бессрочно» тогда значит «стала бессрочной». */
+export const grantDoneText = (data) => {
+    if (data?.permanent) {
+        return data?.created ? 'Бессрочный гостевой доступ выдан' : 'Доступ стал бессрочным';
+    }
+    const label = data?.created ? 'Гостевой доступ выдан' : 'Срок доступа продлён';
+    return `${label} — до ${fmtDeadline(data?.expires_at)}`;
+};
+
+export const extendDoneText = (data) => (
+    data?.permanent ? 'Доступ стал бессрочным'
+                    : `Срок продлён до ${fmtDeadline(data?.expires_at)}`);
+
 /* Сколько осталось — словами.
  *
  * Ноль дней — это «сегодня последний», а не «истёк»: срок живёт до конца дня

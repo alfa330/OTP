@@ -29,14 +29,18 @@
 
 import re
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
+from unittest.mock import MagicMock
 
 from wiki import guests, queries, structure
 from wiki.access import (
     ROLE_LEVELS,
     guest_grant_ceiling,
     may_grant_guest_in_department,
+    may_grant_guest_permanent,
     may_grant_guest_space,
     may_grant_guest_to,
     role_level_of,
@@ -631,11 +635,12 @@ class _RowsCursor:
 class GuestPermanentTest(unittest.TestCase):
     """Бессрочная выдача (решение владельца 09.11.2026, глава ООЗ, 476).
 
-    Ставится в базе, дверью API не выдаётся. Читающие запросы её не различают —
-    для них это просто дальний срок, — поэтому стражи здесь на два других
-    места: что срок «никогда» не уходит человеку датой 31.12.9999 и что ни
-    повторная выдача, ни продление не превращают «насовсем» обратно в «до
-    такого-то числа».
+    Первые две поставлены в базе; с 25.11.2026 её выдаёт формой супер-админ
+    (GuestPermanentRightTest и GuestPermanentRoutesTest ниже). Читающие запросы
+    её не различают — для них это просто дальний срок, — поэтому стражи здесь
+    на два других места: что срок «никогда» не уходит человеку датой 31.12.9999
+    и что ни повторная выдача, ни продление не превращают «насовсем» обратно в
+    «до такого-то числа».
     """
 
     PERMANENT = guests.PERMANENT_EXPIRES_AT
@@ -656,12 +661,15 @@ class GuestPermanentTest(unittest.TestCase):
         self.assertFalse(guests.is_permanent(floor - timedelta(seconds=1)))
         self.assertLessEqual(floor, self.PERMANENT)
 
-    def test_the_form_never_issues_a_permanent_grant(self):
-        """Потолок формы на месте: самый дальний срок двери API — 14 дней."""
+    def test_days_and_dates_never_reach_permanent(self):
+        """Потолок дней на месте: днями и датой дальше 14 дней не уйти — ни
+        датой 31.12.9999, ни через resolve_term без признака «бессрочно»."""
         self.assertFalse(guests.is_permanent(
             guests.resolve_expiry(NOW, days=MAX_GUEST_DAYS)))
         with self.assertRaises(ValueError):
             guests.resolve_expiry(NOW, until='9999-12-31')
+        with self.assertRaises(ValueError):
+            guests.resolve_term(NOW, until='9999-12-31')
 
     def test_permanent_is_active_until_revoked(self):
         self.assertEqual('active', guests.grant_status(
@@ -744,7 +752,8 @@ class GuestPermanentTest(unittest.TestCase):
 
     def test_routes_refuse_before_writing(self):
         """Обе двери отвечают словами ДО записи: выдача — 409 до create_grant,
-        продление — 400 до extend_grant."""
+        продление — 400 до extend_grant, и 409 вместо журнала, если продление
+        проиграло гонку бессрочной выдаче (GuestPermanentRoutesTest)."""
         from wiki import routes_guests
         source = Path(routes_guests.__file__).read_text(encoding='utf-8')
         create = source.split("def wiki_guests_create(")[1].split('\n    def ')[0]
@@ -753,13 +762,401 @@ class GuestPermanentTest(unittest.TestCase):
         change = source.split("def wiki_guests_change(")[1]
         self.assertLess(change.index("wiki_guests.is_permanent(grant['expires_at'])"),
                         change.index('wiki_guests.extend_grant('))
-        self.assertEqual(2, source.count('"WIKI_GUEST_PERMANENT"'))
+        self.assertEqual(3, source.count('"WIKI_GUEST_PERMANENT"'))
 
     def test_article_answer_uses_the_shared_payload(self):
         """Статья берёт срок той же функцией, что баннер и список."""
         from wiki import routes_articles
         source = Path(routes_articles.__file__).read_text(encoding='utf-8')
         self.assertIn('wiki_guests.expiry_payload(guest_until,', source)
+
+
+class GuestPermanentRightTest(unittest.TestCase):
+    """«Бессрочно» в форме — супер-админ, любой объект (владелец, 25.11.2026).
+
+    Вопрос был задан прямо — «кому сделать „Бессрочно“ рядом с „14 дней“», — и
+    из трёх ответов (супер-админ на любой объект / супер-админ только на
+    пространство / все, кто выдаёт) выбран первый. Руководителю, супервайзеру и
+    администратору вики остаётся потолок в 14 дней.
+    """
+
+    def test_only_super_admin_grants_permanent(self):
+        self.assertTrue(may_grant_guest_permanent('super_admin'))
+        self.assertTrue(may_grant_guest_permanent(' Super_Admin '))
+        for role in ('admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee',
+                     None, '', 'директор', 'wiki_admin'):
+            with self.subTest(role=role):
+                self.assertFalse(may_grant_guest_permanent(role))
+
+    def test_permanent_is_not_the_ladder(self):
+        """Потолок по чину и срок — разные вопросы: мастер-ключ роли вики
+        поднимает потолок до директорского, а «Бессрочно» не даёт."""
+        self.assertEqual(guest_grant_ceiling('admin', is_wiki_admin=True),
+                         ROLE_LEVELS['super_admin'])
+        self.assertFalse(may_grant_guest_permanent('admin'))
+
+
+class GuestTermTest(unittest.TestCase):
+    """resolve_term: «бессрочно» ИЛИ день с часом — ровно один ответ."""
+
+    def test_permanent_is_the_mark(self):
+        until = guests.resolve_term(NOW, permanent=True)
+        self.assertEqual(guests.PERMANENT_EXPIRES_AT, until)
+        self.assertTrue(guests.is_permanent(until))
+
+    def test_permanent_with_a_day_or_an_hour_is_refused(self):
+        """«Бессрочно до 18:00» — два ответа на один вопрос."""
+        for extra in ({'days': 3}, {'days': 0}, {'until': '2026-08-27'},
+                      {'at_time': '18:00'}):
+            with self.subTest(**extra):
+                with self.assertRaises(ValueError) as caught:
+                    guests.resolve_term(NOW, permanent=True, **extra)
+                self.assertIn('Бессрочно', str(caught.exception))
+
+    def test_empty_fields_do_not_count(self):
+        """Пустая строка — «не назвал»: так форма шлёт пустое поле."""
+        self.assertEqual(guests.PERMANENT_EXPIRES_AT, guests.resolve_term(
+            NOW, permanent=True, days=None, until='', at_time=' '))
+
+    def test_without_permanent_it_is_resolve_expiry(self):
+        self.assertEqual(guests.resolve_expiry(NOW, days=3),
+                         guests.resolve_term(NOW, days=3))
+        self.assertEqual(guests.resolve_expiry(NOW, days=0, at_time='18:00'),
+                         guests.resolve_term(NOW, days=0, at_time='18:00', permanent=False))
+        with self.assertRaises(ValueError):
+            guests.resolve_term(NOW)
+        with self.assertRaises(ValueError):
+            guests.resolve_term(NOW, days=MAX_GUEST_DAYS + 1)
+
+
+try:
+    from flask import Flask
+except ImportError:  # pragma: no cover
+    Flask = None
+
+
+class _GrantCursor:
+    """Курсор для ручек выдачи: отвечает только на запрос о получателе.
+
+    Всё остальное, что ходит в базу, подменено на уровне функций модулей — здесь
+    проверяются решения ручек (право, срок, ответ, журнал), а не SQL.
+    """
+
+    def __init__(self, target, events):
+        self.target = target
+        self.calls = []
+        self.events = events
+
+    def execute(self, sql, params=None):
+        flat = ' '.join(sql.split())
+        self.calls.append((flat, params))
+        if 'pg_advisory_xact_lock' in flat:
+            self.events.append(('lock', params))
+
+    def fetchone(self):
+        sql = self.calls[-1][0] if self.calls else ''
+        if 'FROM users u WHERE u.id' in sql:
+            return self.target
+        return None
+
+    def fetchall(self):
+        return []
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class GuestPermanentRoutesTest(unittest.TestCase):
+    """Настоящие ручки /guests с подменённым слоем данных.
+
+    Стражи на двери, а не на функции права: функцию легко держать верной и
+    забыть позвать — ровно так в этом разделе уже ломалось молча (см. шапку
+    wiki/access.py).
+    """
+
+    # Получатель: работающий оператор чужого отдела. Супер-админу граница отдела
+    # не мешает, а руководителю отказ «по сроку» должен прийти РАНЬШЕ, чем по
+    # отделу, — поэтому отдел у получателя и руководителя один.
+    TARGET = ('operator', 'Сотрудник', 'working', 7, False)
+
+    def build(self, role='super_admin', *, wiki_roles=(), permanent_id=None,
+              existing=None, grant=None, extend_hits=True):
+        from wiki import routes_guests  # noqa: F401 — роуты регистрирует blueprint
+        from wiki.routes import build_wiki_blueprint
+
+        self.created, self.extended, self.logged, self.events = [], [], [], []
+        context = {
+            'user_id': 448, 'otp_role': role, 'department_id': 7,
+            'direction_id': None, 'headed_department_ids': [], 'group_ids': [],
+            'wiki_roles': list(wiki_roles), 'access_mode': 'auto',
+        }
+        cursor = _GrantCursor(self.TARGET, self.events)
+
+        db = MagicMock()
+
+        @contextmanager
+        def _get_cursor():
+            yield cursor
+
+        db._get_cursor = _get_cursor
+
+        def _create(_cursor, **kwargs):
+            self.created.append(kwargs)
+            self.events.append(('create', None))
+            # existing — у человека уже есть ВРЕМЕННАЯ выдача того же объекта:
+            # create_grant её продлевает и отвечает created=False.
+            return 55, existing is None
+
+        def _extend(_cursor, grant_id, expires_at):
+            self.extended.append((grant_id, expires_at))
+            # extend_hits=False — строку не тронули: пока шёл запрос, выдачу
+            # уже сделали бессрочной (условие «expires_at < порога» в базе).
+            return extend_hits
+
+        def _permanent_check(_cursor, **kwargs):
+            self.events.append(('permanent_check', None))
+            return permanent_id
+
+        patches = [
+            (queries, 'load_access_context', lambda _c, _u: dict(context)),
+            (queries, 'granted_rule_rights', lambda _c, _s, _u: ({}, [])),
+            (queries, 'log_action', lambda _c, **kw: self.logged.append(kw)),
+            (guests, 'shareable_section_ids',
+             lambda _c, _ctx, _s, departments=None: None if departments is None else {3}),
+            (guests, 'permanent_grant_id', _permanent_check),
+            (guests, 'create_grant', _create),
+            (guests, 'extend_grant', _extend),
+            (guests, 'get_grant', lambda _c, _id: dict(grant) if grant else None),
+            (guests, 'article_section_ids', lambda _c, _id: {3}),
+            (structure, 'space_is_active', lambda _c, _id: True),
+            (structure, 'section_exists', lambda _c, _id: 3),
+        ]
+        for module, name, replacement in patches:
+            original = getattr(module, name)
+            setattr(module, name, replacement)
+            self.addCleanup(setattr, module, name, original)
+
+        app = Flask(__name__)
+        app.register_blueprint(build_wiki_blueprint(
+            db=db, require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (context['user_id'], None, None),
+            sensitive_access_granted=lambda _user_id, cursor=None: True,
+            client_ip=lambda: '127.0.0.1',
+            gcs={'signed_url': lambda *a, **k: 'https://x'},
+            session_id_provider=lambda: 'None',
+        ))
+        app.config['TESTING'] = True
+        return app.test_client()
+
+    TEMPORARY = {'id': 21, 'user_id': 476, 'section_id': 3, 'article_id': None,
+                 'space_id': None, 'granted_by': 448,
+                 'expires_at': datetime(2030, 1, 5, 23, 59, 59), 'revoked_at': None,
+                 'include_subsections': True, 'reason': None, 'kind': 'section'}
+
+    # ── Признак для формы ────────────────────────────────────────────────
+
+    def test_list_tells_the_form_who_may_grant_permanent(self):
+        for role, wiki_roles, expected in (
+                ('super_admin', (), True),
+                ('admin', (), False),
+                ('sv', (), False),
+                # Мастер-ключ роли вики: потолок по чину снят, срок — нет.
+                ('admin', ({'id': 5, 'code': 'wiki_admin', 'can_read': True,
+                            'can_manage_access': True},), False)):
+            with self.subTest(role=role, wiki_admin=bool(wiki_roles)):
+                with mock.patch.object(guests, 'list_grants',
+                                                lambda *a, **k: []):
+                    client = self.build(role, wiki_roles=wiki_roles)
+                    response = client.get('/api/wiki/guests')
+                self.assertEqual(200, response.status_code, response.get_json())
+                self.assertIs(expected, response.get_json()['can_grant_permanent'])
+                self.assertEqual(MAX_GUEST_DAYS, response.get_json()['max_days'])
+
+    def test_list_flag_is_not_the_space_right(self):
+        """Признак формы считается своим правом, а не правом на пространство:
+        расширь однажды второе — кнопка «Бессрочно» не должна появиться следом."""
+        with mock.patch('wiki.access.may_grant_guest_space', lambda _r: True), \
+                mock.patch.object(guests, 'list_grants', lambda *a, **k: []):
+            data = self.build('admin').get('/api/wiki/guests').get_json()
+        self.assertIs(True, data['can_grant_space'])
+        self.assertIs(False, data['can_grant_permanent'])
+
+    # ── Выдача ───────────────────────────────────────────────────────────
+
+    def test_super_admin_grants_any_object_permanently(self):
+        """Пространство, раздел и статья — «любой объект» дословно."""
+        for body, entity in (({'space_id': 11}, 'space'),
+                             ({'section_id': 3}, 'section'),
+                             ({'article_id': 7}, 'article')):
+            with self.subTest(entity=entity):
+                client = self.build('super_admin')
+                response = client.post('/api/wiki/guests', json=dict(
+                    body, user_id=476, permanent=True))
+                self.assertEqual(200, response.status_code, response.get_json())
+                data = response.get_json()
+                self.assertIs(True, data['permanent'])
+                self.assertIsNone(data['expires_at'])
+                self.assertTrue(data['created'])
+                [call] = self.created
+                self.assertEqual(guests.PERMANENT_EXPIRES_AT, call['expires_at'])
+                [record] = [r for r in self.logged if r['action'] == 'guest.grant']
+                self.assertEqual(entity, record['entity_type'])
+                self.assertIs(True, record['details']['permanent'])
+                self.assertIsNone(record['details']['expires_at'])
+
+    def test_regrant_turns_a_temporary_grant_permanent(self):
+        """Повторная выдача продлевает прежнюю — «бессрочно» делает её бессрочной,
+        и журнал называет это продлением, а тост — «стал бессрочным»."""
+        client = self.build('super_admin', existing=True)
+        response = client.post('/api/wiki/guests', json={
+            'section_id': 3, 'user_id': 476, 'permanent': True})
+        self.assertEqual(200, response.status_code, response.get_json())
+        self.assertFalse(response.get_json()['created'])
+        self.assertIs(True, response.get_json()['permanent'])
+        [record] = self.logged
+        self.assertEqual('guest.extend', record['action'])
+        self.assertIs(True, record['details']['permanent'])
+
+    def test_others_may_not_grant_permanent(self):
+        """Руководителю и супервайзеру — 403 словами, и ДО записи. Даже если
+        право на пространство однажды расширят: «бессрочно» — своё решение."""
+        for role in ('admin', 'sv'):
+            with self.subTest(role=role):
+                with mock.patch(
+                        'wiki.access.may_grant_guest_space', lambda _r: True):
+                    client = self.build(role)
+                    response = client.post('/api/wiki/guests', json={
+                        'section_id': 3, 'user_id': 476, 'permanent': True})
+                self.assertEqual(403, response.status_code, response.get_json())
+                self.assertEqual('WIKI_GUEST_PERMANENT_RIGHT',
+                                 response.get_json()['code'])
+                self.assertEqual([], self.created)
+                self.assertEqual([], self.logged)
+
+    def test_right_is_checked_before_the_term(self):
+        """«Бессрочно» вместе с днём от руководителя — отказ ПО ПРАВУ (403), а не
+        «уберите день» (400): чинить ему нечего, кнопки у него и нет."""
+        client = self.build('admin')
+        response = client.post('/api/wiki/guests', json={
+            'section_id': 3, 'user_id': 476, 'permanent': True, 'days': 7})
+        self.assertEqual(403, response.status_code, response.get_json())
+        self.assertEqual('WIKI_GUEST_PERMANENT_RIGHT', response.get_json()['code'])
+
+    def test_others_keep_the_two_week_ceiling(self):
+        client = self.build('admin')
+        response = client.post('/api/wiki/guests', json={
+            'section_id': 3, 'user_id': 476, 'days': MAX_GUEST_DAYS + 1})
+        self.assertEqual(400, response.status_code)
+        self.assertEqual([], self.created)
+
+    def test_permanent_with_a_day_is_refused(self):
+        client = self.build('super_admin')
+        response = client.post('/api/wiki/guests', json={
+            'section_id': 3, 'user_id': 476, 'permanent': True, 'days': 7})
+        self.assertEqual(400, response.status_code)
+        self.assertIn('Бессрочно', response.get_json()['error'])
+        self.assertEqual([], self.created)
+
+    def test_only_boolean_true_means_permanent(self):
+        """Строка "true" из чужого клиента — не «да»: срока нет, и это 400, а не
+        бессрочная выдача."""
+        client = self.build('super_admin')
+        response = client.post('/api/wiki/guests', json={
+            'section_id': 3, 'user_id': 476, 'permanent': 'true'})
+        self.assertEqual(400, response.status_code)
+        self.assertEqual([], self.created)
+
+    def test_grant_is_serialized_per_person_and_object(self):
+        """Проверка «нет ли бессрочной» и запись — под замком на пару «человек +
+        объект»: иначе две одновременные выдачи заводили бы две строки."""
+        client = self.build('super_admin')
+        response = client.post('/api/wiki/guests', json={
+            'space_id': 12, 'user_id': 476, 'permanent': True})
+        self.assertEqual(200, response.status_code, response.get_json())
+        self.assertEqual([('lock', ('wiki_guest:476:space:12',)),
+                          ('permanent_check', None), ('create', None)], self.events)
+
+    def test_lock_key_tells_people_and_objects_apart(self):
+        keys = []
+        for kwargs in ({'section_id': 3}, {'article_id': 3}, {'space_id': 3}):
+            cursor = _GrantCursor(None, [])
+            guests.lock_grant_object(cursor, user_id=476, **kwargs)
+            [(_kind, params)] = cursor.events
+            keys.append(params[0])
+        cursor = _GrantCursor(None, [])
+        guests.lock_grant_object(cursor, user_id=477, section_id=3)
+        keys.append(cursor.events[0][1][0])
+        self.assertEqual(['wiki_guest:476:section:3', 'wiki_guest:476:article:3',
+                          'wiki_guest:476:space:3', 'wiki_guest:477:section:3'], keys)
+
+    def test_second_permanent_grant_is_refused_in_words(self):
+        client = self.build('super_admin', permanent_id=9)
+        response = client.post('/api/wiki/guests', json={
+            'space_id': 12, 'user_id': 476, 'permanent': True})
+        self.assertEqual(409, response.status_code)
+        self.assertEqual('WIKI_GUEST_PERMANENT', response.get_json()['code'])
+        self.assertEqual([], self.created)
+
+    def test_temporary_grant_still_answers_with_a_date(self):
+        client = self.build('super_admin')
+        response = client.post('/api/wiki/guests', json={
+            'section_id': 3, 'user_id': 476, 'days': 3})
+        self.assertEqual(200, response.status_code, response.get_json())
+        data = response.get_json()
+        self.assertIs(False, data['permanent'])
+        self.assertTrue(data['expires_at'].endswith('T23:59:59'))
+        [call] = self.created
+        self.assertFalse(guests.is_permanent(call['expires_at']))
+        self.assertIs(False, self.logged[0]['details']['permanent'])
+        self.assertEqual(data['expires_at'], self.logged[0]['details']['expires_at'])
+
+    # ── Продление ────────────────────────────────────────────────────────
+
+    def test_super_admin_makes_a_temporary_grant_permanent(self):
+        client = self.build('super_admin', grant=self.TEMPORARY)
+        response = client.patch('/api/wiki/guests/21', json={'permanent': True})
+        self.assertEqual(200, response.status_code, response.get_json())
+        self.assertEqual({'status': 'extended', 'expires_at': None, 'permanent': True},
+                         response.get_json())
+        self.assertEqual([(21, guests.PERMANENT_EXPIRES_AT)], self.extended)
+        [record] = self.logged
+        self.assertEqual('guest.extend', record['action'])
+        self.assertIs(True, record['details']['permanent'])
+        self.assertIsNone(record['details']['expires_at'])
+
+    def test_extension_that_lost_the_race_tells_the_truth(self):
+        """Пока шёл запрос «продлить на 3 дня», выдачу сделали бессрочной:
+        extend_grant строку не тронул. Не «продлён до …» и не запись в журнал."""
+        client = self.build('super_admin', grant=self.TEMPORARY, extend_hits=False)
+        response = client.patch('/api/wiki/guests/21', json={'days': 3})
+        self.assertEqual(409, response.status_code, response.get_json())
+        self.assertEqual('WIKI_GUEST_PERMANENT', response.get_json()['code'])
+        self.assertEqual([], self.logged)
+
+    def test_others_may_not_extend_to_permanent(self):
+        """Своя выдача руководителя (granted_by = он) — трогать её он вправе,
+        а сделать бессрочной — нет."""
+        client = self.build('admin', grant=self.TEMPORARY)
+        response = client.patch('/api/wiki/guests/21', json={'permanent': True})
+        self.assertEqual(403, response.status_code, response.get_json())
+        self.assertEqual('WIKI_GUEST_PERMANENT_RIGHT', response.get_json()['code'])
+        self.assertEqual([], self.extended)
+
+    def test_permanent_grant_is_still_not_extended(self):
+        grant = dict(self.TEMPORARY, expires_at=guests.PERMANENT_EXPIRES_AT)
+        client = self.build('super_admin', grant=grant)
+        response = client.patch('/api/wiki/guests/21', json={'permanent': True})
+        self.assertEqual(400, response.status_code)
+        self.assertEqual('WIKI_GUEST_PERMANENT', response.get_json()['code'])
+        self.assertEqual([], self.extended)
+
+    def test_plain_extension_still_works(self):
+        client = self.build('admin', grant=self.TEMPORARY)
+        response = client.patch('/api/wiki/guests/21', json={'days': 3})
+        self.assertEqual(200, response.status_code, response.get_json())
+        self.assertIs(False, response.get_json()['permanent'])
+        [(grant_id, until)] = self.extended
+        self.assertEqual(21, grant_id)
+        self.assertFalse(guests.is_permanent(until))
 
 
 class BranchDepartmentAgreementTest(unittest.TestCase):

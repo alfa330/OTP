@@ -9,15 +9,19 @@ import {
     clampDate,
     daysLeftLabel,
     deadlineLabel,
+    extendDoneText,
     fmtDate,
     fmtDeadline,
     fmtTime,
+    grantDoneText,
     isEndOfDay,
     isPermanent,
     plural,
     presetLabel,
     presetsWithin,
     targetLabel,
+    termChosen,
+    termPayload,
     urgency,
 } from '../src/components/wiki/guestAccess.js';
 import { auditFacts } from '../src/components/wiki/auditEvents.js';
@@ -297,6 +301,65 @@ test('экран статьи и списка прячет срок бессро
         new URL('../src/components/wiki/WikiGuests.jsx', import.meta.url), 'utf8');
     assert.ok(list.includes('{deadlineLabel(item)}'));
     assert.ok(/\{!isPermanent\(item\) && \(\s*<button[^>]*onClick=\{\(\) => onExtend\(item\)\}/.test(list));
+});
+
+/* «Бессрочно» в форме (решение владельца 25.11.2026: супер-админ, любой объект,
+ * при выдаче и при продлении). Сервер принимает ровно один ответ на «до какого
+ * срока» (wiki/guests.py: resolve_term) — форма обязана слать ровно один. */
+test('бессрочно уезжает на сервер одно — без дня, даты и часа', () => {
+    assert.deepEqual(
+        termPayload({ days: 7, until: '2026-12-01', atTime: '18:00', permanent: true }),
+        { permanent: true });
+    assert.deepEqual(termPayload({ days: 7, until: '', atTime: '', permanent: false }),
+                     { days: 7 });
+    assert.deepEqual(termPayload({ days: 7, until: '2026-12-01', atTime: '' }),
+                     { until: '2026-12-01' });
+    assert.deepEqual(termPayload({ days: 0, until: '', atTime: '18:00' }),
+                     { days: 0, at_time: '18:00' });
+});
+
+test('«сегодня» — тоже названный срок: кнопка «Выдать» не гаснет', () => {
+    // Ловушка, которую закрывает termChosen: проверка «!!days» считала ноль
+    // пустотой, и «сегодня до 18:00» нельзя было отправить.
+    assert.equal(termChosen({ days: 0, until: '' }), true);
+    assert.equal(termChosen({ days: 14, until: '' }), true);
+    assert.equal(termChosen({ days: null, until: '2026-12-01' }), true);
+    assert.equal(termChosen({ days: null, until: '', permanent: true }), true);
+    for (const days of [null, undefined, '', -1, 1.5]) {
+        assert.equal(termChosen({ days, until: '' }), false, `days=${days}`);
+    }
+});
+
+test('тост говорит, что получилось на самом деле', () => {
+    assert.equal(grantDoneText({ created: true, permanent: true, expires_at: null }),
+                 'Бессрочный гостевой доступ выдан');
+    // Повторная выдача продлевает прежнюю: «бессрочно» тогда — «стал бессрочным».
+    assert.equal(grantDoneText({ created: false, permanent: true, expires_at: null }),
+                 'Доступ стал бессрочным');
+    assert.equal(grantDoneText({ created: true, permanent: false,
+                                 expires_at: '2026-12-01T23:59:59' }),
+                 'Гостевой доступ выдан — до 01.12.2026');
+    assert.equal(grantDoneText({ created: false, expires_at: '2026-12-01T18:00:00' }),
+                 'Срок доступа продлён — до 01.12.2026, 18:00');
+    assert.equal(extendDoneText({ permanent: true, expires_at: null }),
+                 'Доступ стал бессрочным');
+    assert.equal(extendDoneText({ permanent: false, expires_at: '2026-12-01T23:59:59' }),
+                 'Срок продлён до 01.12.2026');
+});
+
+test('форма шлёт срок одной функцией — и при выдаче, и при продлении', () => {
+    // Две двери с двумя своими сборками тела однажды разойдутся: продление
+    // начнёт слать час вместе с «бессрочно», и сервер ответит 400.
+    const source = readFileSync(
+        new URL('../src/components/wiki/WikiGuests.jsx', import.meta.url), 'utf8');
+    assert.equal((source.match(/termPayload\(\{ days, until, atTime, permanent: forever \}\)/g)
+                  || []).length, 2);
+    assert.equal((source.match(/termChosen\(\{ days, until, permanent: forever \}\)/g)
+                  || []).length, 2);
+    assert.equal(/!!days \|\| !!until|!days && !until/.test(source), false);
+    // Без права «Бессрочно» не уезжает, даже если состояние как-то осталось.
+    assert.equal((source.match(/const forever = !!meta\?\.can_grant_permanent && permanent;/g)
+                  || []).length, 2);
 });
 
 test('потолок срока во фронте не зашит — он приезжает с сервера', () => {
