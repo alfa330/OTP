@@ -129,6 +129,39 @@ def test_request_goes_through_as_is(forward):
     assert [v for k, v in headers if k.lower() == 'set-cookie'] == ['a=1; Path=/', 'b=2; Path=/']
 
 
+def test_cookies_of_one_client_never_reach_another(forward):
+    """25.11: общая сессия requests запомнила cookie входа из Set-Cookie и подставляла их всем
+    запросам без своих cookie — вход остальных получал 403 «Invalid request origin», а запрос с
+    просроченным токеном прошёл бы под чужой учёткой."""
+    status, headers, _ = _call(forward, 'POST', '/api/login', body=b'{}',
+                               headers={'Content-Type': 'application/json'})
+    assert status.startswith('200')
+    # Клиенту, который входил, Set-Cookie отдаются как есть.
+    assert [v for k, v in headers if k.lower() == 'set-cookie'] == ['a=1; Path=/', 'b=2; Path=/']
+    for method in ('GET', 'POST'):
+        _, _, chunks = _call(forward, method, '/api/auth/me', body=b'{}' if method == 'POST' else b'',
+                             headers={'Authorization': 'Bearer other'})
+        seen = json.loads(b''.join(c for _, c in chunks))
+        assert 'cookie' not in seen['headers'], seen['headers']
+
+
+def test_own_cookie_passes_as_is(forward):
+    _, _, chunks = _call(forward, 'GET', '/api/x', headers={'Cookie': 'otp_access_token=mine'})
+    assert json.loads(b''.join(c for _, c in chunks))['headers']['cookie'] == 'otp_access_token=mine'
+
+
+def test_compression_is_not_asked_for_the_client(forward):
+    """Сжатия клиент не просил — пересылка его за него не просит: иначе старый клиент получил бы
+    gzip, которого не умеет читать."""
+    _, _, chunks = _call(forward, 'GET', '/api/x')
+    seen = json.loads(b''.join(c for _, c in chunks))['headers']
+    assert seen.get('accept-encoding') in (None, 'identity'), seen
+    assert 'accept' not in seen, seen
+    # А если просил — просьба доходит.
+    _, _, chunks = _call(forward, 'GET', '/api/x', headers={'Accept-Encoding': 'gzip'})
+    assert json.loads(b''.join(c for _, c in chunks))['headers']['accept-encoding'] == 'gzip'
+
+
 def test_encoded_path_survives(forward):
     # Как отдаёт waitress (PEP 3333): байты пути UTF-8, прочитанные как latin-1.
     wsgi_path = '/api/x/a b/я'.encode('utf-8').decode('latin-1')

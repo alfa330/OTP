@@ -11,6 +11,13 @@ https://otp-2-fos4.onrender.com: оно вшито в них при сборке
 Здесь нет ни бота, ни базы, ни планировщика: портал на Render НЕ поднимается. Без
 OTP_FORWARD_TO (https://…) процесс завершается с ошибкой, а не начинает что-то ещё.
 
+Пересылка одна на всех клиентов, поэтому у неё нет своего состояния между запросами: urllib3
+напрямую, без requests.Session. У сессии requests есть банка cookie — 25.11 она запомнила
+cookie входа одного оператора из Set-Cookie и подставляла их во все запросы без своих cookie:
+вход остальных получал 403 «Invalid request origin», а запрос с просроченным токеном прошёл бы
+под чужой учёткой. Ещё сессия дописывает свои заголовки (Accept-Encoding: gzip), которых
+клиент не просил. Здесь уходят только заголовки самого клиента.
+
 Start Command на Render: python deploy/render_forward.py
 """
 import logging
@@ -18,8 +25,8 @@ import os
 import sys
 from urllib.parse import quote
 
-import requests
-from requests.adapters import HTTPAdapter
+import certifi
+import urllib3
 
 TARGET = (os.getenv('OTP_FORWARD_TO') or '').strip().rstrip('/')
 # Заголовки одного соединения (RFC 9110 §7.6.1) и те, что пересчитываются при пересылке.
@@ -40,10 +47,12 @@ PATH_SAFE = "/:@!$&'()*+,;=-._~"
 
 log = logging.getLogger('render_forward')
 
-_session = requests.Session()
-_session.trust_env = False
-_session.mount('https://', HTTPAdapter(pool_connections=4, pool_maxsize=64, max_retries=0))
-_session.mount('http://', HTTPAdapter(pool_connections=4, pool_maxsize=64, max_retries=0))
+# Ни cookie, ни повторов, ни переходов по редиректам, ни прокси из окружения: это всё
+# состояние или решения, которые принимает клиент, а не пересылка.
+_pool = urllib3.PoolManager(
+    num_pools=4, maxsize=64, block=False, retries=False,
+    timeout=urllib3.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT),
+    cert_reqs='CERT_REQUIRED', ca_certs=certifi.where())
 
 
 def upstream_url(environ, target=None):
@@ -99,7 +108,9 @@ def read_body(environ):
 
 def response_headers(raw_headers):
     out = []
-    for name, value in raw_headers.items():
+    # Повторы (два Set-Cookie) — отдельными строками, а не склеенными через запятую.
+    items = raw_headers.iteritems() if hasattr(raw_headers, 'iteritems') else raw_headers.items()
+    for name, value in items:
         lowered = name.lower()
         # Длину отдаём как есть: тело идёт байт в байт (сжатое — сжатым).
         if lowered in HOP_BY_HOP and lowered != 'content-length':
@@ -124,26 +135,31 @@ def app(environ, start_response):
         return _plain(start_response, '413 Payload Too Large', str(exc))
     method = environ.get('REQUEST_METHOD', 'GET')
     try:
-        upstream = _session.request(
-            method, upstream_url(environ), headers=request_headers(environ), data=body,
-            stream=True, allow_redirects=False, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
-    except requests.RequestException as exc:
+        upstream = _pool.urlopen(
+            method, upstream_url(environ), body=body, headers=request_headers(environ),
+            redirect=False, assert_same_host=False, preload_content=False, decode_content=False)
+    except (urllib3.exceptions.HTTPError, OSError) as exc:
         log.warning('новый сервер не ответил: %s %s — %s', method, environ.get('PATH_INFO'), exc)
         return _plain(start_response, '502 Bad Gateway', 'upstream unavailable')
-    status = '%d %s' % (upstream.status_code, upstream.reason or '')
-    start_response(status.strip(), response_headers(upstream.raw.headers))
+    status = '%d %s' % (upstream.status, upstream.reason or '')
+    start_response(status.strip(), response_headers(upstream.headers))
 
     def body_iter():
+        finished = False
         try:
             # Без распаковки: Content-Encoding ответа остаётся прежним. Чанки — по мере прихода
             # (SSE не копится в буфере).
-            for chunk in upstream.raw.stream(CHUNK_BYTES, decode_content=False):
+            for chunk in upstream.stream(CHUNK_BYTES, decode_content=False):
                 if chunk:
                     yield chunk
+            finished = True
         except Exception as exc:  # noqa: BLE001 — обрыв посреди потока: клиент переподключится
             log.info('поток %s оборвался: %s', environ.get('PATH_INFO'), exc)
         finally:
-            upstream.close()
+            if not finished:
+                # Недочитанный ответ (клиент ушёл с SSE): соединение живым в пул не возвращаем.
+                upstream.close()
+            upstream.release_conn()
 
     return body_iter()
 
