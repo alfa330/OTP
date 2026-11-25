@@ -283,6 +283,89 @@ export const hhResumeSummary = (resume) => {
         .filter(Boolean).join(' · ');
 };
 
+/* ── Поиск по базе резюме hh.kz (владелец 25.11.2026, вкладка «База hh») ── */
+
+export const HH_KEYWORDS_MAX = 10;
+const HH_OPERATOR_WORDS = new Set(['or', 'and', 'not', 'или', 'и', 'не']);
+
+/** Кандидат одной строкой на карточке: «26 лет · Алматы · 200 000 ₸». */
+export const hhBaseLine = (item) => [
+    item?.age ? `${item.age} ${plural(item.age, 'год', 'года', 'лет')}` : null,
+    item?.area || null,
+    hhMoney(item?.salary) || null,
+].filter(Boolean).join(' · ');
+
+/** Опыт на карточке: «Опыт 3 года 2 мес. · Продавец-консультант, ТОО Ромашка». */
+export const hhBaseExperience = (item) => {
+    const last = (item?.experience || [])[0];
+    const job = last ? [last.position, last.company].filter(Boolean).join(', ') : '';
+    const text = item?.experience_text || '';
+    const total = text === 'без опыта' ? 'Без опыта' : (text ? `Опыт ${text}` : '');
+    return [total, job].filter(Boolean).join(' · ');
+};
+
+/** Цвет балла ИИ: от 70 — зелёный, 50–69 — жёлтый, ниже — красный, без балла — серый. */
+export const hhBaseTone = (score) => (score == null ? 'slate' : score >= 70 ? 'green' : score >= 50 ? 'amber' : 'red');
+
+/** Нужен ли рекрутеру заход на hh, чтобы открыть контакты: закрытые — да (спишется контакт); доступные без списания и
+ *  уже открытые мост прочитает сам. */
+export const hhBaseNeedsHh = (item) => item?.access !== 'free' && item?.access !== 'opened';
+
+/** Состояние кандидата словом и цветом точки — одно, самое важное. */
+export const hhBaseState = (item, meId) => {
+    if (!item) return null;
+    if (item.status === 'taken') {
+        if (item.take_outcome === 'employee') return { tone: 'slate', text: 'Телефон сотрудника' };
+        return { tone: 'green', text: item.known?.candidate_no ? `В воронке · №${item.known.candidate_no}` : 'В воронке' };
+    }
+    if (item.status === 'taking') {
+        const mine = meId != null && Number(item.status_by) === Number(meId);
+        return { tone: 'blue', text: mine ? 'Ждём контакты с hh' : `Берёт ${item.status_by_name || 'рекрутер'}` };
+    }
+    if (item.known && !item.known.is_closed) {
+        return { tone: 'amber', text: `Уже в воронке${item.known.candidate_no ? ` · №${item.known.candidate_no}` : ''}` };
+    }
+    if (item.status === 'rejected') return { tone: 'slate', text: 'Не подошёл' };
+    if (item.access === 'free') return { tone: 'green', text: 'Контакты без списания' };
+    if (item.topic?.label) return { tone: 'slate', text: `${item.topic.label[0].toUpperCase()}${item.topic.label.slice(1)}` };
+    if (item.job_status === 'active_search') return { tone: 'slate', text: 'Активно ищет работу' };
+    return null;
+};
+
+/** Поиск вакансии одной строкой: «Найдено на hh 6 472 · новых 12 · 25 ноября, 11:00»; идёт — «Ищем на hh…». */
+export const hhBaseSearchLine = (vacancy) => {
+    if (!vacancy) return '';
+    if (vacancy.running) return 'Ищем на hh…';
+    if (!vacancy.enabled) return 'Поиск выключен';
+    if (!vacancy.last_run_at) return vacancy.last_error ? `Поиск не прошёл: ${vacancy.last_error}` : 'Первый поиск — в ближайшие минуты';
+    const total = vacancy.last_total != null && Number.isFinite(Number(vacancy.last_total))
+        ? `Найдено на hh ${String(vacancy.last_total).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')}` : null;
+    const fresh = vacancy.last_new ? `новых ${vacancy.last_new}` : 'новых нет';
+    return [total, fresh, longTime(vacancy.last_run_at)].filter(Boolean).join(' · ');
+};
+
+/** Ключевые слова из поля ввода — запятая, точка с запятой и перенос строки разделяют; повтор (без учёта регистра),
+ *  слова языка запросов hh (OR, AND, NOT) и больше HH_KEYWORDS_MAX — не добавляются. */
+export const hhAddKeywords = (list, text) => {
+    const out = [...(list || [])];
+    const seen = new Set(out.map((item) => String(item).toLowerCase()));
+    String(text || '').split(/[\n,;]+/).forEach((raw) => {
+        const word = raw.replace(/["«»()[\]{}!*]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+        const key = word.toLowerCase();
+        if (!word || seen.has(key) || HH_OPERATOR_WORDS.has(key) || out.length >= HH_KEYWORDS_MAX) return;
+        seen.add(key);
+        out.push(word);
+    });
+    return out;
+};
+
+/** Тело правки поиска вакансии: {enabled, portrait, keywords}. */
+export const hhSearchBody = ({ enabled, portrait, keywords }) => ({
+    enabled: Boolean(enabled),
+    portrait: String(portrait || '').trim(),
+    keywords: hhAddKeywords([], (keywords || []).join('\n')),
+});
+
 const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа',
     'сентября', 'октября', 'ноября', 'декабря'];
 const MONTHS_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август',
@@ -562,6 +645,8 @@ export const hiringTabs = (caps = {}) => {
         caps.recruiter && 'desk',
         'board',
         (caps.recruiter || caps.lead) && 'chats',
+        // «База hh» — поиск по базе резюме hh.kz (владелец 25.11.2026): рекрутеры берут кандидатов, руководитель настраивает.
+        (caps.recruiter || caps.lead) && 'base',
         caps.groups && !trainerOnly && 'groups',
         (caps.recruiter || caps.lead || caps.dept_head) && 'reports',
         caps.upload && 'upload',

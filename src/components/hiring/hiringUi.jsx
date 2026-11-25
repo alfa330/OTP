@@ -68,6 +68,7 @@ export const Notice = ({ tone = 'amber', title, children, action }) => {
     const tones = {
         amber: 'bg-amber-50/80 ring-amber-200/70 text-amber-900',
         red: 'bg-rose-50/80 ring-rose-200/70 text-rose-900',
+        blue: 'bg-blue-50/80 ring-blue-200/70 text-blue-900',
         slate: 'bg-white ring-slate-200/70 text-slate-700',
     };
     return (

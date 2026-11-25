@@ -30,7 +30,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-from hiring import access, hh, notices, queries, reports, rules, schema, wa_live, wa_media
+from hiring import access, hh, hh_base, notices, queries, reports, rules, schema, wa_live, wa_media
 from hiring.service import HiringError, HiringService
 
 PORT = os.environ.get('HIRING_TEST_PORT')
@@ -3497,3 +3497,369 @@ def test_chat_waiting_backfill_on_schema_upgrade(world):
         cur.execute("SELECT key, waiting, waiting_since, last_outbound_at FROM hiring_wa_chats ORDER BY key")
         rows = cur.fetchall()
     assert rows == [('+77055558844', 2, NOW, None), ('+77055558855', 0, None, NOW + timedelta(minutes=5))]
+
+
+# ─── Поиск по базе резюме hh.kz (владелец 25.11.2026, hiring/hh_base.py) ────────
+
+BASE_NOW = datetime(2026, 11, 25, 11, 0)
+PORTRAIT = 'Оператор входящей линии: грамотная русская речь, казахский желателен, опыт с клиентами, сменный график'
+
+
+def base_hash(n):
+    return '%038x' % (0xb0000 + n)
+
+
+def base_found(n, **extra):
+    item = {'hash': base_hash(n), 'resume_id': str(900000 + n), 'title': 'Оператор call-центра', 'age': 20 + n,
+            'gender': 'female', 'area': 'Алматы', 'salary': {'amount': 250000, 'currency': 'KZT'},
+            'experience_months': 14, 'experience': [{'company': 'ТОО Ромашка', 'position': 'Оператор',
+                                                     'start': '2024-01-01', 'end': None}],
+            'skills': ['Работа с клиентами'], 'job_status': 'active_search', 'online': False,
+            'last_activity_at': '2026-11-25T09:00:00+03:00', 'updated_at': '2026-11-24T20:00:00+00:00', 'access': 'closed',
+            'topic': None, 'email': 'тайком@почта.kz', 'phone': '+77010000000'}
+    item.update(extra)
+    return item
+
+
+class _Scorer:
+    """ИИ-двойник: 90 по краткой карточке, 75 по полному резюме; запоминает, что ему показали."""
+
+    def __init__(self):
+        self.calls = []
+        self.fail = False
+
+    def __call__(self, vacancy, portrait, candidates):
+        self.calls.append((vacancy, portrait, candidates))
+        if self.fail:
+            from hiring import hh_ai
+            raise hh_ai.HhAiError('ИИ сейчас недоступен')
+        return ({key: {'score': 90 if 'краткая карточка' in text else 75, 'verdict': 'Подходит по опыту',
+                       'pros': ['опыт с клиентами'], 'cons': []} for key, text in candidates},
+                {'model': 'gemini-test', 'ms': 5, 'tokens_in': 100, 'tokens_out': 20})
+
+
+@pytest.fixture
+def base(world):
+    """Мир с поиском по базе: фоновая работа — сразу (балл ставит двойник ИИ), каталог кабинета от моста."""
+    scorer = _Scorer()
+    world['clock'].now = BASE_NOW
+    service = HiringService(cursor_factory=world['db']._get_cursor, now=world['clock'],
+                            web_app_base_url='https://portal.test', spawn=lambda fn, *args: fn(*args), hh_scorer=scorer)
+    world['service'] = service
+    world['scorer'] = scorer
+    hh_push(world, vacancies=[{'id': HH_OPERATOR, 'name': 'Оператор call-центра', 'area': 'Алматы', 'area_id': 160},
+                              {'id': HH_SUPERVISOR, 'name': 'Супервайзер КЦ', 'area': 'Талдыкорган', 'area_id': 188}])
+    with world['db']._get_cursor() as cur:
+        world['sources'] = {row['code']: row for row in queries.list_sources(cur)}
+    return world
+
+
+def base_tasks(world, done=(), take=True):
+    return world['service'].hh_agent_tasks({'done': list(done), 'wait': 0, 'take': take}, sleep=lambda _s: None)
+
+
+def enable_search(world, vacancy=HH_OPERATOR, keywords=('оператор call-центра', 'оператор колл-центра'), portrait=PORTRAIT):
+    return world['service'].hh_search_save(ctx_of(world, LEAD_GRANT), vacancy,
+                                           {'enabled': True, 'portrait': portrait, 'keywords': list(keywords)})
+
+
+def search_and_find(world, items, total=6472):
+    tasks = base_tasks(world)['tasks']
+    search = [task for task in tasks if task['kind'] == 'search']
+    assert len(search) == 1
+    base_tasks(world, [{'id': search[0]['id'], 'ok': True, 'kind': 'search', 'total': total, 'pages': 1, 'items': items}])
+    return search[0]
+
+
+def base_rows(world, vacancy=HH_OPERATOR):
+    return world['service'].hh_base_list(ctx_of(world, REC1), vacancy)['items']
+
+
+def test_hh_base_search_settings_and_first_search(base):
+    """Поиск включает руководитель: портрет и ключевые слова обязательны; первый поиск — сразу, за 30 дней по
+    релевантности, в регионе вакансии; рекрутер настраивать не может и портрета не видит."""
+    service = base['service']
+    with pytest.raises(HiringError) as caught:
+        service.hh_search_save(ctx_of(base, REC1), HH_OPERATOR, {'enabled': True, 'portrait': PORTRAIT, 'keywords': ['x']})
+    assert caught.value.status == 403
+    with pytest.raises(HiringError) as caught:
+        service.hh_search_save(ctx_of(base, LEAD_GRANT), HH_OPERATOR, {'enabled': True, 'portrait': PORTRAIT, 'keywords': []})
+    assert 'ключевое слово' in caught.value.message
+    with pytest.raises(HiringError) as caught:
+        service.hh_search_save(ctx_of(base, LEAD_GRANT), '999', {'enabled': False, 'keywords': ['x']})
+    assert caught.value.status == 404
+    overview = enable_search(base, keywords=['оператор call-центра', '"оператор колл-центра"', 'Оператор call-центра'])
+    operator = next(v for v in overview['vacancies'] if v['hh_vacancy_id'] == HH_OPERATOR)
+    assert (operator['enabled'], operator['keywords'], operator['portrait']) == (
+        True, ['оператор call-центра', 'оператор колл-центра'], PORTRAIT)
+    assert operator['running'] is True                           # первый поиск поставлен сразу
+    tasks = base_tasks(base)['tasks']
+    assert len(tasks) == 1 and tasks[0]['kind'] == 'search' and tasks[0]['vacancy_id'] == HH_OPERATOR
+    assert tasks[0]['params']['text'] == '"оператор call-центра" OR "оператор колл-центра"'
+    assert (tasks[0]['params']['area'], tasks[0]['params']['search_period'], tasks[0]['params']['order_by']) == (
+        '160', '30', 'relevance')
+    assert tasks[0]['pages'] == 5 and tasks[0]['stop_before'] is None
+    assert base_tasks(base)['tasks'] == []                       # отданное задание второй раз не уходит
+    view = service.hh_base_overview(ctx_of(base, REC1))
+    assert [v['hh_vacancy_id'] for v in view['vacancies']] == [HH_OPERATOR] and view['vacancies'][0]['portrait'] is None
+    assert view['can_manage'] is False and view['bridge']['ready'] is False      # мост ещё hh/1.0.0
+
+
+def test_hh_base_search_results_scored_and_listed(base):
+    """Найденное — в базу, новые считаются; балл ставит ИИ по портрету, в запрос не уходят ни почта, ни телефон;
+    следующий поиск — свежие за 3 дня до уже виденных; повтор того же резюме — не новый; вечером автопоиска нет."""
+    enable_search(base)
+    search = search_and_find(base, [base_found(1), base_found(2, access='free'), {'hash': 'не-хеш'}])
+    rows = base_rows(base)
+    assert sorted((r['hash'], r['score'], r['score_basis'], r['access']) for r in rows) == [
+        (base_hash(1), 90, 'snippet', 'closed'), (base_hash(2), 90, 'snippet', 'free')]
+    assert rows[0]['verdict'] == 'Подходит по опыту' and rows[0]['experience_text'] == '1 год 2 мес.'
+    vacancy, portrait, candidates = base['scorer'].calls[0]
+    assert (vacancy, portrait) == ('Оператор call-центра', PORTRAIT)
+    text = '\n'.join(text for _key, text in candidates)
+    assert 'Оператор call-центра' in text and 'краткая карточка' in text
+    assert 'почта' not in text and '+7701' not in text
+    with base['db']._get_cursor() as cur:
+        search_row = queries.hh_search_get(cur, HH_OPERATOR)
+        cur.execute("SELECT outcome FROM hiring_hh_tasks WHERE id = %s", (int(search['id']),))
+        assert cur.fetchone()[0] == 'ok'
+    assert (search_row['last_total'], search_row['last_found'], search_row['last_new'], search_row['runs']) == (6472, 2, 2, 1)
+    base['clock'].now = BASE_NOW + timedelta(hours=3)
+    tasks = [task for task in base_tasks(base)['tasks'] if task['kind'] == 'search']
+    assert tasks[0]['params']['order_by'] == 'publication_time' and tasks[0]['params']['search_period'] == '3'
+    assert tasks[0]['stop_before'] == '2026-11-24T11:00:00+05:00' and tasks[0]['pages'] == 3
+    base_tasks(base, [{'id': tasks[0]['id'], 'ok': True, 'total': 6480, 'items': [base_found(1), base_found(3)]}])
+    with base['db']._get_cursor() as cur:
+        assert queries.hh_search_get(cur, HH_OPERATOR)['last_new'] == 1
+    assert len(base_rows(base)) == 3
+    base['clock'].now = datetime(2026, 11, 25, 20, 30)
+    assert [task for task in base_tasks(base)['tasks'] if task['kind'] == 'search'] == []
+
+
+def test_hh_base_view_refreshes_resume_and_rescores(base):
+    """Рекрутер открыл резюме — мост перечитывает его на hh (владелец: «обновление резюмешки в момент просмотра»):
+    полное резюме во все строки этого резюме, балл ставится заново по полному; повторное открытие в ближайшие
+    10 минут hh не дёргает; контакты при просмотре не берутся."""
+    enable_search(base)
+    search_and_find(base, [base_found(1)])
+    row_id = base_rows(base)[0]['id']
+    item = base['service'].hh_base_get(ctx_of(base, REC1), row_id, refresh=True)
+    assert item['refreshing'] is True and item['has_full'] is False and item['resume']['title'] == 'Оператор call-центра'
+    tasks = [task for task in base_tasks(base)['tasks'] if task['kind'] == 'resume']
+    assert tasks == [{'id': tasks[0]['id'], 'kind': 'resume', 'hash': base_hash(1), 'reason': 'view'}]
+    full = {'title': 'Оператор call-центра', 'languages': [{'title': 'Казахский', 'degree': 'b2'}],
+            'experience': [{'company': 'ТОО Ромашка', 'position': 'Оператор', 'description': 'Входящие звонки'}],
+            'email': 'скрыто@hh.kz'}
+    base_tasks(base, [{'id': tasks[0]['id'], 'ok': True, 'kind': 'resume', 'resume': full, 'access': 'closed',
+                       'contacts': {'phones': ['+77010000001']}}])
+    item = base['service'].hh_base_get(ctx_of(base, REC1), row_id, refresh=True)
+    assert item['has_full'] is True and item['refreshing'] is False
+    assert item['resume']['languages'] == [{'title': 'Казахский', 'level': 'B2 — средне-продвинутый'}]
+    assert 'email' not in item['resume']
+    assert (item['score'], item['score_basis']) == (75, 'full')              # балл заново — по полному резюме
+    assert 'Казахский' in base['scorer'].calls[-1][2][0][1]
+    assert [t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume'] == []    # свежее — hh не трогаем
+    with base['db']._get_cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM hiring_hh_resumes WHERE status <> 'new' OR card_id IS NOT NULL")
+        assert cur.fetchone()[0] == 0
+
+
+def test_hh_base_take_waits_for_contacts_then_card_in_work(base):
+    """«Взять в работу»: пока рекрутер не открыл контакты на hh — заметка и следующая проверка через минуту; контакты
+    пришли — карточка с источником «База HeadHunter» сразу «В работе» у нажавшего, второй рекрутер взять его не может,
+    в колоколе — уведомление, у карточки — резюме из базы."""
+    enable_search(base)
+    search_and_find(base, [base_found(1)])
+    row_id = base_rows(base)[0]['id']
+    service = base['service']
+    with pytest.raises(HiringError):
+        service.hh_base_take(ctx_of(base, TRAINER), row_id)
+    item = service.hh_base_take(ctx_of(base, REC1), row_id)
+    assert item['status'] == 'taking' and item['status_by_name'] == 'Первый Рекрутер'
+    with pytest.raises(HiringError) as caught:
+        service.hh_base_take(ctx_of(base, REC2), row_id)
+    assert 'Первый Рекрутер' in caught.value.message
+    # Контакты закрыты — рекрутер открывает их на hh сам: сразу мост резюме не читает, первая проверка — через 20 с
+    # (или когда рекрутер вернётся во вкладку iCORE — «Проверить»).
+    assert [t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume'] == []
+    base['clock'].now = BASE_NOW + timedelta(seconds=21)
+    task = next(t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume')
+    assert task['reason'] == 'contacts'
+    base_tasks(base, [{'id': task['id'], 'ok': True, 'resume': {'title': 'Оператор'}, 'access': 'closed', 'contacts': None}])
+    item = service.hh_base_get(ctx_of(base, REC1), row_id)
+    assert item['status'] == 'taking' and item['contacts_note'] == 'Контакты на hh ещё не открыты'
+    assert [t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume'] == []      # следующая проверка — через минуту
+    base['clock'].now = BASE_NOW + timedelta(seconds=61)
+    task = next(t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume')
+    assert task['reason'] == 'contacts'
+    base_tasks(base, [{'id': task['id'], 'ok': True, 'resume': {'title': 'Оператор'}, 'access': 'opened',
+                       'contacts': {'last_name': 'Иванова', 'first_name': 'Анна', 'middle_name': None,
+                                    'phones': ['7 (707) 123-45-67'], 'email': 'anna@example.kz'}}])
+    item = service.hh_base_get(ctx_of(base, REC1), row_id)
+    assert (item['status'], item['take_outcome']) == ('taken', 'created') and item['card_id']
+    with base['db']._get_cursor() as cur:
+        card = queries.get_card(cur, item['card_id'])
+        assert (card['source_code'], card['kind'], card['stage'], card['recruiter_id']) == ('hh_base', 'contact', 'in_work', REC1)
+        assert (card['full_name'], card['phone'], card['city']) == ('Иванова Анна', '+77071234567', 'Алматы')
+        assert card['platform_ref'] == 'https://hh.kz/resume/%s' % base_hash(1)
+        assert card['vacancy_text'] == 'Оператор call-центра' and card['comment'] == 'Почта с hh: anna@example.kz'
+        assert [t['result'] for t in queries.card_touches(cur, card['id'])] == ['hh_base']
+        assert [s['stage'] for s in queries.card_stages(cur, card['id'])] == ['contacts', 'in_work']
+        entries = hh_base.card_entries(queries.hh_card_base_resumes(cur, card['id']))
+        # Полное резюме пришло, пока ждали контакты, — балл уже по нему.
+        assert entries[0]['resume']['title'] == 'Оператор' and entries[0]['source'] == 'base' and entries[0]['score'] == 75
+        cur.execute("SELECT title FROM hiring_notifications WHERE user_id = %s AND kind = 'hh_base'", (REC1,))
+        assert cur.fetchall() == [('Контакты из базы hh: №%s · Иванова Анна' % card['candidate_no'],)]
+    assert base_rows(base) == []
+    taken = service.hh_base_list(ctx_of(base, REC1), HH_OPERATOR, view='taken')['items']
+    assert taken[0]['known']['card_id'] == item['card_id'] and taken[0]['known']['recruiter_name'] == 'Первый Рекрутер'
+
+
+def test_hh_base_take_known_candidates(base):
+    """Кандидат уже откликался и стал карточкой — «Взять в работу» отказывает (платить за контакты незачем);
+    телефон из базы совпал с открытой карточкой — повторное обращение в ней, новой нет."""
+    world = base
+    world['clock'].now = HH_NOW
+    hh_push(world, [hh_item(31, '+7 701 555 03 31', resume_hash=base_hash(1))])
+    world['clock'].now = BASE_NOW
+    enable_search(world)
+    search_and_find(world, [base_found(1), base_found(2)])
+    rows = {row['hash']: row for row in base_rows(world)}
+    assert rows[base_hash(1)]['known']['how'] == 'response' and rows[base_hash(2)]['known'] is None
+    with pytest.raises(HiringError) as caught:
+        world['service'].hh_base_take(ctx_of(world, REC1), rows[base_hash(1)]['id'])
+    assert caught.value.code == 'HIRING_HH_IN_FUNNEL'
+    world['service'].hh_base_take(ctx_of(world, REC2), rows[base_hash(2)]['id'])
+    world['service'].hh_base_check(ctx_of(world, REC2), rows[base_hash(2)]['id'])      # вернулся во вкладку iCORE
+    task = next(t for t in base_tasks(world)['tasks'] if t['kind'] == 'resume' and t['hash'] == base_hash(2))
+    base_tasks(world, [{'id': task['id'], 'ok': True, 'access': 'free',
+                        'contacts': {'first_name': 'Анна', 'phones': ['+7 701 555 03 31']}}])
+    item = world['service'].hh_base_get(ctx_of(world, REC2), rows[base_hash(2)]['id'])
+    assert (item['status'], item['take_outcome']) == ('taken', 'repeat')
+    assert item['contacts_note'].startswith('Кандидат уже в воронке: карточка №')
+    with world['db']._get_cursor() as cur:
+        card = queries.open_card_by_phone(cur, '+77015550331')
+        assert card['source_code'] == 'hh' and card['id'] == item['card_id']        # карточка отклика, новой нет
+        cur.execute("SELECT COUNT(*) FROM hiring_cards")
+        assert cur.fetchone()[0] == 1
+
+
+def test_hh_base_tasks_trouble_gone_reject_and_failures(base):
+    """Вход в hh потерян — задание ждёт 15 минут и уходит снова; резюме удалено — заметка; «Не подходит» и вернуть;
+    ИИ лежит — попытка засчитана, после трёх — без балла с причиной; файл под «Базой HeadHunter» не загрузить."""
+    world = base
+    enable_search(world)
+    search = next(t for t in base_tasks(world)['tasks'] if t['kind'] == 'search')
+    base_tasks(world, [{'id': search['id'], 'ok': False, 'trouble': 'login_required', 'error': 'hh отправил на вход'}])
+    assert base_tasks(world)['tasks'] == []
+    world['clock'].now = BASE_NOW + timedelta(minutes=5)
+    assert base_tasks(world)['tasks'] == []                    # вход потерян — не через 2 минуты, как сбой, а через 15
+    world['clock'].now = BASE_NOW + timedelta(minutes=16)
+    retry = base_tasks(world)['tasks']
+    assert [t['id'] for t in retry] == [search['id']]
+    world['scorer'].fail = True
+    base_tasks(world, [{'id': search['id'], 'ok': True, 'total': 1, 'items': [base_found(1)]}])
+    row = base_rows(world)[0]
+    assert row['score'] is None and row['scoring'] is True
+    for _ in range(2):
+        world['service'].hh_base_score_pending()
+    row = base_rows(world)[0]
+    assert row['scoring'] is False and row['score_error'] == 'ИИ сейчас недоступен'
+    world['service'].hh_base_get(ctx_of(world, REC1), row['id'], refresh=True)
+    task = next(t for t in base_tasks(world)['tasks'] if t['kind'] == 'resume')
+    base_tasks(world, [{'id': task['id'], 'ok': False, 'gone': True, 'error': 'hh ответил 404'}])
+    assert world['service'].hh_base_get(ctx_of(world, REC1), row['id'])['contacts_note'] == 'Резюме скрыто или удалено на hh'
+    item = world['service'].hh_base_status(ctx_of(world, REC1), row['id'], 'rejected')
+    assert item['status'] == 'rejected' and base_rows(world) == []
+    assert world['service'].hh_base_list(ctx_of(world, REC1), HH_OPERATOR, view='rejected')['total'] == 1
+    world['service'].hh_base_status(ctx_of(world, REC2), row['id'], 'new')
+    assert len(base_rows(world)) == 1
+    with pytest.raises(HiringError) as caught:
+        world['service'].upload_contacts(ctx_of(world, LEAD_GRANT), b'phone\n87011234567\n', 'base.csv',
+                                         world['sources']['hh_base']['id'])
+    assert 'заполняется сам' in caught.value.message
+
+
+def test_hh_base_run_now_and_new_source(base):
+    """«Искать сейчас» — и рекрутер; не чаще раза в 10 минут; у выключенного поиска — отказ. Источник «База HeadHunter»
+    — контакты, долит в справочник один раз."""
+    world = base
+    source = world['sources']['hh_base']
+    assert (source['name'], source['kind'], source['platform'], source['color']) == ('База HeadHunter', 'contacts', 'hh', 'orange')
+    with pytest.raises(HiringError) as caught:
+        world['service'].hh_search_run_now(ctx_of(world, REC1), HH_OPERATOR)
+    assert caught.value.code == 'HIRING_HH_SEARCH_OFF'
+    enable_search(world)
+    search_and_find(world, [base_found(1)])
+    with pytest.raises(HiringError) as caught:
+        world['service'].hh_search_run_now(ctx_of(world, REC1), HH_OPERATOR)
+    assert caught.value.code == 'HIRING_HH_SEARCH_SOON'
+    world['clock'].now = BASE_NOW + timedelta(minutes=11)
+    overview = world['service'].hh_search_run_now(ctx_of(world, REC1), HH_OPERATOR)
+    assert overview['vacancies'][0]['running'] is True
+    task = next(t for t in base_tasks(world)['tasks'] if t['kind'] == 'search')
+    assert task['params']['order_by'] == 'publication_time'
+
+
+def test_hh_base_background_reads_are_paced(base):
+    """Полные резюме сильных кандидатов мост дочитывает сам, но не залпом: планировщик — раз в минуту и не больше трёх
+    за проход, мосту — по одному за заход; «Взять в работу» по резюме, которое мост как раз читает для балла, уходит
+    заново со своим сроком (контакты закрыты — через 20 с), а запоздалый результат чтения для балла задание не
+    закрывает."""
+    world = base
+    enable_search(world)
+    search_and_find(world, [base_found(n) for n in range(1, 9)])          # 8 сильных по краткой карточке
+    assert [t for t in base_tasks(world)['tasks'] if t['kind'] == 'resume'] == []      # в ту же минуту — ничего
+    world['clock'].now = BASE_NOW + timedelta(minutes=1)
+    rounds = [[t for t in base_tasks(world)['tasks'] if t['kind'] == 'resume'] for _ in range(4)]
+    assert [len(found) for found in rounds] == [1, 1, 1, 0]                 # три за минуту, по одному за заход
+    background = [task for found in rounds for task in found]
+    assert {t['reason'] for t in background} == {'score'}
+    world['clock'].now = BASE_NOW + timedelta(minutes=2)
+    # Рекрутер берёт кандидата, чьё резюме мост сейчас читает для балла.
+    reading = background[0]
+    row = next(r for r in base_rows(world) if r['hash'] == reading['hash'])
+    world['service'].hh_base_take(ctx_of(world, REC1), row['id'])
+    assert [t for t in base_tasks(world)['tasks'] if t['hash'] == reading['hash']] == []   # закрытые — не сразу
+    # Запоздалый результат чтения для балла: резюме берём, задание не закрываем.
+    base_tasks(world, [{'id': reading['id'], 'ok': True, 'reason': 'score', 'resume': {'title': 'Оператор'},
+                        'access': 'closed'}])
+    world['clock'].now = BASE_NOW + timedelta(minutes=2, seconds=21)
+    again = [t for t in base_tasks(world)['tasks'] if t['hash'] == reading['hash']]
+    assert [(t['id'], t['reason']) for t in again] == [(reading['id'], 'contacts')]
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT done_at IS NULL FROM hiring_hh_tasks WHERE id = %s", (int(reading['id']),))
+        assert cur.fetchone()[0] is True
+        assert queries.hh_resume_get(cur, row['id'])['resume'] == hh.clean_resume({'title': 'Оператор'})
+
+
+def test_hh_base_scoring_claims_rows_across_processes(base):
+    """В облаке на /api отвечают несколько копий портала, и каждая после приёма резюме запускает оценку: строки, взятые
+    на оценку одной копией, другая не берёт (одно резюме — один запрос к ИИ), брошенные — через 5 минут снова; ИИ
+    упал посреди прогона — непройденные пачки возвращаются в очередь без попытки."""
+    world = base
+    world['scorer'].fail = True
+    enable_search(world)
+    search_and_find(world, [base_found(n) for n in range(1, 19)])          # 18 резюме — три пачки по 8
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT score_tries, COUNT(*) FROM hiring_hh_resumes GROUP BY score_tries ORDER BY 1")
+        tries = cur.fetchall()
+        cur.execute("SELECT COUNT(*) FROM hiring_hh_resumes WHERE scoring_at IS NOT NULL")
+        claimed = cur.fetchone()[0]
+    assert tries == [(0, 10), (1, 8)] and claimed == 0      # упала первая пачка; две другие — назад в очередь, без попытки
+    with world['db']._get_cursor() as cur:
+        first = queries.hh_resumes_claim_for_score(cur, 50, BASE_NOW, BASE_NOW - timedelta(minutes=5))
+    with world['db']._get_cursor() as cur:
+        second = queries.hh_resumes_claim_for_score(cur, 50, BASE_NOW, BASE_NOW - timedelta(minutes=5))
+    assert len(first) == 18 and second == []                 # другая копия портала их не возьмёт
+    assert {row['portrait'] for row in first} == {PORTRAIT}
+    later = BASE_NOW + timedelta(minutes=6)
+    with world['db']._get_cursor() as cur:
+        again = queries.hh_resumes_claim_for_score(cur, 50, later, later - timedelta(minutes=5))
+    assert len(again) == 18                                   # брошенные — снова в очереди
+    world['scorer'].fail = False
+    world['clock'].now = later + timedelta(minutes=6)
+    assert world['service'].hh_base_score_pending() == 18
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM hiring_hh_resumes WHERE score IS NOT NULL AND scoring_at IS NULL")
+        assert cur.fetchone()[0] == 18

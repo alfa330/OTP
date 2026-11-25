@@ -166,7 +166,10 @@ class FakePortal:
         self.since = '2026-11-23T12:08:00+05:00'
         self.since_by_vacancy = {}
         self.next_poll = 180
-        service = SimpleNamespace(hh_agent_push=self._push)
+        # Задания поиска по базе резюме (hh/1.4.0): обработчик задаёт тест; missing_tasks — портал старой версии.
+        self.tasks_handler = None
+        self.missing_tasks = False
+        service = SimpleNamespace(hh_agent_push=self._push, hh_agent_tasks=self._tasks)
         app = Flask('hh-bridge-test')
         app.register_blueprint(hiring_routes.build_hiring_hh_agent_blueprint(
             service=service, build_cors_preflight_response=lambda: ('', 204)))
@@ -178,10 +181,17 @@ class FakePortal:
                 'settings': {'since': self.since, 'off': list(self.off), 'since_by_vacancy': dict(self.since_by_vacancy)},
                 'next_poll_sec': self.next_poll}
 
+    def _tasks(self, payload):
+        if self.tasks_handler is None:
+            raise AttributeError('портал без заданий')
+        return self.tasks_handler(payload)
+
     def post(self, url, data=None, timeout=None, headers=None):
         if self.down:
             raise hh_bridge.requests.exceptions.ConnectTimeout('портал лежит')
         path = url.split('portal.test', 1)[1]
+        if self.missing_tasks and path.endswith('/tasks'):
+            return SimpleNamespace(status_code=404, text='Not Found', json=lambda: {})
         answer = self.client.post(path, data=data, headers=headers, content_type='application/json')
         return SimpleNamespace(status_code=answer.status_code, text=answer.get_data(as_text=True),
                                json=lambda: answer.get_json())
@@ -535,6 +545,181 @@ class HhBridgeTests(unittest.TestCase):
             stranger.exchange()
         self.assertIn('не принял подпись', str(caught.exception))
         self.assertEqual(self.portal.payloads, [])
+
+
+# ─── Поиск по базе резюме (hh/1.4.0, владелец 25.11.2026) ─────────────────────
+
+def search_item(n, *, updated=1795550400000, status='DENIED_NO_FA', topic=None):
+    """Резюме в выдаче поиска по базе — форма как у живой страницы 25.11.2026 (имён и контактов там нет)."""
+    return {
+        '_attributes': {'hash': '%038x' % (0xc0000 + n), 'id': str(900000000 + n), 'updated': updated,
+                        'permission': 'view_without_contacts'},
+        'title': [{'string': 'Оператор call-центра'}], 'age': [{'string': 20 + n}], 'gender': [{'string': 'female'}],
+        'area': [{'string': 160, 'trl': 'Алматы'}], 'salary': [{'amount': 200000, 'currency': 'KZT'}],
+        'totalExperience': [{'string': 38}],
+        'shortExperience': [{'companyName': 'ТОО Ромашка', 'position': 'Продавец-консультант', 'startDate': '2023-09-01',
+                             'endDate': '2026-10-01', 'companyId': 38931}],
+        'keySkills': [{'string': 'Телефонные переговоры'}, {'string': 'Навыки продаж'}],
+        'jobSearchStatus': [{'jobSearchStatus': {'name': 'active_search', 'lastChangeTime': '2026-11-05T14:09:30Z'}}],
+        'lastActivityTime': '2026-11-25T09:30:00.500+03:00', 'isOnline': True,
+        'resumeContactsOpening': {'throughCiv': True, 'viewStatus': status},
+        'lastTopic': [topic] if topic else [], 'phonePreview': [{'city': '707', 'country': '7'}],
+    }
+
+
+def search_page(items, total=6472, user_type='employer'):
+    state = {'userType': user_type, 'resumeSearchResult': {'resumes': items, 'stats': {'totalResults': total}}}
+    return '<html><body><template id="HH-Lux-InitialState">%s</template></body></html>' % html_lib.escape(
+        json.dumps(state, ensure_ascii=False))
+
+
+def base_resume_page(resume_hash, opened=False):
+    """Страница резюме из базы: без открытых контактов имя, телефон и почта пустые (value: null), как на hh."""
+    state = {'resume': {
+        'hash': resume_hash, 'title': wrapped('Оператор call-центра'), 'age': 26,
+        'language': wrapped([{'title': 'Казахский', 'degree': 'b2'}], 'list'),
+        'openedContacts': opened, 'permission': 'view' if opened else 'view_without_contacts',
+        'resumeContactsOpening': {'canOpenContactsThroughCIV': not opened,
+                                  'viewStatus': 'OPENED' if opened else 'DENIED_NO_FA'},
+        'firstName': wrapped('Анна' if opened else None, 'field'), 'lastName': wrapped('Иванова' if opened else None, 'field'),
+        'middleName': wrapped(None, 'field'),
+        'phone': wrapped([{'city': '707', 'raw': None, 'country': '7', 'number': '1234567', 'formatted': '77071234567'}]
+                         if opened else None, 'field'),
+        'email': wrapped('anna@example.kz' if opened else None, 'field'),
+        'birthday': wrapped('1999-12-17', 'field'),
+    }}
+    return '<html><body><template id="HH-Lux-InitialState">%s</template></body></html>' % html_lib.escape(
+        json.dumps(state, ensure_ascii=False))
+
+
+class HhBaseBridgeTests(unittest.TestCase):
+    """Задания поиска по базе: поиск страницами с паузой человека, резюме, контакты только после «Взять в работу» и
+    только уже открытые; беда со входом — hh не трогается; портал без заданий — мост их не долбит."""
+
+    calls = HhBridgeTests.calls
+
+    def setUp(self):
+        HhBridgeTests.setUp(self)
+        self.config['tasks'] = True
+        self.pages = {0: [search_item(n) for n in range(20)], 1: [search_item(20 + n) for n in range(20)],
+                      2: [search_item(40 + n, updated=1700000000000) for n in range(20)]}
+        self.opened = set()
+        self.http.routes['/search/resume'] = lambda params: FakeResponse(
+            200, search_page(self.pages.get(int(params.get('page', 0)), [])))
+        self.http.routes['/resume/*'] = lambda path, params: FakeResponse(
+            200, base_resume_page(path.rsplit('/', 1)[1], opened=path.rsplit('/', 1)[1] in self.opened))
+        self.portal.tasks = []
+        self.portal.task_payloads = []
+        self.portal.tasks_handler = self._tasks
+
+    def _tasks(self, payload):
+        self.portal.task_payloads.append(payload)
+        tasks = self.portal.tasks if payload.get('take') is not False else []
+        self.portal.tasks = []
+        return {'accepted': [item.get('id') for item in payload.get('done') or []], 'tasks': tasks, 'wait_sec': 20}
+
+    def bridge(self):
+        site = hh_bridge.Site(self.config, http=self.http, sleep=lambda _s: None)
+        return hh_bridge.HhBridge(self.config, site=site, portal_session=self.portal)
+
+    def test_parsing_search_and_resume_pages(self):
+        found = hh_bridge.found_from_search(search_item(1, status='AVAILABLE_WITHOUT_SPEND', topic={
+            'vacancyId': 138923446, 'topicId': 5000000777, 'initialTopicType': 'INVITATION_BY_EMPLOYER',
+            'creationTime': '2026-11-25T09:40:00.100+03:00'}))
+        self.assertEqual(found, {
+            'hash': '%038x' % 0xc0001, 'resume_id': '900000001', 'title': 'Оператор call-центра', 'age': 21,
+            'gender': 'female', 'area': 'Алматы', 'salary': {'amount': 200000, 'currency': 'KZT'}, 'experience_months': 38,
+            'experience': [{'company': 'ТОО Ромашка', 'position': 'Продавец-консультант', 'start': '2023-09-01', 'end': '2026-10-01'}],
+            'skills': ['Телефонные переговоры', 'Навыки продаж'], 'job_status': 'active_search', 'online': True,
+            'last_activity_at': '2026-11-25T09:30:00.500+03:00', 'updated_at': '2026-11-24T20:00:00+00:00', 'access': 'free',
+            'topic': {'vacancy_id': '138923446', 'topic_id': '5000000777', 'type': 'INVITATION_BY_EMPLOYER',
+                      'at': '2026-11-25T09:40:00.100+03:00'}})
+        self.assertIsNone(hh_bridge.found_from_search({'_attributes': {'hash': 'чужой'}}))
+        items, total = hh_bridge.search_from_state(hh_bridge.initial_state(search_page([search_item(2), {'x': 1}])))
+        self.assertEqual((len(items), total, items[0]['access']), (1, 6472, 'closed'))
+        with self.assertRaises(hh_bridge.SiteTrouble) as caught:
+            hh_bridge.search_from_state(hh_bridge.initial_state(search_page([], user_type='anonymous')))
+        self.assertEqual(caught.exception.kind, 'login_required')
+        closed = hh_bridge.initial_state(base_resume_page('d' * 38))
+        self.assertIsNone(hh_bridge.contacts_from_state(closed))
+        self.assertEqual(hh_bridge.access_from_state(closed), 'closed')
+        opened = hh_bridge.initial_state(base_resume_page('d' * 38, opened=True))
+        self.assertEqual(hh_bridge.contacts_from_state(opened), {'last_name': 'Иванова', 'first_name': 'Анна',
+                                                                 'middle_name': None, 'phones': ['77071234567'],
+                                                                 'email': 'anna@example.kz'})
+        self.assertEqual(hh_bridge.access_from_state(opened), 'opened')
+
+    def test_tasks_search_resume_and_contacts(self):
+        bridge = self.bridge()
+        taken, viewed = '%038x' % 0xc0001, '%038x' % 0xc0002
+        self.opened.add(taken)
+        self.portal.tasks = [
+            {'id': '1', 'kind': 'search', 'vacancy_id': OPERATOR, 'pages': 9,
+             'params': {'text': 'оператор', 'area': '160', 'search_period': '3', 'order_by': 'publication_time',
+                        'hhtmFrom': 'чужое', 'page': 7}, 'stop_before': '2026-11-24T00:00:00+05:00'},
+            {'id': '2', 'kind': 'resume', 'hash': taken, 'reason': 'contacts'},
+            {'id': '3', 'kind': 'resume', 'hash': viewed, 'reason': 'view'},
+            {'id': '4', 'kind': 'resume', 'hash': '../../account', 'reason': 'view'},
+        ]
+        self.assertEqual(bridge.tasks_round(0), 4)
+        searches = self.calls('/search/resume')
+        # Третья страница — старше прошлого поиска: дальше не листаем; чужие параметры не уходят на hh.
+        self.assertEqual([params.get('page') for params in searches], [None, 1, 2])
+        self.assertEqual(searches[0], {'text': 'оператор', 'area': '160', 'search_period': '3', 'order_by': 'publication_time'})
+        done = {item['id']: item for payload in self.portal.task_payloads for item in payload['done']}
+        self.assertEqual((done['1']['ok'], done['1']['total'], done['1']['pages'], len(done['1']['items'])), (True, 6472, 3, 60))
+        self.assertEqual(done['2']['contacts']['phones'], ['77071234567'])
+        self.assertEqual((done['2']['access'], done['2']['reason']), ('opened', 'contacts'))
+        self.assertNotIn('contacts', done['3'])                      # при просмотре контакты не берутся
+        self.assertEqual(done['3']['resume']['languages'], [{'title': 'Казахский', 'degree': 'b2'}])
+        self.assertEqual((done['4']['ok'], done['4']['error']), (False, 'неверный хеш резюме'))
+        resumes = [path for path, _params in self.http.calls if path.startswith('/resume/')]
+        self.assertEqual(resumes, ['/resume/' + taken, '/resume/' + viewed])
+        self.assertEqual(self.portal.task_payloads[0]['done'], [])       # первым заходом — просто ждать заданий
+        self.assertEqual(self.portal.task_payloads[0]['wait'], 0)
+
+    def test_tasks_not_run_while_login_lost_and_gone_resume(self):
+        bridge = self.bridge()
+        bridge.trouble = ('login_required', 'hh отправил на страницу входа')
+        self.portal.tasks = [{'id': '1', 'kind': 'search', 'params': {'text': 'оператор'}, 'pages': 1}]
+        bridge.tasks_round(0)
+        done = self.portal.task_payloads[-1]['done']
+        self.assertEqual((done[0]['ok'], done[0]['trouble']), (False, 'login_required'))
+        self.assertEqual(self.calls('/search/resume'), [])
+        bridge.trouble = None
+        self.http.routes['/resume/*'] = lambda path, params: None            # 404 — резюме скрыто или удалено
+        self.portal.tasks = [{'id': '2', 'kind': 'resume', 'hash': 'e' * 38, 'reason': 'view'}]
+        bridge.tasks_round(0)
+        done = self.portal.task_payloads[-1]['done']
+        self.assertEqual((done[0]['ok'], done[0]['gone'], done[0]['trouble']), (False, True, 'error'))
+
+    def test_rest_polls_tasks_and_backs_off_without_them(self):
+        now = [1000.0]
+        bridge = self.bridge()
+        bridge.clock = lambda: now[0]
+        waits = []
+
+        def wait(seconds):
+            waits.append(seconds)
+            now[0] += seconds
+            return False
+        bridge.stop_event = SimpleNamespace(wait=wait, is_set=lambda: False)
+        held = []
+
+        def round_(hold):
+            held.append(hold)
+            now[0] += hold
+            return 0
+        bridge.tasks_round = round_
+        self.assertFalse(bridge.rest(45.0))
+        self.assertEqual(held, [20.0, 20.0, 5.0])                    # пауза — длинным опросом заданий
+        # Портал не знает заданий (старая версия) — час их не спрашиваем, пауза как прежде.
+        bridge.tasks_round = hh_bridge.HhBridge.tasks_round.__get__(bridge)
+        self.portal.missing_tasks = True
+        waits.clear()
+        self.assertFalse(bridge.rest(700.0))
+        self.assertEqual(waits, [300.0, 300.0, 100.0])
+        self.assertGreater(bridge.tasks_resume_at, now[0])
 
 
 if __name__ == '__main__':

@@ -36,6 +36,7 @@ KIND_MOTIVATION = 'motivation'
 KIND_REASSIGNED = 'reassigned'
 KIND_WHATSAPP = 'whatsapp'
 KIND_HH = 'hh'
+KIND_HH_BASE = 'hh_base'
 
 
 def _esc(text):
@@ -64,6 +65,17 @@ def new_response(cursor, card, now):
                                    card.get('city')) if x)
     return queries.push_notification(cursor, recipients, KIND_NEW_RESPONSE, 'Новый отклик: %s' % card_title(card),
                                      body or None, card['id'], now, dedupe_key='new:%s' % card['id'])
+
+
+def hh_base_contacts(cursor, card, recruiter_id, outcome, now):
+    """Контакты кандидата из базы hh пришли — тому, кто нажал «Взять в работу»: карточка заведена у него или кандидат
+    уже был в воронке. Один раз на карточку и рекрутера."""
+    if outcome == 'created':
+        title, body = 'Контакты из базы hh: %s' % card_title(card), 'Карточка «В работе» — можно звонить'
+    else:
+        title, body = 'Кандидат из базы hh уже в воронке: %s' % card_title(card), None
+    return queries.push_notification(cursor, [recruiter_id], KIND_HH_BASE, title, body, card['id'], now,
+                                     dedupe_key='hh_base:%s:%s' % (card['id'], recruiter_id))
 
 
 def repeat_response(cursor, card, source_name, now):

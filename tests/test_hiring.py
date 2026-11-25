@@ -767,11 +767,12 @@ class HHTests(unittest.TestCase):
                          ('login_required', 'редирект на вход'))
         self.assertEqual(hh.clean_session({'session': 'что-то'})[0], 'error')
         self.assertIsNone(hh.clean_vacancies(None))
-        self.assertEqual(hh.clean_vacancies([{'id': '1', 'name': 'A', 'area': 'Алматы', 'responses': 5},
+        self.assertEqual(hh.clean_vacancies([{'id': '1', 'name': 'A', 'area': 'Алматы', 'area_id': 160, 'responses': 5},
                                              {'id': '1', 'name': 'дубль'}, {'id': 'x', 'name': 'B'},
-                                             {'id': '2', 'name': ''}, {'id': '3', 'name': 'C', 'responses': -1}]),
-                         [{'id': '1', 'name': 'A', 'area': 'Алматы', 'responses': 5},
-                          {'id': '3', 'name': 'C', 'area': None, 'responses': None}])
+                                             {'id': '2', 'name': ''},
+                                             {'id': '3', 'name': 'C', 'area_id': '1' * 12, 'responses': -1}]),
+                         [{'id': '1', 'name': 'A', 'area': 'Алматы', 'area_id': 160, 'responses': 5},
+                          {'id': '3', 'name': 'C', 'area': None, 'area_id': None, 'responses': None}])
 
     def test_settings_rules(self):
         settings = {'since': '2026-11-23T12:08:00',
@@ -970,9 +971,14 @@ class WiringTests(unittest.TestCase):
         # «Не отвечает звонок/чат» (владелец 20.11.2026): сторож раз в 10 минут.
         self.assertIn("('no_response', CronTrigger(minute='3,13,23,33,43,53'", self.bot)
         self.assertIn("if name == 'no_response':\n            return service.archive_silent()", self.bot)
-        # Отклики hh.kz приносит мост на шлюзе по подписи моста; задача hh — его сторож (владелец 23.11.2026).
+        # Отклики hh.kz приносит мост на шлюзе по подписи моста; задача hh — его сторож (владелец 23.11.2026) и балл ИИ
+        # резюме из базы hh, которым его ещё не поставили (владелец 25.11.2026).
         self.assertIn('app.register_blueprint(build_hiring_hh_agent_blueprint(', self.bot)
-        self.assertIn("if name == 'hh':\n            return service.hh_watchdog()", self.bot)
+        self.assertIn("if name == 'hh':\n", self.bot)
+        hh_job = self.bot.split("if name == 'hh':\n", 1)[1].split('        if name ==', 1)[0]
+        self.assertIn('alert = service.hh_watchdog()', hh_job)
+        self.assertIn('service.hh_base_sweep()', hh_job)
+        self.assertIn('return alert', hh_job)
         self.assertNotIn('pull_hh', self.bot)
         for name in ('olx', 'hh', 'next_contacts', 'auto_return', 'overdue'):
             self.assertIn("('%s', CronTrigger(" % name, self.bot)
@@ -1003,6 +1009,168 @@ class WiringTests(unittest.TestCase):
         self.assertIn("if (view !== 'hiring') setHiringFocusRequest(null);", self.app)
         trainer_block = self.app[self.app.index('const TRAINER_ALLOWED_VIEWS'):self.app.index(']);', self.app.index('const TRAINER_ALLOWED_VIEWS'))]
         self.assertIn("'hiring',", trainer_block)
+
+
+class HhBaseTests(unittest.TestCase):
+    """Поиск по базе резюме hh.kz (владелец 25.11.2026): настройка поиска вакансии, запрос к hh, расписание, разбор
+    найденного, контакты, текст резюме для ИИ и ответ ИИ."""
+
+    def test_profile_and_keywords(self):
+        from hiring import hh_base
+        self.assertEqual(hh_base.clean_keywords('оператор call-центра\n"оператор колл-центра", (менеджер)!; Оператор CALL-центра'),
+                         ['оператор call-центра', 'оператор колл-центра', 'менеджер'])
+        self.assertEqual(len(hh_base.clean_keywords(['слово %d' % n for n in range(30)])), hh_base.KEYWORDS_MAX)
+        self.assertEqual(hh_base.clean_profile({'enabled': False}), {'enabled': False, 'portrait': None, 'keywords': []})
+        with self.assertRaises(hh_base.ProfileError):
+            hh_base.clean_profile({'enabled': True, 'portrait': 'Портрет', 'keywords': []})
+        with self.assertRaises(hh_base.ProfileError):
+            hh_base.clean_profile({'enabled': True, 'portrait': '  ', 'keywords': ['оператор']})
+        profile = hh_base.clean_profile({'enabled': True, 'portrait': ' Портрет\r\n\r\n\r\nсотрудника ', 'keywords': ['оператор']})
+        self.assertEqual(profile['portrait'], 'Портрет\n\nсотрудника')
+        self.assertIs(hh_base.clean_profile({'enabled': 'true', 'keywords': []})['enabled'], False)   # только true
+        self.assertEqual(hh_base.search_text(['оператор call-центра', 'оператор', 'специалист контакт-центра']),
+                         '"оператор call-центра" OR оператор OR "специалист контакт-центра"')
+
+    def test_search_task_and_schedule(self):
+        from hiring import hh_base
+        noon = datetime(2026, 11, 25, 12, 0)
+        profile = {'enabled': True, 'keywords': ['оператор'], 'last_run_at': None, 'area_id': 188}
+        first = hh_base.search_task(profile, noon)
+        self.assertEqual((first['params']['area'], first['params']['search_period'], first['params']['order_by'],
+                          first['pages'], first['stop_before'], first['reason']), ('188', '30', 'relevance', 5, None, 'auto'))
+        self.assertEqual(hh_base.search_task(dict(profile, area_id=None), noon)['params']['area'], '160')
+        later = hh_base.search_task(dict(profile, last_run_at=datetime(2026, 11, 25, 9, 0)), noon, manual=True)
+        self.assertEqual((later['params']['search_period'], later['params']['order_by'], later['pages'], later['stop_before'],
+                          later['reason']), ('3', 'publication_time', 3, '2026-11-24T09:00:00+05:00', 'manual'))
+        self.assertTrue(hh_base.search_due(profile, datetime(2026, 11, 25, 23, 0)))           # первый — в любое время
+        ran = dict(profile, last_run_at=datetime(2026, 11, 25, 9, 0))
+        self.assertFalse(hh_base.search_due(ran, datetime(2026, 11, 25, 11, 59)))
+        self.assertTrue(hh_base.search_due(ran, datetime(2026, 11, 25, 12, 0)))
+        self.assertFalse(hh_base.search_due(ran, datetime(2026, 11, 25, 19, 0)))              # вечером — нет
+        self.assertFalse(hh_base.search_due(ran, datetime(2026, 11, 26, 8, 59)))
+        self.assertTrue(hh_base.search_due(ran, datetime(2026, 11, 26, 9, 0)))
+        self.assertFalse(hh_base.search_due(dict(profile, enabled=False), noon))
+        self.assertFalse(hh_base.search_due(dict(profile, keywords=[]), noon))
+        self.assertTrue(hh_base.run_now_allowed({}, noon))
+        self.assertFalse(hh_base.run_now_allowed({'requested_at': datetime(2026, 11, 25, 11, 55)}, noon))
+        self.assertTrue(hh_base.run_now_allowed({'last_run_at': datetime(2026, 11, 25, 11, 50)}, noon))
+        self.assertEqual(hh_base.contacts_next_check(noon, noon), datetime(2026, 11, 25, 12, 1))
+        self.assertEqual(hh_base.contacts_next_check(noon, datetime(2026, 11, 25, 12, 2)), datetime(2026, 11, 25, 12, 3))
+        self.assertEqual(hh_base.contacts_next_check(noon, datetime(2026, 11, 25, 12, 9, 59)), datetime(2026, 11, 25, 12, 10))
+        self.assertIsNone(hh_base.contacts_next_check(noon, datetime(2026, 11, 25, 12, 10)))
+
+    def test_found_and_contacts(self):
+        from hiring import hh_base
+        self.assertIsNone(hh_base.clean_found({'hash': 'не хеш'}))
+        found = hh_base.clean_found({
+            'hash': 'AB12CD3400112233445566778899AABBCCDDEE', 'resume_id': '900000001', 'title': '  Оператор   call-центра ',
+            'age': 26, 'gender': 'female', 'area': 'Алматы', 'salary': {'amount': 200000, 'currency': 'KZT'},
+            'experience_months': 38, 'experience': [{'company': 'ТОО Ромашка', 'position': 'Продавец', 'start': '2023-09-01'}, 'мусор'],
+            'skills': ['Продажи', '', 5], 'job_status': 'active_search', 'online': 1, 'access': 'openned',
+            'last_activity_at': '2026-11-25T09:30:00.500+03:00', 'updated_at': '2026-11-24T20:00:00+00:00',
+            'topic': {'vacancy_id': 138923446, 'topic_id': 5000000777, 'type': 'INVITATION_BY_EMPLOYER',
+                      'at': '2026-11-25T09:40:00.100+03:00'},
+            'phone': '+77070000000', 'first_name': 'Нельзя'})
+        self.assertEqual(found['hash'], 'ab12cd3400112233445566778899aabbccddee')
+        self.assertEqual(found['resume_id'], 900000001)
+        self.assertEqual(found['snippet'], {
+            'title': 'Оператор call-центра', 'age': 26, 'gender': 'женщина', 'area': 'Алматы',
+            'salary': {'amount': 200000, 'currency': 'KZT', 'sign': '₸'}, 'experience_months': 38,
+            'experience': [{'company': 'ТОО Ромашка', 'position': 'Продавец', 'start': '2023-09-01', 'end': None}],
+            'skills': ['Продажи', '5'], 'job_status': 'active_search', 'online': False})
+        self.assertIsNone(found['access'])                       # неизвестное состояние контактов — не выдумываем
+        self.assertEqual(found['hh_updated_at'], datetime(2026, 11, 25, 1, 0))
+        self.assertEqual(found['last_activity_at'], datetime(2026, 11, 25, 11, 30, 0, 500000))
+        self.assertEqual(found['topic'], {'vacancy_id': '138923446', 'topic_id': '5000000777',
+                                          'type': 'INVITATION_BY_EMPLOYER', 'at': '2026-11-25T11:40'})
+        self.assertNotIn('phone', str(found))
+        self.assertIsNone(hh_base.clean_contacts({}))
+        self.assertEqual(hh_base.clean_contacts({'last_name': 'Иванова', 'first_name': 'Анна', 'phones': ['+998 90 1', '8 (707) 123-45-67'],
+                                                 'email': 'anna@example.kz'}),
+                         {'full_name': 'Иванова Анна', 'phone': '+77071234567', 'email': 'anna@example.kz',
+                          'phone_raw': '+998 90 1'})
+        self.assertIsNone(hh_base.clean_contacts({'first_name': 'Анна', 'phones': ['+998 90 123 45 67']})['phone'])
+
+    def test_candidate_text_score_and_card_entries(self):
+        from hiring import hh, hh_base
+        snippet = hh_base.clean_found({'hash': 'b' * 38, 'title': 'Оператор', 'age': 21, 'gender': 'male',
+                                       'salary': {'amount': 250000, 'currency': 'KZT'}, 'experience_months': 0,
+                                       'skills': ['Excel'], 'job_status': 'looking_for_offers'})['snippet']
+        text = hh_base.candidate_text(snippet)
+        self.assertIn('Желаемая должность: Оператор', text)
+        self.assertIn('О кандидате: 21 лет, мужчина, ожидает 250 000 ₸', text)
+        self.assertIn('Общий стаж: нет', text)
+        self.assertIn('Статус на hh: Рассматривает предложения', text)
+        self.assertIn('краткая карточка', text)
+        full = hh.clean_resume({'title': 'Оператор КЦ', 'languages': [{'title': 'Казахский', 'degree': 'l1'}],
+                                'experience_total': {'years': 1, 'months': 2}, 'about': 'Люблю людей',
+                                'experience': [{'company': 'ТОО', 'position': 'Оператор', 'start': '2024-01-01',
+                                                'description': 'Звонки\n\nЧаты'}]})
+        text = hh_base.candidate_text(snippet, full)
+        self.assertIn('Языки: Казахский (родной)', text)
+        self.assertIn('Общий стаж: 1 год 2 мес.', text)
+        self.assertIn('- Оператор, ТОО (2024-01-01 — сейчас): Звонки Чаты', text)
+        self.assertNotIn('краткая карточка', text)
+        self.assertEqual(hh_base.clean_score({'score': '87.6', 'verdict': ' Хороший ', 'pros': ['a', '', 'b', 'c', 'd'],
+                                              'cons': None}),
+                         {'score': 88, 'verdict': 'Хороший', 'pros': ['a', 'b', 'c'], 'cons': []})
+        for bad in ({'score': 101}, {'score': -1}, {'score': 'x'}, None):
+            self.assertIsNone(hh_base.clean_score(bad))
+        self.assertEqual([hh_base.experience_text(m) for m in (1, 12, 26, 61, 0)],
+                         ['1 мес.', '1 год', '2 года 2 мес.', '5 лет 1 мес.', None])
+        entries = hh_base.card_entries([{'resume_hash': 'c' * 38, 'hh_vacancy_id': 1, 'vacancy_name': 'Оператор',
+                                         'status_at': datetime(2026, 11, 25, 12, 0), 'snippet': snippet, 'resume': None,
+                                         'score': 80, 'score_data': {'verdict': 'Ок'}}])
+        self.assertEqual((entries[0]['resume']['title'], entries[0]['resume']['key_skills'], entries[0]['resume_url'],
+                          entries[0]['verdict']), ('Оператор', ['Excel'], 'https://hh.kz/resume/' + 'c' * 38, 'Ок'))
+        self.assertTrue(hh_base.bridge_ready('hh/1.4.0/3.12.3'))
+        self.assertTrue(hh_base.bridge_ready('hh/2.0.1'))
+        self.assertFalse(hh_base.bridge_ready('hh/1.3.0/3.12.3'))
+        self.assertFalse(hh_base.bridge_ready(None))
+
+    def test_ai_keywords_and_scores(self):
+        import importlib
+        import sys
+        import types
+        from unittest import mock
+        from hiring import hh_ai
+        # ai_feedback.service тянет database (time.tzset — только Linux, плюс пул к базе): заглушка, как в test_dress_code_ai.
+        if 'ai_feedback.service' not in sys.modules:
+            stub = types.ModuleType('database')
+            stub.db = mock.MagicMock()
+            stub.IT_TICKET_CATALOG = {}
+            with mock.patch.dict(sys.modules, {'database': stub}):
+                module = importlib.import_module('ai_feedback.service')
+            sys.modules['ai_feedback.service'] = module
+            import ai_feedback
+            ai_feedback.service = module
+        ai = sys.modules['ai_feedback.service']
+        endpoint = mock.patch.object(ai, 'gemini_endpoint', return_value=('https://vertex.test/model', {}))
+        endpoint.start()
+        self.addCleanup(endpoint.stop)
+
+        def post_with(answer):
+            calls = []
+
+            def post(url, headers, payload):
+                calls.append(payload)
+                return 200, {'candidates': [{'content': {'parts': [{'text': answer}]}}],
+                             'usageMetadata': {'promptTokenCount': 120, 'candidatesTokenCount': 30}}
+            return post, calls
+
+        post, calls = post_with('{"keywords": ["оператор call-центра", "OR", "\\"оператор колл-центра\\"", "оператор call-центра"]}')
+        self.assertEqual(hh_ai.suggest_keywords('Оператор', 'Грамотная речь, опыт с клиентами', post=post),
+                         ['оператор call-центра', 'оператор колл-центра'])   # «OR» — не фраза
+        self.assertIn('Грамотная речь', calls[0]['contents'][0]['parts'][0]['text'])
+        with self.assertRaises(hh_ai.HhAiError):
+            hh_ai.suggest_keywords('Оператор', 'кратко', post=post)
+        post, calls = post_with('{"results": [{"id": "1", "score": 91, "verdict": "Подходит"},'
+                                ' {"id": "2", "score": 300, "verdict": "мусор"}, {"id": "чужой", "score": 50, "verdict": "x"}]}')
+        results, meta = hh_ai.score_candidates('Оператор', 'Портрет', [('1', 'резюме 1'), ('2', 'резюме 2')], post=post)
+        self.assertEqual(list(results), ['1'])
+        self.assertEqual(results['1']['score'], 91)
+        self.assertEqual((meta['tokens_in'], meta['tokens_out']), (120, 30))
+        self.assertIn('Кандидат id=2', calls[0]['contents'][0]['parts'][0]['text'])
 
 
 if __name__ == '__main__':

@@ -34,6 +34,13 @@ Blueprint собирается фабрикой и получает зависи
     …/people, /sources, /vacancies, /reasons, /plans, /integrations — настройки; у источника — цвет (каналы слиты
                                              с источниками 20.11.2026, своих ручек у каналов больше нет)
     PUT    /integrations/hh/settings         вакансии hh.kz: какие отслеживать и с какой вакансией iCORE
+    GET    /hh/base                          вкладка «База hh»: вакансии кабинета с поиском по базе резюме, мост
+    GET    /hh/base/<вакансия hh>/resumes    найденные резюме вакансии по баллу ИИ (view=new|taken|rejected)
+    GET    /hh/base/resume/<id>[?refresh=1]  резюме целиком; refresh — мост перечитывает его на hh (рекрутер открыл)
+    POST   /hh/base/resume/<id>/take|check   «Взять в работу» (контакты — щелчком на hh) / проверить контакты сейчас
+    POST   /hh/base/resume/<id>/status       «Не подходит» / вернуть в список
+    PUT    /hh/search/<вакансия hh>          поиск по базе: тумблер, портрет сотрудника, ключевые слова (руководитель)
+    POST   /hh/search/<вакансия hh>/keywords|run   «Подобрать с ИИ» / «Искать сейчас»
     GET    /groups[?pick=1], POST /groups,   группы на обучение с вместимостью: тренер ведёт свои, руководитель —
     PATCH  /groups/<id>                      любые; pick — выбор при приглашении (действующие, свободные места)
     GET    /whatsapp, POST /whatsapp/command номер WhatsApp найма: состояние, QR, «Подключить / Возобновить / Отвязать»
@@ -48,7 +55,8 @@ Blueprint собирается фабрикой и получает зависи
 
 Внешний вход откликов (Kaspi, таргет, любой интегратор) — отдельный Blueprint
 /api/hiring/external/responses по ключу партнёра с областью «Отклики в воронку найма». Отклики hh.kz приносит мост
-на шлюзе — POST /api/hiring/hh/agent/push по подписи шлюза (build_hiring_hh_agent_blueprint).
+на шлюзе — POST /api/hiring/hh/agent/push по подписи шлюза (build_hiring_hh_agent_blueprint); задания поиска по базе
+резюме он забирает длинным опросом POST /api/hiring/hh/agent/tasks.
 """
 
 import logging
@@ -60,7 +68,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, request
 
-from . import access, day_report, hh, notices, queries, reports, rules, wa_chat, wa_live
+from . import access, day_report, hh, hh_base, notices, queries, reports, rules, wa_chat, wa_live
 from .service import HiringError
 
 log = logging.getLogger(__name__)
@@ -437,8 +445,10 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                 # Переписка с номером WhatsApp найма — счётчик для вкладки, сама лента по запросу.
                 'whatsapp': _json(queries.wa_summary(cursor, [card.get('phone'), card.get('whatsapp')]))
                 if access.sees_phone(ctx, card) else None,
-                # Резюме и сопроводительное письмо откликов hh (владелец 23.11.2026) — без контактов, их мост не берёт.
-                'hh': _json(queries.hh_card_responses(cursor, card_id)),
+                # Резюме и сопроводительное письмо откликов hh (владелец 23.11.2026) — без контактов, их мост не берёт;
+                # следом — резюме из базы hh, по которым карточку завели «Взять в работу» (владелец 25.11.2026).
+                'hh': _json(queries.hh_card_responses(cursor, card_id)
+                            + hh_base.card_entries(queries.hh_card_base_resumes(cursor, card_id))),
                 'repeat_of': None,
             }
             if card.get('repeat_of_card_id'):
@@ -1026,6 +1036,51 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             rows = _integrations_payload(cursor)
         return jsonify({'items': rows})
 
+    # ─── Поиск по базе резюме hh.kz (владелец 25.11.2026, hiring/hh_base.py) ──
+
+    @hiring_route('/hh/base')
+    def hiring_hh_base(ctx):
+        """Вкладка «База hh»: вакансии кабинета с поиском по базе, счёт найденных, состояние моста."""
+        return jsonify(_json(service.hh_base_overview(ctx)))
+
+    @hiring_route('/hh/base/<vacancy_key>/resumes')
+    def hiring_hh_base_resumes(vacancy_key, ctx):
+        return jsonify(_json(service.hh_base_list(ctx, vacancy_key, view=request.args.get('view') or 'new',
+                                                  order=request.args.get('order') or 'score',
+                                                  page=request.args.get('page') or 1)))
+
+    @hiring_route('/hh/base/resume/<int:row_id>')
+    def hiring_hh_base_resume(row_id, ctx):
+        """Резюме целиком; ?refresh=1 — окно открыл рекрутер: мост перечитает резюме на hh (владелец 25.11.2026:
+        «обновление резюмешки в момент просмотра через наш сайт»)."""
+        return jsonify(_json(service.hh_base_get(ctx, row_id, refresh=request.args.get('refresh') == '1')))
+
+    @hiring_route('/hh/base/resume/<int:row_id>/take', methods=('POST',))
+    def hiring_hh_base_take(row_id, ctx):
+        return jsonify(_json(service.hh_base_take(ctx, row_id)))
+
+    @hiring_route('/hh/base/resume/<int:row_id>/check', methods=('POST',))
+    def hiring_hh_base_check(row_id, ctx):
+        return jsonify(_json(service.hh_base_check(ctx, row_id)))
+
+    @hiring_route('/hh/base/resume/<int:row_id>/status', methods=('POST',))
+    def hiring_hh_base_status(row_id, ctx):
+        return jsonify(_json(service.hh_base_status(ctx, row_id, str(_body().get('status') or ''))))
+
+    @hiring_route('/hh/search/<vacancy_key>', methods=('PUT',))
+    def hiring_hh_search_save(vacancy_key, ctx):
+        """Поиск по базе для вакансии hh: {"enabled": bool, "portrait": "…", "keywords": ["…"]}."""
+        return jsonify(_json(service.hh_search_save(ctx, vacancy_key, _body())))
+
+    @hiring_route('/hh/search/<vacancy_key>/keywords', methods=('POST',))
+    def hiring_hh_search_keywords(vacancy_key, ctx):
+        """«Подобрать с ИИ»: {"portrait": "…"} → {"keywords": [...]} (не сохраняет — руководитель правит и сохраняет)."""
+        return jsonify({'keywords': service.hh_search_keywords(ctx, vacancy_key, _body())})
+
+    @hiring_route('/hh/search/<vacancy_key>/run', methods=('POST',))
+    def hiring_hh_search_run(vacancy_key, ctx):
+        return jsonify(_json(service.hh_search_run_now(ctx, vacancy_key)))
+
     @hiring_route('/integrations/<code>/run', methods=('POST',))
     def hiring_integration_run(code, ctx):
         """«Опросить» — у OLX. Отклики hh.kz мост приносит сам, опрашивать с портала нечего."""
@@ -1282,16 +1337,16 @@ def build_hiring_hh_agent_blueprint(*, service, build_cors_preflight_response):
     тем же протоколом и ключами, что мост «Касаний» и сервис WhatsApp найма (cdr/agent_auth.py, CDR_AGENT_KEYS).
 
         POST /api/hiring/hh/agent/push   {session, detail, account, vacancies, items} → {results, settings, next_poll_sec}
+        POST /api/hiring/hh/agent/tasks  {done, wait} → {accepted, tasks, wait_sec} — длинный опрос заданий поиска по
+                                         базе резюме (владелец 25.11.2026): ответ сразу, как появится задание
     """
     from cdr import agent_auth
     from cdr import config as cdr_config
 
     bp = Blueprint('hiring_hh_agent', __name__, url_prefix='/api/hiring/hh/agent')
 
-    @bp.route('/push', methods=['POST', 'OPTIONS'], endpoint='hiring_hh_agent_push')
-    def push():
-        if request.method == 'OPTIONS':
-            return build_cors_preflight_response()
+    def _refusal():
+        """Подпись шлюза: None — проверена, иначе готовый отказ."""
         raw_keys = cdr_config.agent_keys_raw()
         if not raw_keys:
             return _bad('Шлюз не настроен на сервере: нет открытых ключей', 'HIRING_HH_NOT_READY', 503)
@@ -1304,12 +1359,36 @@ def build_hiring_hh_agent_blueprint(*, service, build_cors_preflight_response):
         if kid is None:
             log.warning('Мост hh: шлюз не авторизован — %s', reason)
             return _bad('Шлюз не авторизован', 'HIRING_HH_UNAUTHORIZED', 401)
+        return None
+
+    @bp.route('/push', methods=['POST', 'OPTIONS'], endpoint='hiring_hh_agent_push')
+    def push():
+        if request.method == 'OPTIONS':
+            return build_cors_preflight_response()
+        refusal = _refusal()
+        if refusal is not None:
+            return refusal
         try:
             return jsonify(_json(service.hh_agent_push(request.get_json(silent=True) or {})))
         except HiringError as exc:
             return _bad(exc.message, exc.code, exc.status)
         except Exception:  # noqa: BLE001
             log.exception('Мост hh: доклад не принят')
+            return _bad('Внутренняя ошибка', 'HIRING_HH_INTERNAL', 500)
+
+    @bp.route('/tasks', methods=['POST', 'OPTIONS'], endpoint='hiring_hh_agent_tasks')
+    def tasks():
+        if request.method == 'OPTIONS':
+            return build_cors_preflight_response()
+        refusal = _refusal()
+        if refusal is not None:
+            return refusal
+        try:
+            return jsonify(_json(service.hh_agent_tasks(request.get_json(silent=True) or {})))
+        except HiringError as exc:
+            return _bad(exc.message, exc.code, exc.status)
+        except Exception:  # noqa: BLE001
+            log.exception('Мост hh: задания поиска по базе не отданы')
             return _bad('Внутренняя ошибка', 'HIRING_HH_INTERNAL', 500)
 
     return bp

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 
 import psycopg2
 
-from . import access, calls, hh, notices, queries, rules, upload, wa_chat, wa_media, whatsapp
+from . import access, calls, hh, hh_ai, hh_base, notices, queries, rules, upload, wa_chat, wa_media, whatsapp
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def _spawn_thread(target, *args):
 
 class HiringService:
     def __init__(self, cursor_factory, *, send_telegram=None, web_app_base_url=None, now=None,
-                 dial_list=None, storage=None, transcriber=None, spawn=None):
+                 dial_list=None, storage=None, transcriber=None, spawn=None, hh_scorer=None):
         """dial_list — () -> сервис «Удаленного КЦ» или None: клиент Binotel отдела для истории звонков
         линии рекрутера и ссылки на запись разговора. storage — бакет файлов WhatsApp найма
         (wa_media.Storage), transcriber — (байты, тип) -> расшифровка голосового, spawn — запуск фоновой
@@ -101,6 +101,13 @@ class HiringService:
         # Когда последний раз открывали окно «Чаты»: пока в нём работают, шлюз опрашивает чаще (ответ уходит за
         # секунды, а не за 10 с опроса). В памяти процесса — подсказка скорости, не состояние.
         self._wa_ui_seen = 0.0
+        # Поиск по базе hh: длинный опрос моста ждёт задания на этом условии — новое задание будит его сразу (в другом
+        # процессе — не позже HH_TASKS_RECHECK секунд, по базе); балл ИИ ставит один поток за раз.
+        self._hh_cond = threading.Condition()
+        self._hh_score_lock = threading.Lock()
+        self._hh_scheduled_at = None
+        # (вакансия, портрет, [(id, текст резюме)]) -> ({id: балл}, сведения о вызове); по умолчанию — Gemini (hh_ai).
+        self._hh_scorer = hh_scorer
 
     def _dial_list_service(self):
         try:
@@ -289,6 +296,9 @@ class HiringService:
             source = queries.get_source(cursor, source_id) if source_id else None
         if not source or not source['is_active'] or source['kind'] != rules.SOURCE_CONTACTS:
             raise HiringError('HIRING_NEED_SOURCE', 'Выберите источник контактов — он один на весь файл')
+        if source.get('platform'):
+            # «База HeadHunter» приходит сама (поиск по базе hh) — файлом под её именем ничего не загрузить.
+            raise HiringError('HIRING_NEED_SOURCE', 'Источник «%s» заполняется сам — выберите другой' % source['name'])
         try:
             contacts, errors, total = upload.parse(raw, file_name)
         except upload.UploadError as exc:
@@ -570,6 +580,596 @@ class HiringService:
             vacancies = hh.merge_vacancy_settings((row.get('settings') or {}).get('vacancies'), vacancies, now)
             queries.hh_save_settings(cursor, now, vacancies)
         return vacancies
+
+    # ─── Поиск по базе резюме hh.kz (hiring/hh_base.py, hh_ai.py) ────────────
+
+    HH_TASKS_WAIT_MAX = 20.0
+    HH_TASKS_RECHECK = 5.0
+    HH_DONE_MAX = 50
+    HH_SCORE_PER_RUN = 48
+    HH_SCORE_PER_DAY = 600
+    HH_SCORE_CLAIM = timedelta(minutes=5)
+
+    @staticmethod
+    def _hh_reader(ctx):
+        if not (access.can_take(ctx) or access.can_manage(ctx)):
+            raise _forbidden('Базу резюме hh видят рекрутеры и руководитель рекрутинга')
+
+    @staticmethod
+    def _hh_vacancy_key(value):
+        key = str(value or '').strip()
+        if not key.isdigit() or len(key) > 18:
+            raise HiringError('HIRING_NOT_FOUND', 'Такой вакансии hh нет', 404)
+        return key
+
+    def _hh_kick(self):
+        """Новое задание — разбудить длинный опрос моста в этом процессе (после фиксации транзакции)."""
+        with self._hh_cond:
+            self._hh_cond.notify_all()
+
+    @staticmethod
+    def _hh_catalog(cursor):
+        """Вакансии кабинета hh из последнего доклада моста: {id: {id, name, area, area_id}} и сам мост."""
+        row = queries.get_integration(cursor, 'hh') or {}
+        report = row.get('cursor') or {}
+        catalog = {str(item.get('id')): item for item in report.get('vacancies') or [] if isinstance(item, dict) and item.get('id')}
+        return catalog, report.get('bridge') or {}
+
+    def hh_base_overview(self, ctx):
+        """Вкладка «База hh»: вакансии кабинета с настройками поиска, счёт резюме и состояние моста."""
+        self._hh_reader(ctx)
+        now = self._now()
+        with self._cursor() as cursor:
+            catalog, bridge = self._hh_catalog(cursor)
+            searches = {str(row['hh_vacancy_id']): row for row in queries.hh_search_list(cursor)}
+            counts = queries.hh_resume_counts(cursor)
+            running = {}
+            for key in set(catalog) | set(searches):
+                task = queries.hh_task_open(cursor, 'search', hh_vacancy_id=key)
+                if task:
+                    running[key] = task
+        manage = access.can_manage(ctx)
+        vacancies = []
+        for key in sorted(set(catalog) | set(searches), key=lambda k: ((searches.get(k) or {}).get('enabled') is not True,
+                                                                         str((catalog.get(k) or searches.get(k) or {}).get('name')
+                                                                             or (searches.get(k) or {}).get('vacancy_name') or ''))):
+            search = searches.get(key) or {}
+            item = catalog.get(key) or {}
+            enabled = search.get('enabled') is True
+            if not enabled and not manage and not counts.get(key):
+                continue
+            last = search.get('last_run_at')
+            due = None
+            if enabled and last:
+                due = last + hh_base.SEARCH_EVERY
+            vacancies.append({
+                'hh_vacancy_id': key, 'name': item.get('name') or search.get('vacancy_name') or ('Вакансия %s' % key),
+                'area': item.get('area'), 'in_cabinet': key in catalog, 'enabled': enabled,
+                'portrait': search.get('portrait') if manage else None, 'keywords': search.get('keywords') or [],
+                'has_portrait': bool(search.get('portrait')),
+                'last_run_at': last, 'last_total': search.get('last_total'), 'last_found': search.get('last_found'),
+                'last_new': search.get('last_new'), 'last_error': search.get('last_error'),
+                'running': bool(running.get(key)), 'next_run_at': due,
+                'can_run_now': enabled and hh_base.run_now_allowed(search, now) and not running.get(key),
+                'counts': counts.get(key) or {'new': 0, 'taking': 0, 'taken': 0, 'rejected': 0, 'strong': 0},
+                'updated_by_name': search.get('updated_by_name'), 'updated_at': search.get('updated_at'),
+            })
+        seen_at = hh.parse_moment(bridge.get('seen_at'))
+        return {'vacancies': vacancies, 'can_manage': manage, 'can_take': access.can_take(ctx),
+                'bridge': {'seen_at': seen_at, 'session': bridge.get('session'), 'version': bridge.get('version'),
+                           'ready': hh_base.bridge_ready(bridge.get('version')),
+                           'silent': bool(seen_at and now - seen_at > rules.hh_silent_after(bridge.get('expect_sec')))},
+                'access_labels': hh_base.ACCESS_LABELS}
+
+    def hh_search_save(self, ctx, hh_vacancy_id, payload):
+        """Поиск вакансии в базе hh — руководитель (владелец 25.11.2026: «для которой включен такой поиск»): тумблер,
+        портрет сотрудника, ключевые слова. Сменились слова (или поиск включили заново) — следующий поиск «первый»."""
+        if not access.can_manage(ctx):
+            raise _forbidden('Поиск по базе hh настраивает руководитель рекрутинга')
+        key = self._hh_vacancy_key(hh_vacancy_id)
+        try:
+            profile = hh_base.clean_profile(payload)
+        except hh_base.ProfileError as exc:
+            raise HiringError('HIRING_HH_BAD_SEARCH', str(exc))
+        now = self._now()
+        with self._cursor() as cursor:
+            catalog, _bridge = self._hh_catalog(cursor)
+            existing = queries.hh_search_get(cursor, key, lock=True)
+            vacancy = catalog.get(key)
+            if vacancy is None and existing is None:
+                raise HiringError('HIRING_NOT_FOUND', 'Такой вакансии нет в кабинете hh', 404)
+            area_id = (vacancy or {}).get('area_id') or (existing or {}).get('area_id')
+            reset = (existing is None or (existing.get('keywords') or []) != profile['keywords']
+                     or (area_id and area_id != existing.get('area_id'))
+                     or (profile['enabled'] and not existing.get('enabled')))
+            queries.hh_search_save(cursor, key, vacancy_name=(vacancy or {}).get('name'), enabled=profile['enabled'],
+                                   portrait=profile['portrait'], keywords=profile['keywords'], area_id=area_id,
+                                   reset_runs=reset, by=ctx['user_id'], by_name=ctx['name'], now=now)
+            if profile['enabled']:
+                self._hh_schedule(cursor, now)
+        self._hh_kick()
+        if profile['portrait']:
+            # Портрет сменился — найденным раньше балл ставится заново (новый портрет — новая мерка).
+            with self._cursor() as cursor:
+                cursor.execute("UPDATE hiring_hh_resumes SET score = NULL, score_tries = 0 WHERE hh_vacancy_id = %s "
+                               "AND status IN ('new', 'taking') AND (%s OR score IS NULL)",
+                               (int(key), bool(existing and (existing.get('portrait') or '') != profile['portrait'])))
+            self._spawn(self.hh_base_score_pending)
+        return self.hh_base_overview(ctx)
+
+    def hh_search_keywords(self, ctx, hh_vacancy_id, payload):
+        """«Подобрать с ИИ»: ключевые слова по портрету (ещё не сохранённому — из окна настройки)."""
+        if not access.can_manage(ctx):
+            raise _forbidden('Поиск по базе hh настраивает руководитель рекрутинга')
+        key = self._hh_vacancy_key(hh_vacancy_id)
+        with self._cursor() as cursor:
+            catalog, _bridge = self._hh_catalog(cursor)
+            existing = queries.hh_search_get(cursor, key) or {}
+        portrait = (payload or {}).get('portrait')
+        portrait = portrait if isinstance(portrait, str) and portrait.strip() else existing.get('portrait')
+        name = (catalog.get(key) or {}).get('name') or existing.get('vacancy_name')
+        try:
+            return hh_ai.suggest_keywords(name, portrait)
+        except hh_ai.HhAiError as exc:
+            raise HiringError('HIRING_HH_AI', str(exc), exc.status)
+
+    def hh_search_run_now(self, ctx, hh_vacancy_id):
+        """«Искать сейчас» — рекрутер или руководитель; не чаще раза в 10 минут на вакансию."""
+        self._hh_reader(ctx)
+        key = self._hh_vacancy_key(hh_vacancy_id)
+        now = self._now()
+        with self._cursor() as cursor:
+            search = queries.hh_search_get(cursor, key, lock=True)
+            if not search or not search.get('enabled'):
+                raise HiringError('HIRING_HH_SEARCH_OFF', 'Поиск по базе для этой вакансии не включён', 409)
+            if queries.hh_task_open(cursor, 'search', hh_vacancy_id=key):
+                raise HiringError('HIRING_HH_SEARCH_RUNNING', 'Поиск уже идёт — результаты появятся через минуту-две', 409)
+            if not hh_base.run_now_allowed(search, now):
+                raise HiringError('HIRING_HH_SEARCH_SOON', 'Искали только что — следующий поиск можно через 10 минут', 409)
+            catalog, _bridge = self._hh_catalog(cursor)
+            self._hh_search_task(cursor, search, catalog, now, manual=True, by=ctx['user_id'])
+            queries.hh_search_requested(cursor, key, now)
+        self._hh_kick()
+        return self.hh_base_overview(ctx)
+
+    @staticmethod
+    def _hh_search_task(cursor, search, catalog, now, *, manual=False, by=None):
+        key = str(search['hh_vacancy_id'])
+        profile = dict(search, area_id=search.get('area_id') or (catalog.get(key) or {}).get('area_id'))
+        task = hh_base.search_task(profile, now, manual=manual)
+        return queries.hh_task_add(cursor, 'search', task['reason'], now, priority=hh_base.PRIORITY[task['reason']],
+                                   hh_vacancy_id=key, params=task, by=by)
+
+    def _hh_schedule(self, cursor, now):
+        """Плановые задания: автопоиск вакансий, которым пора, и полные резюме сильных кандидатов (не больше
+        hh_base.AUTO_FULL_PER_DAY за сутки, только в рабочее время). Возвращает, сколько заданий добавлено."""
+        added = 0
+        catalog = None
+        for search in queries.hh_search_list(cursor):
+            if not hh_base.search_due(search, now):
+                continue
+            if queries.hh_task_open(cursor, 'search', hh_vacancy_id=search['hh_vacancy_id']):
+                continue
+            if catalog is None:
+                catalog, _bridge = self._hh_catalog(cursor)
+            self._hh_search_task(cursor, search, catalog, now)
+            added += 1
+        start, end = hh_base.SEARCH_HOURS
+        if start <= now.hour < end:
+            midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            left = hh_base.AUTO_FULL_PER_DAY - queries.hh_tasks_created_since(cursor, 'score', midnight)
+            if left > 0:
+                # Не больше трёх за проход (раз в минуту): сильных кандидатов мост дочитывает понемногу, а не залпом.
+                for row in queries.hh_resumes_strong_without_full(cursor, hh_base.AUTO_FULL_MIN_SCORE, min(left, 3)):
+                    queries.hh_task_add(cursor, 'resume', 'score', now, priority=hh_base.PRIORITY['score'],
+                                        resume_hash=row['resume_hash'])
+                    added += 1
+        return added
+
+    @staticmethod
+    def _hh_task_payload(task):
+        if task['kind'] == 'search':
+            params = task.get('params') or {}
+            return {'id': str(task['id']), 'kind': 'search', 'vacancy_id': str(task['hh_vacancy_id']),
+                    'params': params.get('params') or {}, 'pages': params.get('pages') or hh_base.NEXT_PAGES,
+                    'stop_before': params.get('stop_before')}
+        return {'id': str(task['id']), 'kind': 'resume', 'hash': task['resume_hash'], 'reason': task['reason']}
+
+    def hh_agent_tasks(self, payload, sleep=None, clock=time.monotonic):
+        """Длинный опрос моста (POST /api/hiring/hh/agent/tasks): приносит результаты прошлых заданий и ждёт новых до
+        wait секунд (не больше HH_TASKS_WAIT_MAX). Задания: поиск вакансии в базе, перечитать резюме (рекрутер
+        открыл, ждём контакты после «Взять в работу», полное резюме для балла)."""
+        payload = payload if isinstance(payload, dict) else {}
+        done = payload.get('done') if isinstance(payload.get('done'), list) else []
+        if len(done) > self.HH_DONE_MAX:
+            raise HiringError('HIRING_HH_TOO_MANY', 'Не больше %d результатов за раз' % self.HH_DONE_MAX)
+        try:
+            wait = float(payload.get('wait') or 0)
+        except (TypeError, ValueError):
+            wait = 0.0
+        wait = max(0.0, min(wait if wait == wait else 0.0, self.HH_TASKS_WAIT_MAX))
+        # take = false — мост только отдаёт результаты (у него закончился заход): новых заданий не выдавать, иначе они
+        # провисят выданными до TASK_LEASE.
+        take = payload.get('take') is not False
+        now = self._now()
+        accepted, rescore = [], False
+        for result in done:
+            if not isinstance(result, dict):
+                continue
+            with self._cursor() as cursor:
+                outcome = self._hh_task_done(cursor, result, now)
+            if outcome:
+                accepted.append(str(result.get('id')))
+                rescore = rescore or outcome in ('found', 'resume')
+        if rescore:
+            self._spawn(self.hh_base_score_pending)
+        if not take:
+            return {'accepted': accepted, 'tasks': [], 'wait_sec': self.HH_TASKS_WAIT_MAX}
+        with self._cursor() as cursor:
+            # Плановые задания — не чаще раза в минуту: опрос приходит каждые 20 секунд, а расписание — часы; результаты
+            # заданий проход не ускоряют, иначе фоновые чтения резюме для балла шли бы залпом (по три за каждый ответ).
+            if self._hh_scheduled_at is None or not timedelta(0) <= now - self._hh_scheduled_at < timedelta(minutes=1):
+                self._hh_scheduled_at = now
+                self._hh_schedule(cursor, now)
+            tasks = queries.hh_tasks_take(cursor, now, hh_base.TASK_LEASE)
+        deadline = clock() + wait
+        while not tasks:
+            left = deadline - clock()
+            if left <= 0:
+                break
+            if sleep is not None:
+                sleep(min(left, self.HH_TASKS_RECHECK))
+            else:
+                with self._hh_cond:
+                    self._hh_cond.wait(min(left, self.HH_TASKS_RECHECK))
+            now = self._now()
+            with self._cursor() as cursor:
+                if queries.hh_tasks_due(cursor, now, hh_base.TASK_LEASE):
+                    tasks = queries.hh_tasks_take(cursor, now, hh_base.TASK_LEASE)
+        return {'accepted': accepted, 'tasks': [self._hh_task_payload(task) for task in tasks],
+                'wait_sec': self.HH_TASKS_WAIT_MAX}
+
+    def _hh_task_done(self, cursor, result, now):
+        """Результат одного задания моста. Неудача из-за входа или защиты сайта — задание ждёт и уйдёт снова; прочие
+        сбои — до hh_base.TASK_ATTEMPTS попыток. → исход для подсчёта или None (такого задания нет / уже закрыто)."""
+        task_id = str(result.get('id') or '')
+        if not task_id.isdigit():
+            return None
+        task = queries.hh_task_get(cursor, task_id, lock=True)
+        if not task or task['done_at'] is not None:
+            return None
+        if result.get('ok') is not True:
+            error = hh._text(result.get('error'), 300) or 'мост не выполнил задание'
+            if result.get('gone') is True and task['kind'] == 'resume':
+                queries.hh_task_finish(cursor, task_id, now, 'gone', error)
+                for row in queries.hh_resumes_by_hash(cursor, task['resume_hash']):
+                    if row['status'] in ('new', 'taking'):
+                        queries.hh_resume_note(cursor, row['id'], 'Резюме скрыто или удалено на hh')
+                return 'gone'
+            trouble = result.get('trouble') in ('login_required', 'blocked')
+            if task['attempts'] >= hh_base.TASK_ATTEMPTS and not trouble:
+                queries.hh_task_finish(cursor, task_id, now, 'failed', error)
+                if task['kind'] == 'search':
+                    queries.hh_search_finished(cursor, task['hh_vacancy_id'], now, total=None, found=None, new=None,
+                                               error=error)
+            else:
+                queries.hh_task_later(cursor, task_id, now + (timedelta(minutes=15) if trouble else timedelta(minutes=2)), error)
+            return 'failed'
+        if task['kind'] == 'search':
+            return self._hh_search_done(cursor, task, result, now)
+        return self._hh_resume_done(cursor, task, result, now)
+
+    def _hh_search_done(self, cursor, task, result, now):
+        items = result.get('items') if isinstance(result.get('items'), list) else []
+        found = new = 0
+        for raw in items[:hh_base.FIRST_PAGES * hh_base.PAGE_SIZE * 2]:
+            item = hh_base.clean_found(raw)
+            if item is None:
+                continue
+            _row_id, inserted = queries.hh_resume_save_found(cursor, task['hh_vacancy_id'], item, now)
+            found += 1
+            new += 1 if inserted else 0
+        total = result.get('total')
+        total = total if isinstance(total, int) and not isinstance(total, bool) and total >= 0 else None
+        queries.hh_search_finished(cursor, task['hh_vacancy_id'], now, total=total, found=found, new=new, error=None)
+        queries.hh_task_finish(cursor, task['id'], now, 'ok')
+        if new:
+            log.info('Воронка найма: поиск по базе hh (вакансия %s) — найдено %d, новых %d', task['hh_vacancy_id'], found, new)
+        return 'found'
+
+    def _hh_resume_done(self, cursor, task, result, now):
+        """Страница резюме: полное резюме — во все строки этого резюме; ждём контакты после «Взять в работу» — заводим
+        карточку, контакты ещё не открыты — следующая проверка по hh_base.CONTACTS_WATCH_SECONDS."""
+        resume_hash = task['resume_hash']
+        resume = hh.clean_resume(result.get('resume'))
+        access_state = result.get('access') if result.get('access') in hh_base.ACCESS else None
+        queries.hh_resume_save_full(cursor, resume_hash, resume, access_state, now)
+        if result.get('reason') not in (None, task['reason']):
+            # Мост читал резюме по прежней причине (для балла), а задание тем временем стало срочнее («Взять в работу») и
+            # ушло ему снова: резюме берём, а задание закроет результат с нынешней причиной.
+            return 'resume'
+        queries.hh_task_finish(cursor, task['id'], now, 'ok')
+        taking = [row for row in queries.hh_resumes_by_hash(cursor, resume_hash, lock=True) if row['status'] == 'taking']
+        if not taking:
+            return 'resume'
+        row = taking[0]
+        contacts = hh_base.clean_contacts(result.get('contacts')) if task['reason'] == 'contacts' else None
+        if contacts and contacts.get('phone'):
+            self._hh_base_card(cursor, row, contacts, now)
+            for other in taking[1:]:
+                queries.hh_resume_status(cursor, other['id'], 'new', now, note=None)
+            return 'resume'
+        if contacts:
+            note = 'На hh у кандидата нет казахстанского телефона — свяжитесь с ним через hh'
+        else:
+            note = 'Контакты на hh ещё не открыты'
+            moment = hh_base.contacts_next_check(row['status_at'] or now, now)
+            if moment:
+                queries.hh_task_add(cursor, 'resume', 'contacts', now, priority=hh_base.PRIORITY['contacts'],
+                                    resume_hash=resume_hash, not_before=moment, by=row.get('status_by'))
+        queries.hh_resume_note(cursor, row['id'], note)
+        return 'resume'
+
+    def _hh_base_card(self, cursor, row, contacts, now):
+        """Контакты пришли — карточка с источником «База HeadHunter» сразу «В работе» у того, кто нажал «Взять в работу»
+        (владелец 25.11.2026). Телефон уже в открытой карточке — повторное обращение в ней, новой не будет."""
+        source = queries.source_by_code(cursor, rules.SOURCE_HH_BASE)
+        if not source:
+            queries.hh_resume_note(cursor, row['id'], 'В справочнике нет источника «База HeadHunter»')
+            return None
+        settings = (queries.get_integration(cursor, 'hh') or {}).get('settings') or {}
+        rule = hh.vacancy_rule(settings, row['hh_vacancy_id'])
+        search = queries.hh_search_get(cursor, row['hh_vacancy_id']) or {}
+        recruiter_id, recruiter_name = row.get('status_by'), row.get('status_by_name')
+        snippet = row.get('snippet') or {}
+        vacancy_id = rule['vacancy_id'] if rule['vacancy_id'] in queries.hh_vacancy_ids(cursor) else None
+        outcome, card_id = self._intake_one(
+            cursor, phone=contacts['phone'], kind=rules.KIND_CONTACT, source=source, now=now, by=recruiter_id,
+            by_name=recruiter_name, full_name=contacts['full_name'], city=snippet.get('area'), vacancy_id=vacancy_id,
+            vacancy_text=search.get('vacancy_name'), platform_ref=hh_base.resume_url(row['resume_hash']),
+            comment=('Почта с hh: %s' % contacts['email']) if contacts.get('email') else None, notify=False)
+        if outcome == 'employee':
+            queries.hh_resume_status(cursor, row['id'], 'taken', now, by=recruiter_id, by_name=recruiter_name,
+                                     take_outcome='employee', note='Это телефон действующего сотрудника — карточки нет')
+            return None
+        note = None
+        if outcome == 'created' and recruiter_id and queries.claim_card(cursor, card_id, recruiter_id, now):
+            queries.add_stage(cursor, card_id, rules.IN_WORK, None, recruiter_id, recruiter_name, now)
+            queries.add_assignment(cursor, card_id, recruiter_id, 'take', recruiter_id, recruiter_name, now)
+            queries.mark_card_seen(cursor, recruiter_id, card_id, now)
+            data = row.get('score_data') or {}
+            body = 'Взят из базы hh%s' % ((' · балл ИИ %s' % row['score']) if row.get('score') is not None else '')
+            if data.get('verdict'):
+                body += '\n' + data['verdict']
+            queries.add_touch(cursor, card_id, rules.TOUCH_SYSTEM, 'hh_base', body, recruiter_id, recruiter_name, now,
+                              meta={'resume_hash': row['resume_hash'], 'score': row.get('score')})
+        elif outcome == 'repeat':
+            card = queries.get_card(cursor, card_id) or {}
+            note = 'Кандидат уже в воронке: карточка №%s' % (card.get('candidate_no') or card_id)
+        queries.hh_resume_status(cursor, row['id'], 'taken', now, by=recruiter_id, by_name=recruiter_name, card_id=card_id,
+                                 take_outcome=outcome, note=note)
+        card = queries.get_card(cursor, card_id)
+        if card and recruiter_id:
+            notices.hh_base_contacts(cursor, card, recruiter_id, outcome, now)
+        return card_id
+
+    def _hh_known(self, cursor, rows):
+        return queries.hh_known_cards(cursor, [row['resume_hash'] for row in rows])
+
+    @staticmethod
+    def _hh_base_item(row, known=None, *, full=False, refreshing=False):
+        """Резюме для вкладки «База hh»: краткая карточка, балл ИИ и что с ним делали. Полное резюме — только в окне."""
+        snippet = row.get('snippet') or {}
+        data = row.get('score_data') or {}
+        topic = row.get('topic') or None
+        item = {
+            'id': row['id'], 'hh_vacancy_id': str(row['hh_vacancy_id']), 'hash': row['resume_hash'],
+            'url': hh_base.resume_url(row['resume_hash']),
+            'title': snippet.get('title'), 'age': snippet.get('age'), 'gender': snippet.get('gender'),
+            'area': snippet.get('area'), 'salary': snippet.get('salary'),
+            'experience_text': hh_base.experience_text(snippet.get('experience_months'))
+            if snippet.get('experience_months') else ('без опыта' if snippet.get('experience_months') == 0 else None),
+            'experience': (snippet.get('experience') or [])[:3], 'skills': (snippet.get('skills') or [])[:8],
+            'job_status': snippet.get('job_status'),
+            'job_status_label': hh_base.JOB_STATUS_LABELS.get(snippet.get('job_status')),
+            'online': snippet.get('online') is True,
+            'last_activity_at': row.get('last_activity_at'), 'hh_updated_at': row.get('hh_updated_at'),
+            'access': row.get('access'), 'access_label': hh_base.ACCESS_LABELS.get(row.get('access')),
+            'topic': ({'label': hh_base.TOPIC_LABELS.get(topic.get('type'), 'переписка'), 'at': topic.get('at')}
+                      if topic else None),
+            'score': row.get('score'), 'score_basis': row.get('score_basis'), 'verdict': data.get('verdict'),
+            'pros': data.get('pros') or [], 'cons': data.get('cons') or [],
+            'scoring': row.get('score') is None and (row.get('score_tries') or 0) < 3,
+            'score_error': row.get('score_error') if (row.get('score_tries') or 0) >= 3 else None,
+            'status': row['status'], 'status_by': row.get('status_by'), 'status_by_name': row.get('status_by_name'),
+            'status_at': row.get('status_at'), 'card_id': row.get('card_id'), 'take_outcome': row.get('take_outcome'),
+            'contacts_note': row.get('contacts_note'), 'has_full': row.get('resume') is not None,
+            'resume_at': row.get('resume_at'), 'found_at': row.get('found_at'),
+            'known': known or None,
+        }
+        if full:
+            item['resume'] = row.get('resume') or hh_base.snippet_resume(snippet)
+            item['refreshing'] = refreshing
+        return item
+
+    def hh_base_list(self, ctx, hh_vacancy_id, view='new', order='score', page=1):
+        """Список «База hh» вакансии: new — ждут рекрутера (и те, кого берут прямо сейчас), taken — взятые,
+        rejected — «Не подходит»."""
+        self._hh_reader(ctx)
+        key = self._hh_vacancy_key(hh_vacancy_id)
+        statuses = {'new': ('new', 'taking'), 'taken': ('taken',), 'rejected': ('rejected',)}.get(view, ('new', 'taking'))
+        page = max(1, _int(page) or 1)
+        size = 30
+        with self._cursor() as cursor:
+            total, rows = queries.hh_resume_list(cursor, key, statuses, order, size, (page - 1) * size)
+            known = self._hh_known(cursor, rows)
+        return {'total': total, 'page': page, 'pages': max(1, -(-total // size)),
+                'items': [self._hh_base_item(row, known.get(row['resume_hash'])) for row in rows]}
+
+    def hh_base_get(self, ctx, row_id, refresh=False):
+        """Резюме целиком. refresh — рекрутер открыл окно (владелец 25.11.2026: «обновление резюмешки в момент просмотра
+        через наш сайт»): мост перечитывает страницу резюме на hh, если прошлое чтение старше hh_base.VIEW_FRESH."""
+        self._hh_reader(ctx)
+        now = self._now()
+        kicked = False
+        with self._cursor() as cursor:
+            row = queries.hh_resume_get(cursor, row_id)
+            if not row:
+                raise HiringError('HIRING_NOT_FOUND', 'Резюме не найдено', 404)
+            if refresh and (row.get('resume_at') is None or now - row['resume_at'] > hh_base.VIEW_FRESH):
+                queries.hh_task_add(cursor, 'resume', 'view', now, priority=hh_base.PRIORITY['view'],
+                                    resume_hash=row['resume_hash'], by=ctx['user_id'])
+                kicked = True
+            open_task = queries.hh_task_open(cursor, 'resume', resume_hash=row['resume_hash'])
+            known = self._hh_known(cursor, [row]).get(row['resume_hash'])
+        if kicked:
+            self._hh_kick()
+        # «Обновляем с hh» — только когда мост читает резюме сейчас; следующая проверка контактов через минуту — не оно.
+        return self._hh_base_item(row, known, full=True,
+                                  refreshing=bool(open_task and open_task['not_before'] <= now))
+
+    def hh_base_take(self, ctx, row_id):
+        """«Взять в работу» (владелец 25.11.2026): кандидат закрепляется за рекрутером, мост ждёт, когда тот откроет
+        контакты на hh (окно с резюме на hh открывает сам интерфейс), и заводит карточку «В работе»."""
+        if not access.can_take(ctx):
+            raise _forbidden('Брать кандидатов в работу могут рекрутеры')
+        now = self._now()
+        with self._cursor() as cursor:
+            row = queries.hh_resume_get(cursor, row_id, lock=True)
+            if not row:
+                raise HiringError('HIRING_NOT_FOUND', 'Резюме не найдено', 404)
+            known = self._hh_known(cursor, [row]).get(row['resume_hash'])
+            if known and not known['is_closed']:
+                raise HiringError('HIRING_HH_IN_FUNNEL', 'Кандидат уже в воронке: карточка №%s%s' % (
+                    known.get('candidate_no') or known['card_id'],
+                    (' у %s' % known['recruiter_name']) if known.get('recruiter_name') else ''), 409)
+            if row['status'] == 'taken':
+                raise HiringError('HIRING_ALREADY_TAKEN', 'Кандидата уже взяли в работу', 409)
+            others = [other for other in queries.hh_resumes_by_hash(cursor, row['resume_hash'])
+                      if other['status'] == 'taking' and other['status_by'] != ctx['user_id']
+                      and other.get('status_at') and now - other['status_at'] < hh_base.TAKING_STALE]
+            if others:
+                raise HiringError('HIRING_ALREADY_TAKEN', 'Кандидата уже берёт %s' % (others[0].get('status_by_name') or 'другой рекрутер'), 409)
+            queries.hh_resume_status(cursor, row['id'], 'taking', now, by=ctx['user_id'], by_name=ctx['name'])
+            # Контакты доступны без списания — мост прочитает их сразу. Закрытые рекрутер открывает на hh сам: сразу
+            # смотреть незачем (лишний просмотр резюме на hh) — первая проверка через hh_base.CONTACTS_FIRST_CHECK или
+            # раньше, когда рекрутер вернётся во вкладку iCORE (окно само попросит «Проверить»).
+            free = row.get('access') in ('free', 'opened')
+            queries.hh_task_add(cursor, 'resume', 'contacts', now, priority=hh_base.PRIORITY['contacts'],
+                                resume_hash=row['resume_hash'], by=ctx['user_id'],
+                                not_before=now if free else now + hh_base.CONTACTS_FIRST_CHECK)
+            row = queries.hh_resume_get(cursor, row['id'])
+        self._hh_kick()
+        return self._hh_base_item(row, None, full=True, refreshing=free)
+
+    def hh_base_check(self, ctx, row_id):
+        """«Проверить контакты» (и сам интерфейс, когда рекрутер вернулся во вкладку iCORE): мост перечитывает резюме
+        сейчас."""
+        if not access.can_take(ctx):
+            raise _forbidden('Брать кандидатов в работу могут рекрутеры')
+        now = self._now()
+        with self._cursor() as cursor:
+            row = queries.hh_resume_get(cursor, row_id, lock=True)
+            if not row:
+                raise HiringError('HIRING_NOT_FOUND', 'Резюме не найдено', 404)
+            if row['status'] != 'taking':
+                return self._hh_base_item(row, self._hh_known(cursor, [row]).get(row['resume_hash']), full=True)
+            if row.get('status_by') != ctx['user_id'] and not access.can_manage(ctx):
+                raise _forbidden('Кандидата берёт %s' % (row.get('status_by_name') or 'другой рекрутер'))
+            queries.hh_task_add(cursor, 'resume', 'contacts', now, priority=hh_base.PRIORITY['contacts'],
+                                resume_hash=row['resume_hash'], by=ctx['user_id'])
+            queries.hh_resume_note(cursor, row['id'], None)
+            row = queries.hh_resume_get(cursor, row['id'])
+        self._hh_kick()
+        return self._hh_base_item(row, None, full=True, refreshing=True)
+
+    def hh_base_status(self, ctx, row_id, status):
+        """«Не подходит» (rejected), вернуть в список (new) или отменить «Взять в работу» (тоже new)."""
+        self._hh_reader(ctx)
+        if status not in ('new', 'rejected'):
+            raise HiringError('HIRING_BAD_STATUS', 'Такого действия нет')
+        now = self._now()
+        with self._cursor() as cursor:
+            row = queries.hh_resume_get(cursor, row_id, lock=True)
+            if not row:
+                raise HiringError('HIRING_NOT_FOUND', 'Резюме не найдено', 404)
+            if row['status'] == 'taken':
+                raise HiringError('HIRING_ALREADY_TAKEN', 'Кандидат уже в воронке — карточку ведут там', 409)
+            if row['status'] == 'taking' and row.get('status_by') != ctx['user_id'] and not access.can_manage(ctx):
+                raise _forbidden('Кандидата берёт %s' % (row.get('status_by_name') or 'другой рекрутер'))
+            queries.hh_resume_status(cursor, row['id'], status, now, by=ctx['user_id'], by_name=ctx['name'])
+            if row['status'] == 'taking':
+                task = queries.hh_task_open(cursor, 'resume', resume_hash=row['resume_hash'])
+                if task and task['reason'] == 'contacts':
+                    queries.hh_task_finish(cursor, task['id'], now, 'cancelled')
+            row = queries.hh_resume_get(cursor, row['id'])
+            known = self._hh_known(cursor, [row]).get(row['resume_hash'])
+        return self._hh_base_item(row, known, full=True)
+
+    def hh_base_sweep(self):
+        """Сторож моста (раз в 5 минут): резюме без балла — балл ИИ своим потоком (ИИ отвечает до минуты, задачи
+        планировщика ждать его не должны)."""
+        self._spawn(self.hh_base_score_pending)
+
+    def hh_base_score_pending(self, limit=None, score_fn=None):
+        """Балл ИИ найденным резюме по портрету вакансии (владелец 25.11.2026: «чтобы ИИ могла по портрету сотрудника
+        определять и давать скорбалл кандидату»). Пачками по hh_ai.BATCH; ИИ недоступен — до следующего раза (сторож
+        раз в 5 минут и каждый приход новых резюме). Не больше HH_SCORE_PER_DAY резюме за сутки. → сколько оценено."""
+        if not self._hh_score_lock.acquire(blocking=False):
+            return None
+        scorer = score_fn or self._hh_scorer or hh_ai.score_candidates
+        try:
+            limit = limit or self.HH_SCORE_PER_RUN
+            scored = 0
+            while scored < limit:
+                now = self._now()
+                with self._cursor() as cursor:
+                    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    cursor.execute("SELECT COUNT(*) FROM hiring_hh_resumes WHERE scored_at >= %s", (midnight,))
+                    if int(cursor.fetchone()[0]) >= self.HH_SCORE_PER_DAY:
+                        log.warning('Воронка найма: балл ИИ базы hh — дневной предел %d исчерпан', self.HH_SCORE_PER_DAY)
+                        break
+                    # Взять на оценку — с отметкой: другие копии портала (в облаке их несколько) эти строки пропустят.
+                    rows = queries.hh_resumes_claim_for_score(cursor, hh_ai.BATCH * 3, now, now - self.HH_SCORE_CLAIM)
+                if not rows:
+                    break
+                # Пачки — по одной вакансии (портрет в запросе один на пачку), не больше hh_ai.BATCH.
+                batches = []
+                for row in rows:
+                    if (batches and batches[-1][0]['hh_vacancy_id'] == row['hh_vacancy_id']
+                            and len(batches[-1]) < hh_ai.BATCH):
+                        batches[-1].append(row)
+                    else:
+                        batches.append([row])
+                for number, batch in enumerate(batches):
+                    candidates = [(str(row['id']), hh_base.candidate_text(row['snippet'], row['resume'])) for row in batch]
+                    try:
+                        results, meta = scorer(batch[0]['vacancy_name'], batch[0]['portrait'], candidates)
+                    except hh_ai.HhAiError as exc:
+                        with self._cursor() as cursor:
+                            queries.hh_resume_score_failed(cursor, [row['id'] for row in batch], str(exc))
+                            queries.hh_resume_score_release(
+                                cursor, [row['id'] for later in batches[number + 1:] for row in later])
+                        log.warning('Воронка найма: балл ИИ базы hh не поставлен — %s', exc)
+                        return scored
+                    now = self._now()
+                    with self._cursor() as cursor:
+                        missed = []
+                        for row in batch:
+                            result = results.get(str(row['id']))
+                            if not result:
+                                missed.append(row['id'])
+                                continue
+                            data = dict(result, model=meta.get('model'), ms=meta.get('ms'), batch=len(batch),
+                                        tokens_in=meta.get('tokens_in'), tokens_out=meta.get('tokens_out'))
+                            queries.hh_resume_scored(cursor, row['id'], result['score'],
+                                                     'full' if row['resume'] else 'snippet', data, now)
+                        if missed:
+                            queries.hh_resume_score_failed(cursor, missed, 'ИИ не ответил по кандидату')
+                    scored += len(batch)
+            return scored
+        finally:
+            self._hh_score_lock.release()
 
     # ─── Работа с карточкой ──────────────────────────────────────────────────
 

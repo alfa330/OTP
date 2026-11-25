@@ -1037,10 +1037,12 @@ def hh_finish_topic(cursor, topic_id, outcome, card_id, item=None):
     item = item if card_id and item else {}
     cursor.execute("""
         UPDATE hiring_hh_topics
-           SET outcome = %s, card_id = %s, vacancy_name = %s, resume_url = %s, letter = %s, resume = %s::jsonb
+           SET outcome = %s, card_id = %s, vacancy_name = %s, resume_url = %s, letter = %s, resume = %s::jsonb,
+               resume_hash = %s
          WHERE topic_id = %s
     """, (outcome, card_id, item.get('vacancy_name'), item.get('resume_url'), item.get('letter'),
-          json.dumps(item['resume'], ensure_ascii=False) if item.get('resume') else None, int(topic_id)))
+          json.dumps(item['resume'], ensure_ascii=False) if item.get('resume') else None, item.get('resume_hash'),
+          int(topic_id)))
 
 
 def hh_card_responses(cursor, card_id):
@@ -1081,6 +1083,367 @@ def hh_vacancy_ids(cursor):
     """Вакансии iCORE, которые руководитель может поставить отклику hh."""
     cursor.execute("SELECT id FROM hiring_vacancies")
     return {int(row[0]) for row in cursor.fetchall()}
+
+
+# ─── Поиск по базе резюме hh.kz (hiring/hh_base.py) ──────────────────────────
+
+def _jsonish(value):
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _jsons(row, *names):
+    for name in names:
+        if row is not None and name in row:
+            row[name] = _jsonish(row[name])
+    return row
+
+
+_SEARCH_COLUMNS = ("hh_vacancy_id, vacancy_name, enabled, portrait, keywords, area_id, last_run_at, last_total, last_found, "
+                   "last_new, last_error, runs, requested_at, updated_by, updated_by_name, created_at, updated_at")
+
+
+def hh_search_list(cursor):
+    cursor.execute("SELECT %s FROM hiring_hh_searches ORDER BY hh_vacancy_id" % _SEARCH_COLUMNS)
+    return [_jsons(row, 'keywords') for row in _all(cursor)]
+
+
+def hh_search_get(cursor, hh_vacancy_id, lock=False):
+    cursor.execute("SELECT %s FROM hiring_hh_searches WHERE hh_vacancy_id = %%s%s"
+                   % (_SEARCH_COLUMNS, ' FOR UPDATE' if lock else ''), (int(hh_vacancy_id),))
+    return _jsons(_one(cursor), 'keywords')
+
+
+def hh_search_save(cursor, hh_vacancy_id, *, vacancy_name, enabled, portrait, keywords, area_id, reset_runs, by, by_name,
+                   now):
+    """Правка руководителя. reset_runs — сменились ключевые слова или регион: следующий поиск снова «первый»."""
+    cursor.execute("""
+        INSERT INTO hiring_hh_searches (hh_vacancy_id, vacancy_name, enabled, portrait, keywords, area_id, updated_by,
+                                        updated_by_name, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+        ON CONFLICT (hh_vacancy_id) DO UPDATE
+           SET vacancy_name = COALESCE(EXCLUDED.vacancy_name, hiring_hh_searches.vacancy_name),
+               enabled = EXCLUDED.enabled, portrait = EXCLUDED.portrait, keywords = EXCLUDED.keywords,
+               area_id = COALESCE(EXCLUDED.area_id, hiring_hh_searches.area_id),
+               last_run_at = CASE WHEN %s THEN NULL ELSE hiring_hh_searches.last_run_at END,
+               updated_by = EXCLUDED.updated_by, updated_by_name = EXCLUDED.updated_by_name,
+               updated_at = EXCLUDED.updated_at
+    """, (int(hh_vacancy_id), vacancy_name, bool(enabled), portrait, json.dumps(keywords or [], ensure_ascii=False),
+          area_id, by, by_name, now, now, bool(reset_runs)))
+
+
+def hh_search_requested(cursor, hh_vacancy_id, now):
+    cursor.execute("UPDATE hiring_hh_searches SET requested_at = %s WHERE hh_vacancy_id = %s", (now, int(hh_vacancy_id)))
+
+
+def hh_search_finished(cursor, hh_vacancy_id, now, *, total, found, new, error):
+    """Итог прогона поиска. Неудачный прогон не двигает last_run_at: следующий снова пойдёт как этот."""
+    if error:
+        cursor.execute("UPDATE hiring_hh_searches SET last_error = %s, updated_at = %s WHERE hh_vacancy_id = %s",
+                       (str(error)[:500], now, int(hh_vacancy_id)))
+        return
+    cursor.execute("""
+        UPDATE hiring_hh_searches
+           SET last_run_at = %s, last_total = %s, last_found = %s, last_new = %s, last_error = NULL, runs = runs + 1
+         WHERE hh_vacancy_id = %s
+    """, (now, total, found, new, int(hh_vacancy_id)))
+
+
+def hh_task_add(cursor, kind, reason, now, *, priority, hh_vacancy_id=None, resume_hash=None, params=None,
+                not_before=None, by=None):
+    """Задание мосту. Открытое задание того же вида на то же резюме (поиск той же вакансии) одно: повторная просьба
+    его поторапливает — более срочная причина, более ранний срок — и не плодит второе. Более срочная причина у уже
+    отданного мосту задания (он читает резюме для балла, а рекрутер нажал «Взять в работу») — задание уходит снова
+    сразу: мост выполнит его с новой причиной, а результат прежнего захода портал просто не примет. Возвращает id."""
+    not_before = not_before or now
+    cursor.execute("""
+        INSERT INTO hiring_hh_tasks (kind, hh_vacancy_id, resume_hash, reason, params, priority, not_before, created_by,
+                                     created_at)
+        VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+        ON CONFLICT (kind, COALESCE(resume_hash, ''), COALESCE(hh_vacancy_id, 0)) WHERE done_at IS NULL DO UPDATE
+           SET reason = CASE WHEN EXCLUDED.priority < hiring_hh_tasks.priority THEN EXCLUDED.reason
+                             ELSE hiring_hh_tasks.reason END,
+               dispatched_at = CASE WHEN EXCLUDED.priority < hiring_hh_tasks.priority THEN NULL
+                                    ELSE hiring_hh_tasks.dispatched_at END,
+               priority = LEAST(hiring_hh_tasks.priority, EXCLUDED.priority),
+               not_before = CASE WHEN EXCLUDED.priority < hiring_hh_tasks.priority THEN EXCLUDED.not_before
+                                 ELSE LEAST(hiring_hh_tasks.not_before, EXCLUDED.not_before) END,
+               params = COALESCE(EXCLUDED.params, hiring_hh_tasks.params)
+        RETURNING id
+    """, (kind, int(hh_vacancy_id) if hh_vacancy_id else None, resume_hash, reason,
+          json.dumps(params, ensure_ascii=False) if params is not None else None, int(priority), not_before, by, now))
+    return int(cursor.fetchone()[0])
+
+
+def hh_tasks_take(cursor, now, lease, limit=5):
+    """Задания, которые пора отдать мосту: срок пришёл, и ещё не отданы (или отданы давно — ответа не было). Под
+    замком строк: два опроса не получат одно задание."""
+    cursor.execute("""
+        SELECT id, kind, hh_vacancy_id, resume_hash, reason, params, attempts
+          FROM hiring_hh_tasks
+         WHERE done_at IS NULL AND not_before <= %s AND (dispatched_at IS NULL OR dispatched_at < %s)
+         ORDER BY priority, id
+         LIMIT %s
+           FOR UPDATE SKIP LOCKED
+    """, (now, now - lease, int(limit)))
+    rows = [_jsons(row, 'params') for row in _all(cursor)]
+    # Фоновое чтение резюме для балла — по одному за заход: мост читает его с паузой человека и сразу возвращается за
+    # заданиями — «Взять в работу» и открытое рекрутером резюме не ждут очереди фоновых.
+    background = [row for row in rows if row['reason'] == 'score']
+    rows = [row for row in rows if row['reason'] != 'score'] + background[:1]
+    if rows:
+        cursor.execute("UPDATE hiring_hh_tasks SET dispatched_at = %s, attempts = attempts + 1 WHERE id = ANY(%s)",
+                       (now, [row['id'] for row in rows]))
+    return rows
+
+
+def hh_tasks_due(cursor, now, lease):
+    """Есть ли что отдать мосту прямо сейчас — дешёвая проверка для длинного опроса."""
+    cursor.execute("SELECT EXISTS (SELECT 1 FROM hiring_hh_tasks WHERE done_at IS NULL AND not_before <= %s "
+                   "AND (dispatched_at IS NULL OR dispatched_at < %s))", (now, now - lease))
+    return bool(cursor.fetchone()[0])
+
+
+def hh_task_get(cursor, task_id, lock=False):
+    cursor.execute("SELECT id, kind, hh_vacancy_id, resume_hash, reason, params, attempts, done_at, created_by "
+                   "FROM hiring_hh_tasks WHERE id = %%s%s" % (' FOR UPDATE' if lock else ''), (int(task_id),))
+    return _jsons(_one(cursor), 'params')
+
+
+def hh_task_finish(cursor, task_id, now, outcome, error=None):
+    cursor.execute("UPDATE hiring_hh_tasks SET done_at = %s, outcome = %s, error = %s WHERE id = %s AND done_at IS NULL",
+                   (now, outcome, str(error)[:500] if error else None, int(task_id)))
+
+
+def hh_task_later(cursor, task_id, not_before, error=None):
+    """Не вышло сейчас (вход в hh потерян, сайт не пускает) — задание ждёт и уйдёт мосту снова не раньше not_before."""
+    cursor.execute("UPDATE hiring_hh_tasks SET dispatched_at = NULL, not_before = %s, error = %s WHERE id = %s "
+                   "AND done_at IS NULL", (not_before, str(error)[:500] if error else None, int(task_id)))
+
+
+def hh_task_open(cursor, kind, *, resume_hash=None, hh_vacancy_id=None):
+    cursor.execute("""
+        SELECT id, reason, not_before, dispatched_at, attempts FROM hiring_hh_tasks
+         WHERE done_at IS NULL AND kind = %s AND COALESCE(resume_hash, '') = %s AND COALESCE(hh_vacancy_id, 0) = %s
+    """, (kind, resume_hash or '', int(hh_vacancy_id or 0)))
+    return _one(cursor)
+
+
+def hh_tasks_created_since(cursor, reason, since):
+    cursor.execute("SELECT COUNT(*) FROM hiring_hh_tasks WHERE reason = %s AND created_at >= %s", (reason, since))
+    return int(cursor.fetchone()[0])
+
+
+_RESUME_COLUMNS = ("r.id, r.hh_vacancy_id, r.resume_hash, r.resume_id, r.snippet, r.resume, r.resume_at, r.hh_updated_at, "
+                   "r.last_activity_at, r.access, r.topic, r.score, r.score_basis, r.score_data, r.scored_at, "
+                   "r.score_tries, r.score_error, r.status, r.status_by, r.status_by_name, r.status_at, r.card_id, "
+                   "r.take_outcome, r.contacts_note, r.found_at, r.seen_at")
+
+
+def _resume_row(row):
+    return _jsons(row, 'snippet', 'resume', 'topic', 'score_data')
+
+
+def hh_resume_save_found(cursor, hh_vacancy_id, found, now):
+    """Резюме из выдачи поиска. Новое — строкой; уже виденное — свежая краткая карточка и отметка «снова в выдаче».
+    Резюме обновилось на hh — балл ставится заново (свежее резюме — свежий балл). → (id, новое ли)."""
+    cursor.execute("""
+        INSERT INTO hiring_hh_resumes (hh_vacancy_id, resume_hash, resume_id, snippet, hh_updated_at, last_activity_at,
+                                       access, topic, found_at, seen_at)
+        VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s)
+        ON CONFLICT (hh_vacancy_id, resume_hash) DO UPDATE
+           SET snippet = EXCLUDED.snippet, resume_id = COALESCE(EXCLUDED.resume_id, hiring_hh_resumes.resume_id),
+               last_activity_at = COALESCE(EXCLUDED.last_activity_at, hiring_hh_resumes.last_activity_at),
+               access = COALESCE(EXCLUDED.access, hiring_hh_resumes.access),
+               topic = COALESCE(EXCLUDED.topic, hiring_hh_resumes.topic),
+               seen_at = EXCLUDED.seen_at,
+               score = CASE WHEN EXCLUDED.hh_updated_at > hiring_hh_resumes.hh_updated_at
+                                 AND hiring_hh_resumes.status = 'new' THEN NULL ELSE hiring_hh_resumes.score END,
+               score_tries = CASE WHEN EXCLUDED.hh_updated_at > hiring_hh_resumes.hh_updated_at THEN 0
+                                  ELSE hiring_hh_resumes.score_tries END,
+               hh_updated_at = GREATEST(EXCLUDED.hh_updated_at, hiring_hh_resumes.hh_updated_at)
+        RETURNING id, (xmax = 0)
+    """, (int(hh_vacancy_id), found['hash'], found.get('resume_id'), json.dumps(found['snippet'], ensure_ascii=False),
+          found.get('hh_updated_at'), found.get('last_activity_at'), found.get('access'),
+          json.dumps(found['topic'], ensure_ascii=False) if found.get('topic') else None, now, now))
+    row = cursor.fetchone()
+    return int(row[0]), bool(row[1])
+
+
+def hh_resume_get(cursor, row_id, lock=False):
+    cursor.execute("SELECT %s FROM hiring_hh_resumes r WHERE r.id = %%s%s" % (_RESUME_COLUMNS, ' FOR UPDATE' if lock else ''),
+                   (int(row_id),))
+    return _resume_row(_one(cursor))
+
+
+def hh_resumes_by_hash(cursor, resume_hash, lock=False):
+    """Все строки одного резюме (найдено поиском нескольких вакансий)."""
+    cursor.execute("SELECT %s FROM hiring_hh_resumes r WHERE r.resume_hash = %%s ORDER BY r.id%s"
+                   % (_RESUME_COLUMNS, ' FOR UPDATE' if lock else ''), (resume_hash,))
+    return [_resume_row(row) for row in _all(cursor)]
+
+
+def hh_resume_save_full(cursor, resume_hash, resume, access, now):
+    """Полное резюме со страницы hh — во все строки этого резюме. Балл по краткой карточке ставится заново по полному
+    (hh_resumes_claim_for_score берёт строки с полным резюме и баллом по карточке)."""
+    payload = json.dumps(resume, ensure_ascii=False) if resume else None
+    cursor.execute("""
+        UPDATE hiring_hh_resumes
+           SET resume = COALESCE(%s::jsonb, resume), resume_at = %s, access = COALESCE(%s, access),
+               score_tries = CASE WHEN %s AND score_basis = 'snippet' THEN 0 ELSE score_tries END
+         WHERE resume_hash = %s
+    """, (payload, now, access, payload is not None, resume_hash))
+    return cursor.rowcount
+
+
+def hh_resume_status(cursor, row_id, status, now, *, by=None, by_name=None, card_id=None, take_outcome=None, note=None):
+    cursor.execute("""
+        UPDATE hiring_hh_resumes
+           SET status = %s, status_by = %s, status_by_name = %s, status_at = %s,
+               card_id = COALESCE(%s, card_id), take_outcome = %s, contacts_note = %s
+         WHERE id = %s
+    """, (status, by, by_name, now, card_id, take_outcome, note, int(row_id)))
+
+
+def hh_resume_note(cursor, row_id, note):
+    cursor.execute("UPDATE hiring_hh_resumes SET contacts_note = %s WHERE id = %s", (note, int(row_id)))
+
+
+def hh_resumes_claim_for_score(cursor, limit, now, stale):
+    """Взять резюме на оценку: ещё без балла или с баллом по краткой карточке, а полное резюме уже пришло; у поиска есть
+    портрет; после трёх неудачных попыток — не трогать (пока резюме не обновится). Взятые помечаются scoring_at: другие
+    копии портала их пропускают, пока отметка свежее stale. → строки с портретом и названием вакансии."""
+    cursor.execute("""
+        WITH picked AS (
+            SELECT r.id
+              FROM hiring_hh_resumes r
+              JOIN hiring_hh_searches s ON s.hh_vacancy_id = r.hh_vacancy_id
+             WHERE r.score_tries < 3 AND s.portrait IS NOT NULL AND s.portrait <> ''
+               AND (r.score IS NULL OR (r.resume IS NOT NULL AND r.score_basis = 'snippet'))
+               AND r.status IN ('new', 'taking')
+               AND (r.scoring_at IS NULL OR r.scoring_at < %s)
+             ORDER BY r.hh_vacancy_id, (r.resume IS NOT NULL) DESC, r.id
+             LIMIT %s
+               FOR UPDATE OF r SKIP LOCKED
+        )
+        UPDATE hiring_hh_resumes r SET scoring_at = %s FROM picked WHERE r.id = picked.id
+        RETURNING r.id
+    """, (stale, int(limit), now))
+    ids = [row[0] for row in cursor.fetchall()]
+    if not ids:
+        return []
+    cursor.execute("""
+        SELECT r.id, r.hh_vacancy_id, r.snippet, r.resume, s.portrait, s.vacancy_name
+          FROM hiring_hh_resumes r
+          JOIN hiring_hh_searches s ON s.hh_vacancy_id = r.hh_vacancy_id
+         WHERE r.id = ANY(%s)
+         ORDER BY r.hh_vacancy_id, (r.resume IS NOT NULL) DESC, r.id
+    """, (ids,))
+    return [_jsons(row, 'snippet', 'resume') for row in _all(cursor)]
+
+
+def hh_resume_scored(cursor, row_id, score, basis, data, now):
+    cursor.execute("""
+        UPDATE hiring_hh_resumes
+           SET score = %s, score_basis = %s, score_data = %s::jsonb, scored_at = %s, score_error = NULL, scoring_at = NULL
+         WHERE id = %s
+    """, (int(score), basis, json.dumps(data, ensure_ascii=False), now, int(row_id)))
+
+
+def hh_resume_score_failed(cursor, row_ids, error):
+    cursor.execute("UPDATE hiring_hh_resumes SET score_tries = score_tries + 1, score_error = %s, scoring_at = NULL "
+                   "WHERE id = ANY(%s)", (str(error)[:300], [int(x) for x in row_ids]))
+
+
+def hh_resume_score_release(cursor, row_ids):
+    """Взятые на оценку, но не оценённые (сбой посреди прогона) — вернуть в очередь."""
+    cursor.execute("UPDATE hiring_hh_resumes SET scoring_at = NULL WHERE id = ANY(%s)", ([int(x) for x in row_ids],))
+
+
+def hh_resumes_strong_without_full(cursor, min_score, limit):
+    """Сильные по краткой карточке, а полного резюме ещё нет — мост откроет его сам (hh_base.AUTO_FULL_*)."""
+    cursor.execute("""
+        SELECT resume_hash, hh_vacancy_id FROM (
+            SELECT DISTINCT ON (r.resume_hash) r.resume_hash, r.hh_vacancy_id, r.score
+              FROM hiring_hh_resumes r
+             WHERE r.status = 'new' AND r.resume IS NULL AND r.score >= %s
+             ORDER BY r.resume_hash, r.score DESC
+        ) best
+         WHERE NOT EXISTS (SELECT 1 FROM hiring_hh_tasks t WHERE t.kind = 'resume' AND t.resume_hash = best.resume_hash
+                              AND (t.done_at IS NULL OR t.reason = 'score'))
+         ORDER BY best.score DESC
+         LIMIT %s
+    """, (int(min_score), int(limit)))
+    return _all(cursor)
+
+
+_LIST_ORDER = {
+    'score': 'r.score DESC NULLS LAST, r.found_at DESC, r.id DESC',
+    'fresh': 'r.hh_updated_at DESC NULLS LAST, r.id DESC',
+}
+
+
+def hh_resume_list(cursor, hh_vacancy_id, statuses, order, limit, offset):
+    """Список вкладки «База hh»: резюме вакансии в статусах, по баллу (или по свежести на hh). → (всего, строки)."""
+    params = [int(hh_vacancy_id), list(statuses)]
+    cursor.execute("SELECT COUNT(*) FROM hiring_hh_resumes r WHERE r.hh_vacancy_id = %s AND r.status = ANY(%s)", params)
+    total = int(cursor.fetchone()[0])
+    cursor.execute("SELECT %s FROM hiring_hh_resumes r WHERE r.hh_vacancy_id = %%s AND r.status = ANY(%%s) ORDER BY %s "
+                   "LIMIT %%s OFFSET %%s" % (_RESUME_COLUMNS, _LIST_ORDER.get(order, _LIST_ORDER['score'])),
+                   params + [int(limit), int(offset)])
+    return total, [_resume_row(row) for row in _all(cursor)]
+
+
+def hh_resume_counts(cursor):
+    """{id вакансии hh: {статус: сколько, strong: новых с баллом от 70}} — для переключателя вакансий."""
+    cursor.execute("""
+        SELECT hh_vacancy_id, status, COUNT(*), COUNT(*) FILTER (WHERE score >= 70)
+          FROM hiring_hh_resumes GROUP BY hh_vacancy_id, status
+    """)
+    out = {}
+    for vacancy_id, status, count, strong in cursor.fetchall():
+        entry = out.setdefault(str(vacancy_id), {'new': 0, 'taking': 0, 'taken': 0, 'rejected': 0, 'strong': 0})
+        entry[status] = int(count)
+        if status == 'new':
+            entry['strong'] = int(strong)
+    return out
+
+
+def hh_known_cards(cursor, hashes):
+    """Кто из этих резюме уже в воронке: отклик hh стал карточкой или резюме уже взято из базы. → {хеш: карточка};
+    открытая карточка важнее закрытой, свежая — старой."""
+    hashes = sorted({str(item) for item in hashes or () if item})
+    if not hashes:
+        return {}
+    cursor.execute("""
+        WITH known AS (
+            SELECT t.resume_hash, t.card_id, t.created_at AS at, 'response' AS how
+              FROM hiring_hh_topics t WHERE t.resume_hash = ANY(%s) AND t.card_id IS NOT NULL
+            UNION ALL
+            SELECT r.resume_hash, r.card_id, r.status_at, 'base'
+              FROM hiring_hh_resumes r WHERE r.resume_hash = ANY(%s) AND r.card_id IS NOT NULL
+        )
+        SELECT DISTINCT ON (k.resume_hash) k.resume_hash, k.how, c.id, c.candidate_no, c.full_name, c.stage, c.is_closed,
+               c.recruiter_id, u.name
+          FROM known k
+          JOIN hiring_cards c ON c.id = k.card_id
+          LEFT JOIN users u ON u.id = c.recruiter_id
+         ORDER BY k.resume_hash, c.is_closed, k.at DESC NULLS LAST
+    """, (hashes, hashes))
+    return {row[0]: {'how': row[1], 'card_id': row[2], 'candidate_no': row[3], 'full_name': row[4], 'stage': row[5],
+                     'is_closed': row[6], 'recruiter_id': row[7], 'recruiter_name': row[8]} for row in cursor.fetchall()}
+
+
+def hh_card_base_resumes(cursor, card_id):
+    """Резюме из базы hh, по которым заведена карточка (вкладка «Резюме» карточки)."""
+    cursor.execute("""
+        SELECT r.resume_hash, r.hh_vacancy_id, s.vacancy_name, r.status_at, r.snippet, r.resume, r.score, r.score_data
+          FROM hiring_hh_resumes r
+          LEFT JOIN hiring_hh_searches s ON s.hh_vacancy_id = r.hh_vacancy_id
+         WHERE r.card_id = %s
+         ORDER BY r.status_at DESC NULLS LAST, r.id DESC
+         LIMIT 5
+    """, (int(card_id),))
+    return [_jsons(row, 'snippet', 'resume', 'score_data') for row in _all(cursor)]
 
 
 def olx_tables_exist(cursor):

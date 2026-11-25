@@ -81,7 +81,8 @@ export const HhResume = ({ responses }) => {
             ))}
             {resume && (
                 <>
-                    <Section title={letters.length ? 'Резюме' : 'Резюме · без сопроводительного письма'}
+                    {/* Резюме из базы hh (владелец 25.11.2026) писем не бывает — «без письма» там не нужно. */}
+                    <Section title={letters.length ? 'Резюме' : (latest.source === 'base' ? 'Резюме из базы hh' : 'Резюме · без сопроводительного письма')}
                              right={latest.resume_url ? (
                                  <a href={latest.resume_url} target="_blank" rel="noopener noreferrer"
                                     className="inline-flex shrink-0 items-center gap-1 text-[12.5px] text-blue-700 hover:underline">

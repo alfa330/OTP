@@ -13,6 +13,8 @@ import {
     SYSTEM_TOUCH_LABELS, canReschedule, rescheduleBody, rescheduleProblem, trainingDay,
     HH_NO_ICORE, hhIcoreOptions, hhIcoreValue, hhSettingsBody, hhVacancyMeta,
     hhMoney, hhPeriod, hhResumeSummary, hhSpan,
+    HH_KEYWORDS_MAX, hhAddKeywords, hhBaseExperience, hhBaseLine, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseTone,
+    hhSearchBody,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('hh.kz resume in the card: money, spans, periods and a one-line summary', () => {
@@ -295,12 +297,12 @@ test('group name follows the start date until the trainer types own', () => {
 test('tabs by rights: trainer starts with «Группы» and has no reports', () => {
     assert.deepEqual(hiringTabs({ groups: true, trainer: true }), ['groups', 'board']);
     assert.deepEqual(hiringTabs({ groups: true, dept_head: true }), ['groups', 'board', 'reports']);
-    assert.deepEqual(hiringTabs({ recruiter: true, take: true }), ['desk', 'board', 'chats', 'reports']);
+    assert.deepEqual(hiringTabs({ recruiter: true, take: true }), ['desk', 'board', 'chats', 'base', 'reports']);
     assert.deepEqual(hiringTabs({ recruiter: true, lead: true, groups: true, upload: true, manage: true }),
-        ['desk', 'board', 'chats', 'groups', 'reports', 'upload', 'settings']);
+        ['desk', 'board', 'chats', 'base', 'groups', 'reports', 'upload', 'settings']);
     // Руководитель рекрутинга без выдачи рекрутера (глава HR) — тоже отвечает кандидатам.
-    assert.deepEqual(hiringTabs({ lead: true, manage: true }), ['board', 'chats', 'reports', 'settings']);
-    assert.deepEqual(hiringTabs({ recruiter: true, groups: true }), ['desk', 'board', 'chats', 'groups', 'reports']);
+    assert.deepEqual(hiringTabs({ lead: true, manage: true }), ['board', 'chats', 'base', 'reports', 'settings']);
+    assert.deepEqual(hiringTabs({ recruiter: true, groups: true }), ['desk', 'board', 'chats', 'base', 'groups', 'reports']);
     assert.deepEqual(hiringTabs({ dept_head: true }), ['board', 'reports']);
     assert.deepEqual(hiringTabs(), ['board']);
 });
@@ -387,4 +389,46 @@ test('hh.kz vacancies: a toggle per vacancy, an iCORE vacancy only for tracked o
     assert.equal(hhVacancyMeta({ area: 'Алматы', responses: 251, on: true, tracked_since: '2026-11-24T10:15' }),
         'Алматы · откликов 251 · отслеживается с 24.11 10:15');
     assert.equal(hhVacancyMeta({ area: null, responses: null, on: false, tracked_since: '2026-11-24T10:15' }), '');
+});
+
+test('hh base search: card lines, score colour, who needs hh for contacts, state word, search line', () => {
+    const item = { age: 26, area: 'Алматы', salary: { amount: 200000, currency: 'KZT', sign: '₸' }, experience_text: '3 года 2 мес.',
+        experience: [{ position: 'Продавец-консультант', company: 'ТОО Ромашка' }, { position: 'Кассир', company: 'ТОО Лютик' }] };
+    assert.equal(hhBaseLine(item), '26 лет · Алматы · 200\u00a0000\u00a0₸');   // неразрывные пробелы — как у hhMoney
+    assert.equal(hhBaseLine({ age: 21 }), '21 год');
+    assert.equal(hhBaseLine({}), '');
+    assert.equal(hhBaseExperience(item), 'Опыт 3 года 2 мес. · Продавец-консультант, ТОО Ромашка');
+    assert.equal(hhBaseExperience({ experience_text: 'без опыта', experience: [] }), 'Без опыта');
+    assert.deepEqual([90, 70, 69, 50, 49, null, undefined].map(hhBaseTone), ['green', 'green', 'amber', 'amber', 'red', 'slate', 'slate']);
+    assert.equal(hhBaseNeedsHh({ access: 'closed' }), true);
+    assert.equal(hhBaseNeedsHh({ access: null }), true);
+    assert.equal(hhBaseNeedsHh({ access: 'free' }), false);
+    assert.equal(hhBaseNeedsHh({ access: 'opened' }), false);
+    assert.deepEqual(hhBaseState({ status: 'taking', status_by: 10, status_by_name: 'Айсулу' }, 10), { tone: 'blue', text: 'Ждём контакты с hh' });
+    assert.deepEqual(hhBaseState({ status: 'taking', status_by: 11, status_by_name: 'Айсулу' }, 10), { tone: 'blue', text: 'Берёт Айсулу' });
+    assert.deepEqual(hhBaseState({ status: 'taken', known: { candidate_no: 1201 } }), { tone: 'green', text: 'В воронке · №1201' });
+    assert.deepEqual(hhBaseState({ status: 'taken', take_outcome: 'employee' }), { tone: 'slate', text: 'Телефон сотрудника' });
+    assert.deepEqual(hhBaseState({ status: 'new', known: { is_closed: false, candidate_no: 7 } }), { tone: 'amber', text: 'Уже в воронке · №7' });
+    assert.deepEqual(hhBaseState({ status: 'new', known: { is_closed: true }, access: 'free' }), { tone: 'green', text: 'Контакты без списания' });
+    assert.deepEqual(hhBaseState({ status: 'new', topic: { label: 'откликался' } }), { tone: 'slate', text: 'Откликался' });
+    assert.deepEqual(hhBaseState({ status: 'new', job_status: 'active_search' }), { tone: 'slate', text: 'Активно ищет работу' });
+    assert.equal(hhBaseState({ status: 'new' }), null);
+    assert.equal(hhBaseSearchLine({ running: true, enabled: true }), 'Ищем на hh…');
+    assert.equal(hhBaseSearchLine({ enabled: false }), 'Поиск выключен');
+    assert.equal(hhBaseSearchLine({ enabled: true, last_run_at: null }), 'Первый поиск — в ближайшие минуты');
+    assert.equal(hhBaseSearchLine({ enabled: true, last_run_at: null, last_error: 'hh не ответил' }), 'Поиск не прошёл: hh не ответил');
+    assert.equal(hhBaseSearchLine({ enabled: true, last_run_at: '2026-11-25T11:00:00', last_total: 6472, last_new: 12 }),
+        'Найдено на hh 6\u00a0472 · новых 12 · 25 ноября, 11:00');
+    assert.equal(hhBaseSearchLine({ enabled: true, last_run_at: '2026-11-25T14:00:00', last_total: null, last_new: 0 }),
+        'новых нет · 25 ноября, 14:00');
+});
+
+test('hh base search settings: keywords from the field and the request body', () => {
+    assert.deepEqual(hhAddKeywords(['Оператор call-центра'], 'оператор CALL-центра, "оператор колл-центра"; OR\nспециалист (КЦ)!'),
+        ['Оператор call-центра', 'оператор колл-центра', 'специалист КЦ']);
+    assert.equal(hhAddKeywords([], Array.from({ length: 30 }, (_v, n) => `слово ${n}`).join(',')).length, HH_KEYWORDS_MAX);
+    assert.deepEqual(hhAddKeywords(['a'], ''), ['a']);
+    assert.deepEqual(hhSearchBody({ enabled: 1, portrait: '  Кого ищем  ', keywords: ['оператор', ' ', 'Оператор'] }),
+        { enabled: true, portrait: 'Кого ищем', keywords: ['оператор'] });
+    assert.deepEqual(hhSearchBody({}), { enabled: false, portrait: '', keywords: [] });
 });

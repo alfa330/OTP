@@ -54800,7 +54800,10 @@ def _hiring_job(name):
         if name == 'olx':
             return service.pull_olx()
         if name == 'hh':
-            return service.hh_watchdog()
+            # Сторож моста hh.kz и балл ИИ резюме из базы hh, которым его ещё не поставили (своим потоком).
+            alert = service.hh_watchdog()
+            service.hh_base_sweep()
+            return alert
         if name == 'next_contacts':
             return service.notify_next_contacts()
         if name == 'auto_return':

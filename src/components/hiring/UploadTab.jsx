@@ -60,7 +60,7 @@ const UploadTab = ({ api, toast, boot, onChanged, version }) => {
     const [batches, setBatches] = useState(null);
     const [opened, setOpened] = useState(null);
     const inputRef = useRef(null);
-    const sources = (boot.dictionaries?.sources || []).filter((s) => s.kind === 'contacts' && s.is_active !== false);
+    const sources = (boot.dictionaries?.sources || []).filter((s) => s.kind === 'contacts' && !s.platform && s.is_active !== false);
 
     const load = useCallback(() => api.get('/batches')
         .then(({ data }) => setBatches(data.items))

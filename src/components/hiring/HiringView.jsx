@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import { UserPlus } from 'lucide-react';
 import { APPLE_FONT, IosHint, IosSegmented, iosCard } from '../ui/ios';
+import BaseTab from './BaseTab';
 import BoardTab from './BoardTab';
 import CardSheet from './CardSheet';
 import ChatsTab from './ChatsTab';
@@ -23,6 +24,8 @@ import { Loading } from './hiringUi';
  *                  только в своих группах (владелец 19.11.2026); руководитель отдела видит своих;
  *   Чаты           переписка с кандидатами в WhatsApp найма «как в Чатах ОП» (владелец 19.11.2026):
  *                  рекрутеры и руководитель рекрутинга, ответ уходит через сервис на шлюзе;
+ *   База hh        поиск по базе резюме hh.kz (владелец 25.11.2026): кандидаты вакансии по баллу ИИ, «Взять в работу»
+ *                  (контакты рекрутер открывает на hh сам, карточку заводит мост); поиск настраивает руководитель;
  *   Группы         группы на обучение с вместимостью — тренер ведёт свои, руководитель рекрутинга —
  *                  все (владелец 18.11.2026); у тренера это первая вкладка;
  *   Отчёты         дашборд и отчёты: руководителю целиком, рекрутеру — по себе; тренеру их нет —
@@ -48,6 +51,7 @@ const TAB_META = {
     desk: { label: 'Рабочий стол', short: 'Стол', subtitle: 'План найма, задачи на сегодня, моя воронка и мотивация' },
     board: { label: 'Воронка', short: 'Воронка', subtitle: 'Канбан-доска: общий пул и карточки по этапам', hint: HOW_IT_WORKS },
     chats: { label: 'Чаты', short: 'Чаты', subtitle: 'Переписка с кандидатами в WhatsApp найма' },
+    base: { label: 'База hh', short: 'База', subtitle: 'Кандидаты из базы резюме hh.kz с баллом ИИ по портрету сотрудника' },
     groups: { label: 'Группы', short: 'Группы', subtitle: 'Группы на обучение: старт, вместимость и свободные места' },
     reports: { label: 'Отчёты', short: 'Отчёты', subtitle: 'Отчёт за день, дашборд воронки, рекрутеры, источники, мотивация' },
     upload: { label: 'Загрузки', short: 'Загрузки', subtitle: 'База контактов файлом и партии загрузок' },
@@ -252,7 +256,7 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
                     </div>
                 </div>
                 {tabs.length > 1 && (
-                    <div className="-mx-1 max-w-full overflow-x-auto px-1 [scrollbar-width:none]">
+                    <div className="hiring-tabs -mx-1 max-w-full overflow-x-auto px-1 [scrollbar-width:none]">
                         <IosSegmented value={active} onChange={chooseTab} ariaLabel="Вкладка раздела"
                                       options={tabs.map((value) => ({ value, label: tabLabel(TAB_META[value], value === 'chats' ? waitingChats : 0) }))} />
                     </div>
@@ -261,6 +265,7 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
             {active === 'desk' && <DeskTab {...shared} onOpenChat={onOpenChat} />}
             {active === 'board' && <BoardTab {...shared} />}
             {active === 'chats' && <ChatsTab {...shared} onWaiting={setWaitingChats} focus={chatFocus} onFocusConsumed={focusConsumed} />}
+            {active === 'base' && <BaseTab {...shared} />}
             {active === 'groups' && <GroupsTab {...shared} />}
             {active === 'reports' && <ReportsTab {...shared} />}
             {active === 'upload' && <UploadTab {...shared} />}

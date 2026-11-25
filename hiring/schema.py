@@ -558,6 +558,107 @@ _STATEMENTS = [
     "ALTER TABLE hiring_hh_topics ADD COLUMN IF NOT EXISTS letter TEXT",
     "ALTER TABLE hiring_hh_topics ADD COLUMN IF NOT EXISTS resume JSONB",
     "CREATE INDEX IF NOT EXISTS idx_hiring_hh_topics_card ON hiring_hh_topics (card_id) WHERE card_id IS NOT NULL",
+    # Хеш резюме отклика — отдельным полем (поиск по базе hh узнаёт по нему, что кандидат уже в воронке откликом);
+    # у прежних откликов — из ссылки на резюме, один раз.
+    "ALTER TABLE hiring_hh_topics ADD COLUMN IF NOT EXISTS resume_hash VARCHAR(64)",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_hh_topics_hash ON hiring_hh_topics (resume_hash) WHERE resume_hash IS NOT NULL",
+    """
+    UPDATE hiring_hh_topics SET resume_hash = substring(resume_url from '/resume/([0-9a-f]{16,64})')
+     WHERE resume_hash IS NULL AND resume_url ~ '/resume/[0-9a-f]{16,64}'
+    """,
+
+    # Поиск по базе резюме hh.kz (владелец 25.11.2026, hiring/hh_base.py). Поиск вакансии hh: портрет сотрудника, ключевые
+    # слова, регион и учёт прогонов (last_run_at пуст — следующий поиск «первый»: за 30 дней по релевантности).
+    """
+    CREATE TABLE IF NOT EXISTS hiring_hh_searches (
+        hh_vacancy_id    BIGINT PRIMARY KEY,
+        vacancy_name     VARCHAR(200),
+        enabled          BOOLEAN NOT NULL DEFAULT FALSE,
+        portrait         TEXT,
+        keywords         JSONB NOT NULL DEFAULT '[]'::jsonb,
+        area_id          INTEGER,
+        last_run_at      TIMESTAMP,
+        last_total       INTEGER,
+        last_found       INTEGER,
+        last_new         INTEGER,
+        last_error       TEXT,
+        runs             INTEGER NOT NULL DEFAULT 0,
+        requested_at     TIMESTAMP,
+        updated_by       INTEGER,
+        updated_by_name  VARCHAR(200),
+        created_at       TIMESTAMP NOT NULL,
+        updated_at       TIMESTAMP NOT NULL
+    )
+    """,
+    # Найденные резюме — по строке на пару «вакансия hh, резюме»: балл ИИ — по портрету этой вакансии. snippet — краткая
+    # карточка из выдачи поиска, resume — полное резюме (мост открыл страницу), без имён и контактов. status: new —
+    # ждёт рекрутера, taking — «Взять в работу» нажато, ждём контакты с hh, taken — карточка заведена (card_id),
+    # rejected — «Не подходит».
+    """
+    CREATE TABLE IF NOT EXISTS hiring_hh_resumes (
+        id               SERIAL PRIMARY KEY,
+        hh_vacancy_id    BIGINT NOT NULL,
+        resume_hash      VARCHAR(64) NOT NULL,
+        resume_id        BIGINT,
+        snippet          JSONB NOT NULL,
+        resume           JSONB,
+        resume_at        TIMESTAMP,
+        hh_updated_at    TIMESTAMP,
+        last_activity_at TIMESTAMP,
+        access           VARCHAR(12),
+        topic            JSONB,
+        score            SMALLINT,
+        score_basis      VARCHAR(8),
+        score_data       JSONB,
+        scored_at        TIMESTAMP,
+        score_tries      SMALLINT NOT NULL DEFAULT 0,
+        score_error      TEXT,
+        status           VARCHAR(12) NOT NULL DEFAULT 'new',
+        status_by        INTEGER,
+        status_by_name   VARCHAR(200),
+        status_at        TIMESTAMP,
+        card_id          INTEGER,
+        take_outcome     VARCHAR(16),
+        contacts_note    VARCHAR(200),
+        found_at         TIMESTAMP NOT NULL,
+        seen_at          TIMESTAMP NOT NULL,
+        UNIQUE (hh_vacancy_id, resume_hash)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_hiring_hh_resumes_list ON hiring_hh_resumes (hh_vacancy_id, status, score DESC NULLS LAST, id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_hh_resumes_hash ON hiring_hh_resumes (resume_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_hh_resumes_card ON hiring_hh_resumes (card_id) WHERE card_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_hh_resumes_unscored ON hiring_hh_resumes (id) WHERE score IS NULL",
+    # Балл ставит один процесс: в облаке на /api отвечают несколько копий портала, и каждая после приёма резюме
+    # запускает оценку. Строки, взятые на оценку (scoring_at), остальные пропускают; брошенные — через 5 минут снова.
+    "ALTER TABLE hiring_hh_resumes ADD COLUMN IF NOT EXISTS scoring_at TIMESTAMP",
+    # Задания мосту: search — страница поиска hh по параметрам (params), resume — перечитать страницу резюме (reason: view —
+    # рекрутер открыл, contacts — ждём контакты после «Взять в работу», score — полное резюме для балла). Мост забирает
+    # их длинным опросом; ушедшее без ответа уходит снова через hh_base.TASK_LEASE. Открытое задание одно на резюме и на
+    # поиск вакансии.
+    """
+    CREATE TABLE IF NOT EXISTS hiring_hh_tasks (
+        id               BIGSERIAL PRIMARY KEY,
+        kind             VARCHAR(12) NOT NULL,
+        hh_vacancy_id    BIGINT,
+        resume_hash      VARCHAR(64),
+        reason           VARCHAR(12) NOT NULL,
+        params           JSONB,
+        priority         SMALLINT NOT NULL DEFAULT 5,
+        not_before       TIMESTAMP NOT NULL,
+        created_by       INTEGER,
+        created_at       TIMESTAMP NOT NULL,
+        dispatched_at    TIMESTAMP,
+        attempts         SMALLINT NOT NULL DEFAULT 0,
+        done_at          TIMESTAMP,
+        outcome          VARCHAR(16),
+        error            TEXT
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_hiring_hh_tasks_open ON hiring_hh_tasks (kind, COALESCE(resume_hash, ''), "
+    "COALESCE(hh_vacancy_id, 0)) WHERE done_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_hh_tasks_due ON hiring_hh_tasks (priority, id) WHERE done_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_hh_tasks_created ON hiring_hh_tasks (created_at)",
 
     # Отчёт за день (HR-3, hiring/day_report.py): «Другая работа» — текст рекрутера за день о том, что не касается
     # кандидатов (владелец 23.11.2026: поле под таблицей, цифры таблицы руками не правятся). Одна запись на человека и
@@ -656,10 +757,10 @@ def _seed(cursor):
     # (переименование руководителем не трогаем).
     for code, name, kind, platform in rules.LATE_SOURCES:
         cursor.execute("""
-            INSERT INTO hiring_sources (code, name, kind, platform, position, created_at)
-            VALUES (%s, %s, %s, %s, (SELECT COALESCE(MAX(position), 0) + 1 FROM hiring_sources), %s)
+            INSERT INTO hiring_sources (code, name, kind, platform, position, created_at, color)
+            VALUES (%s, %s, %s, %s, (SELECT COALESCE(MAX(position), 0) + 1 FROM hiring_sources), %s, %s)
             ON CONFLICT (code) DO NOTHING
-        """, (code, name, kind, platform, now))
+        """, (code, name, kind, platform, now, rules.LATE_SOURCE_COLORS.get(code)))
     merged = _merge_channels_into_sources(cursor, now)
     if merged:
         log.info('hiring: каналы слиты с источниками — перенесено карточек с меткой: %d', merged)

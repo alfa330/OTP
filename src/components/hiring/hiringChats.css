@@ -48,3 +48,10 @@ body:not(.mobile-shell) .hiring-screen-chats .hiring-chats {
     border-top: 1px solid rgb(226 232 240);
     box-shadow: none;
 }
+
+/* Полоса вкладок раздела на телефоне (25.11.2026: восьмая вкладка — «База hh»). Оболочка (mobile-shell.css) делает
+   такую полосу прокручиваемой вбок, но сегменты в ней сжимались, и подписи наезжали друг на друга: сегмент не
+   сжимается — полоса прокручивается. */
+body.mobile-shell .hiring-tabs [role="tablist"] > button {
+    flex-shrink: 0;
+}

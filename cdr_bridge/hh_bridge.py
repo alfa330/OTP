@@ -32,12 +32,25 @@
 один раз — один запрос, как рекрутер, открывший отклик. Контакты (email, адрес, дата рождения) из резюме не берутся:
 телефон и так приходит в выдаче.
 
+Поиск по базе резюме (hh/1.4.0)
+-------------------------------
+Владелец 25.11.2026: «поиск кандидатов по конкретной вакансии… с помощью ключевых слов с ИИ… обновление резюмешки в
+момент просмотра через наш сайт». Портал раздаёт задания (hiring/hh_base.py), мост забирает их длинным опросом
+POST /api/hiring/hh/agent/tasks в паузах между тактами — ответ приходит сразу, как появится задание:
+  * поиск — страница поиска по базе /search/resume с параметрами портала (ключевые слова, регион, период), несколько
+    страниц с паузой человека между ними; из выдачи — краткая карточка резюме (имён и контактов в выдаче нет);
+  * резюме — страница резюме /resume/<хеш>: полное резюме без контактов (рекрутер открыл его у нас — свежая версия;
+    сильный кандидат — для балла ИИ). После «Взять в работу» — ещё и ФИО, телефон и почта, если рекрутер уже открыл
+    контакты на hh: кнопку «Открыть контакты» мост не нажимает никогда — hh подписывает её запрос настоящим щелчком
+    мыши, и подделка подписи была бы обходом защиты (решение владельца 25.11.2026 — щелчок рекрутера на hh).
+
 Что мост НЕ делает
 ------------------
 Ничего не меняет в hh: только GET тех же адресов, что открывает страница рекрутера; кроме отметки «Просмотрен» у нового
-отклика отклики остаются как были — неразобранными, на своих этапах. Не ходит в hh чаще одного запроса за раз, между
-запросами — случайная пауза 1,5–3,5 с, больше DAILY_REQUEST_CAP запросов в сутки не делает (предохранитель от ошибки в
-коде). Переменные HTTPS_PROXY и подобные не читаются: наружу только через прокси из настроек, как у моста «Касаний».
+отклика отклики остаются как были — неразобранными, на своих этапах. Контакты резюме из базы не открывает. Не ходит в
+hh чаще одного запроса за раз, между запросами — случайная пауза 1,5–3,5 с, больше DAILY_REQUEST_CAP запросов в сутки не
+делает (предохранитель от ошибки в коде). Переменные HTTPS_PROXY и подобные не читаются: наружу только через прокси из
+настроек, как у моста «Касаний».
 
 Что будет, если что-то лежит
 ----------------------------
@@ -65,6 +78,7 @@
     HH_BRIDGE_PROXY               прокси к hh.kz (по умолчанию тот же, что к порталу)
     HH_BRIDGE_INTERVAL_SECONDS    пауза, пока портал не назвал свою (180)
     HH_BRIDGE_HEARTBEAT_FILE      файл пульса для проверки живости контейнера (после такта и раз в 5 минут паузы)
+    HH_BRIDGE_TASKS               задания поиска по базе резюме в паузах (1 по умолчанию; 0 — выключить)
 """
 
 import argparse
@@ -89,10 +103,26 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'hh/1.3.0'
+VERSION = 'hh/1.4.0'
 log = logging.getLogger('cdr_bridge.hh_bridge')
 
 PUSH_PATH = '/api/hiring/hh/agent/push'
+TASKS_PATH = '/api/hiring/hh/agent/tasks'
+# Длинный опрос заданий: портал держит запрос до стольких секунд, пока не появится задание.
+TASKS_WAIT_SECONDS = 20.0
+TASKS_PER_ROUND = 30
+TASKS_BACKOFF_SECONDS = (15, 30, 60, 120, 300)
+# Портал не знает заданий (старая версия) — проверить снова через час.
+TASKS_MISSING_SECONDS = 3600.0
+# Между страницами поиска — пауза человека, листающего выдачу.
+SEARCH_PAGE_PAUSE_SECONDS = (4.0, 9.0)
+SEARCH_PAGE_SIZE = 20
+SEARCH_MAX_PAGES = 5
+# Фоновое чтение резюме (для балла ИИ) — с паузой человека перед каждым; резюме, открытое рекрутером, — без неё.
+BACKGROUND_RESUME_PAUSE_SECONDS = (6.0, 15.0)
+# Параметры страницы поиска, которые мост принимает от портала, — только поля формы поиска hh.
+SEARCH_PARAMS = ('text', 'area', 'search_period', 'order_by', 'pos', 'logic', 'exp_period', 'relocation', 'currency_code',
+                 'ored_clusters', 'job_search_status', 'age_from', 'age_to', 'gender', 'salary_from', 'salary_to')
 PORTAL_TIMEOUT = (10, 30)
 SITE_TIMEOUT = (10, 40)
 DEFAULT_HOST = 'https://almaty.hh.kz'
@@ -142,11 +172,13 @@ SESSION_OK, LOGIN_REQUIRED, BLOCKED, SITE_ERROR = 'ok', 'login_required', 'block
 
 
 class SiteTrouble(Exception):
-    """hh не отдал кабинет: kind — login_required (вход потерян) | blocked (защита сайта) | error (сбой)."""
+    """hh не отдал кабинет: kind — login_required (вход потерян) | blocked (защита сайта) | error (сбой); status — код
+    ответа hh, если он был (404 у резюме — скрыто или удалено)."""
 
-    def __init__(self, kind, message):
+    def __init__(self, kind, message, status=None):
         super().__init__(message)
         self.kind = kind
+        self.status = status
 
 
 def _clamp_interval(value, default=DEFAULT_INTERVAL_SECONDS):
@@ -181,6 +213,7 @@ def load_config():
         'site_proxy': value('HH_BRIDGE_PROXY') or value('CDR_PORTAL_PROXY'),
         'interval': _clamp_interval(value('HH_BRIDGE_INTERVAL_SECONDS', str(DEFAULT_INTERVAL_SECONDS))),
         'heartbeat_file': value('HH_BRIDGE_HEARTBEAT_FILE'),
+        'tasks': value('HH_BRIDGE_TASKS', '1').lower() not in ('0', 'false', 'no', 'off'),
     }
 
 
@@ -230,10 +263,10 @@ def catalog_from_state(state):
         status = item.get('status') or {}
         if status.get('archived') or status.get('disabled'):
             continue
-        area = item.get('area') or {}
+        area = item.get('area') if isinstance(item.get('area'), dict) else {}
         negotiations = item.get('negotiations') or {}
         vacancies.append({'id': str(item['vacancyId']), 'name': str(item.get('name') or '').strip()[:200],
-                          'area': area.get('name') if isinstance(area, dict) else None,
+                          'area': area.get('name'), 'area_id': area.get('id'),
                           'responses': negotiations.get('responsesCount')})
     return account, vacancies
 
@@ -400,6 +433,131 @@ def resume_from_state(state, resume_hash):
     return out, _clip(letter, TEXT_LIMITS['letter'])
 
 
+def _from_list(raw, field):
+    """Поле краткой карточки поиска: [{"string": …}] → значение (как _first у выдачи откликов)."""
+    values = raw.get(field)
+    value = values[0] if isinstance(values, list) and values else None
+    return value.get('string') if isinstance(value, dict) else value
+
+
+def _epoch_ms(value):
+    """Миллисекунды эпохи hh → ISO UTC; мусор — None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000.0, timezone.utc).isoformat(timespec='seconds')
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _access(status, opened=False):
+    """Контакты резюме для работодателя: opened — уже открыты, free — доступны без списания (кандидат общался с
+    компанией), closed — откроются только за контакт из доступа к базе."""
+    status = str(status or '').upper()
+    if opened:
+        return 'opened'
+    if status == 'AVAILABLE_WITHOUT_SPEND':
+        return 'free'
+    if status.startswith('DENIED'):
+        return 'closed'
+    if 'OPEN' in status:
+        return 'opened'
+    return None
+
+
+def found_from_search(raw):
+    """Резюме из выдачи поиска по базе → краткая карточка для портала или None. Имени и контактов в выдаче нет."""
+    if not isinstance(raw, dict):
+        return None
+    attributes = raw.get('_attributes') if isinstance(raw.get('_attributes'), dict) else {}
+    resume_hash = str(attributes.get('hash') or '')
+    if not RESUME_HASH.match(resume_hash):
+        return None
+    short = TEXT_LIMITS['short']
+    area = raw.get('area') if isinstance(raw.get('area'), list) else []
+    area = area[0] if area and isinstance(area[0], dict) else {}
+    salary = raw.get('salary') if isinstance(raw.get('salary'), list) else []
+    salary = salary[0] if salary and isinstance(salary[0], dict) else {}
+    experience = []
+    for item in (raw.get('shortExperience') if isinstance(raw.get('shortExperience'), list) else [])[:8]:
+        if isinstance(item, dict):
+            experience.append({'company': _clip(item.get('companyName'), short), 'position': _clip(item.get('position'), short),
+                               'start': _clip(item.get('startDate'), 10), 'end': _clip(item.get('endDate'), 10)})
+    status = raw.get('jobSearchStatus') if isinstance(raw.get('jobSearchStatus'), list) else []
+    status = ((status[0] or {}).get('jobSearchStatus') or {}) if status and isinstance(status[0], dict) else {}
+    topics = raw.get('lastTopic') if isinstance(raw.get('lastTopic'), list) else []
+    topic = topics[0] if topics and isinstance(topics[0], dict) else None
+    opening = raw.get('resumeContactsOpening') if isinstance(raw.get('resumeContactsOpening'), dict) else {}
+    total = _from_list(raw, 'totalExperience')
+    age = _from_list(raw, 'age')
+    return {
+        'hash': resume_hash, 'resume_id': str(attributes.get('id') or '') or None,
+        'title': _clip(_from_list(raw, 'title'), short),
+        'age': age if isinstance(age, int) and not isinstance(age, bool) else None,
+        'gender': _clip(_from_list(raw, 'gender'), 20),
+        'area': _clip(area.get('trl'), short),
+        'salary': ({'amount': salary.get('amount'), 'currency': _clip(salary.get('currency'), 8)}
+                   if isinstance(salary.get('amount'), int) else None),
+        'experience_months': total if isinstance(total, int) and not isinstance(total, bool) else None,
+        'experience': experience,
+        'skills': _strings(raw.get('keySkills'))[:40],
+        'job_status': _clip(status.get('name'), 40),
+        'online': raw.get('isOnline') is True,
+        'last_activity_at': _clip(raw.get('lastActivityTime'), 40),
+        'updated_at': _epoch_ms(attributes.get('updated') or attributes.get('lastEditTime')),
+        'access': _access(opening.get('viewStatus')),
+        'topic': ({'vacancy_id': str(topic.get('vacancyId') or ''), 'topic_id': str(topic.get('topicId') or ''),
+                   'type': _clip(topic.get('initialTopicType'), 40), 'at': _clip(topic.get('creationTime'), 40)}
+                  if topic else None),
+    }
+
+
+def search_from_state(state):
+    """Страница поиска по базе резюме → (резюме выдачи, всего найдено hh). SiteTrouble — не поиск работодателя."""
+    if not isinstance(state, dict):
+        raise SiteTrouble(SITE_ERROR, 'страница поиска без начального состояния')
+    if state.get('userType') != 'employer':
+        raise SiteTrouble(LOGIN_REQUIRED, 'hh открыл поиск не работодателю (userType=%s)' % state.get('userType'))
+    result = state.get('resumeSearchResult')
+    if not isinstance(result, dict):
+        raise SiteTrouble(SITE_ERROR, 'страница поиска без resumeSearchResult')
+    total = (result.get('stats') or {}).get('totalResults') if isinstance(result.get('stats'), dict) else None
+    items = [item for item in (found_from_search(raw) for raw in result.get('resumes') or []) if item]
+    return items, (total if isinstance(total, int) and not isinstance(total, bool) else None)
+
+
+def contacts_from_state(state):
+    """ФИО, телефоны и почта со страницы резюме — только если hh их показал (контакты открыты или кандидат общался с
+    компанией). Иначе None."""
+    resume = (state or {}).get('resume') if isinstance(state, dict) else None
+    if not isinstance(resume, dict):
+        return None
+    names = {key: _clip(_value(resume.get(field)), 80)
+             for key, field in (('last_name', 'lastName'), ('first_name', 'firstName'), ('middle_name', 'middleName'))}
+    phones = []
+    for item in _value(resume.get('phone')) or []:
+        if not isinstance(item, dict):
+            continue
+        text = item.get('formatted') or item.get('raw') or ''.join(
+            str(item.get(part) or '') for part in ('country', 'city', 'number'))
+        text = _clip(text, 40)
+        if text and re.search(r'\d{6}', re.sub(r'\D', '', text)):
+            phones.append(text)
+    email = _value(resume.get('email'))
+    email = _clip(email, 120) if isinstance(email, str) and '@' in email else None
+    if not (any(names.values()) or phones or email):
+        return None
+    return dict(names, phones=phones[:5], email=email)
+
+
+def access_from_state(state):
+    resume = (state or {}).get('resume') if isinstance(state, dict) else None
+    if not isinstance(resume, dict):
+        return None
+    opening = resume.get('resumeContactsOpening') if isinstance(resume.get('resumeContactsOpening'), dict) else {}
+    return _access(opening.get('viewStatus'), opened=resume.get('openedContacts') is True)
+
+
 def parse_moment(value):
     """ISO-время hh или портала → aware datetime (UTC) или None."""
     text = str(value or '').strip()
@@ -490,9 +648,9 @@ class Site:
         self._cookie_marks = marks
         return True
 
-    def _get(self, path, params=None, json_body=True):
+    def _get(self, path, params=None, json_body=True, referer=None):
         headers = {'User-Agent': self.user_agent, 'Accept-Language': 'ru-RU,ru;q=0.9',
-                   'Referer': self.host + '/employer/vacancies'}
+                   'Referer': referer or (self.host + '/employer/vacancies')}
         if json_body:
             headers.update({'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
         else:
@@ -514,7 +672,7 @@ class Site:
         if response.status_code in (401, 403):
             raise SiteTrouble(LOGIN_REQUIRED, 'hh ответил %d — кабинет закрыт' % response.status_code)
         if response.status_code != 200:
-            raise SiteTrouble(SITE_ERROR, 'hh ответил %d на %s' % (response.status_code, path))
+            raise SiteTrouble(SITE_ERROR, 'hh ответил %d на %s' % (response.status_code, path), status=response.status_code)
         if not json_body:
             return response.text
         try:
@@ -544,6 +702,24 @@ class Site:
         page = self._get('/resume/%s' % resume_hash, {'vacancyId': item['vacancy_id'], 't': item['topic_id']},
                          json_body=False)
         return resume_from_state(initial_state(page), resume_hash)
+
+    def search(self, params, page):
+        """Страница поиска по базе резюме (как её открывает рекрутер) → (резюме выдачи, всего найдено)."""
+        query = [(key, params[key]) for key in SEARCH_PARAMS if params.get(key) not in (None, '')]
+        if page:
+            query.append(('page', page))
+        referer = self.host + '/search/resume' if page else self.host + '/employer/vacancies'
+        return search_from_state(initial_state(self._get('/search/resume', query, json_body=False, referer=referer)))
+
+    def base_resume(self, resume_hash):
+        """Резюме из базы — страница резюме, открытая из поиска → (резюме без контактов, контакты-или-None, доступ к
+        контактам). Контакты hh показывает только открытые: кнопку «Открыть контакты» мост не трогает."""
+        if not RESUME_HASH.match(str(resume_hash or '')):
+            raise SiteTrouble(SITE_ERROR, 'неверный хеш резюме')
+        state = initial_state(self._get('/resume/%s' % resume_hash, {'hhtmFrom': 'resume_search_result'},
+                                        json_body=False, referer=self.host + '/search/resume'))
+        resume, _letter = resume_from_state(state, resume_hash)
+        return resume, contacts_from_state(state), access_from_state(state)
 
 
 def grown_states(previous, current):
@@ -588,6 +764,13 @@ class HhBridge:
         self._summary_at = None
         self._sent = 0
         self._outcomes = {}
+        # Задания поиска по базе резюме (hh/1.4.0): забираются длинным опросом в паузах; результаты — очередью до ответа
+        # портала.
+        self.tasks_enabled = bool(config.get('tasks'))
+        self.done_queue = []
+        self.tasks_failures = 0
+        self.tasks_resume_at = 0.0
+        self._tasks_done = 0
 
     # ── состояние на диске ───────────────────────────────────────────────────
 
@@ -635,15 +818,15 @@ class HhBridge:
 
     # ── портал ───────────────────────────────────────────────────────────────
 
-    def _post(self, payload):
+    def _post(self, payload, path=PUSH_PATH, timeout=PORTAL_TIMEOUT):
         if self.signer is None:
             raise RuntimeError('у моста нет ключа подписи (CDR_AGENT_KEY_FILE)')
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
 
         def send():
             headers = {'Content-Type': 'application/json'}
-            headers.update(self.signer.headers('POST', PUSH_PATH, body))
-            return self.session.post(self.portal + PUSH_PATH, data=body, timeout=PORTAL_TIMEOUT, headers=headers)
+            headers.update(self.signer.headers('POST', path, body))
+            return self.session.post(self.portal + path, data=body, timeout=timeout, headers=headers)
 
         try:
             response = send()
@@ -654,6 +837,8 @@ class HhBridge:
         if response.status_code == 401:
             raise RuntimeError('портал не принял подпись: ключ %s не внесён в CDR_AGENT_KEYS или разошлись часы'
                                % self.signer.key_id)
+        if response.status_code in (404, 405) and path != PUSH_PATH:
+            raise LookupError('портал не знает %s (%d)' % (path, response.status_code))
         if response.status_code != 200:
             raise RuntimeError('портал ответил %d: %s' % (response.status_code, (response.text or '')[:200]))
         try:
@@ -854,11 +1039,165 @@ class HhBridge:
             return
         if now - self._summary_at < SUMMARY_SECONDS:
             return
-        log.info('за %d мин: отдано откликов %d, исходы %s, вход %s, вакансий в опросе %d',
+        log.info('за %d мин: отдано откликов %d, исходы %s, вход %s, вакансий в опросе %d, заданий базы резюме %d, '
+                 'запросов к hh за сутки %d',
                  int((now - self._summary_at) // 60), self._sent, self._outcomes or '—',
                  'в порядке' if self.trouble is None else self.trouble[0],
-                 len([v for v in self.vacancies or [] if v['id'] not in self.off]))
-        self._summary_at, self._sent, self._outcomes = now, 0, {}
+                 len([v for v in self.vacancies or [] if v['id'] not in self.off]), self._tasks_done,
+                 getattr(self.site, 'requests_today', 0))
+        self._summary_at, self._sent, self._outcomes, self._tasks_done = now, 0, {}, 0
+
+    # ── задания поиска по базе резюме (hh/1.4.0) ─────────────────────────────
+
+    def _tasks_post(self, wait, take=True):
+        """Отдать порталу готовые результаты и подождать заданий до wait секунд. Отданными результаты считаются по
+        ответу портала: не дошли — уйдут со следующим опросом."""
+        done = self.done_queue[:50]
+        payload = {'version': '%s/%s' % (VERSION, platform.python_version()), 'agent_id': self.agent_id,
+                   'done': done, 'wait': round(max(0.0, wait), 1), 'take': take}
+        reply = self._post(payload, path=TASKS_PATH, timeout=(PORTAL_TIMEOUT[0], PORTAL_TIMEOUT[1] + max(0.0, wait)))
+        self.done_queue = self.done_queue[len(done):]
+        tasks = reply.get('tasks') if isinstance(reply.get('tasks'), list) else []
+        return [task for task in tasks if isinstance(task, dict)]
+
+    def tasks_round(self, hold):
+        """Один заход: ждать заданий до hold секунд; пришли — выполнить по одному и сразу отдать результаты (рекрутер
+        ждёт свежее резюме или контакты), забрав то, что успело появиться. → сколько заданий выполнено."""
+        handled = 0
+        tasks = self._tasks_post(hold)
+        while tasks:
+            for task in tasks[:10]:
+                if self.stop_event.is_set():
+                    break
+                self.done_queue.append(self.run_task(task))
+                handled += 1
+            more = handled < TASKS_PER_ROUND and not self.stop_event.is_set()
+            tasks = self._tasks_post(0, take=more)
+            if not more:
+                break
+        self._tasks_done += handled
+        return handled
+
+    def run_task(self, task):
+        """Одно задание портала → результат. Вход в hh потерян или сайт не пускает — задание не выполняется (портал
+        отложит его): стучаться в закрытую дверь из-за кнопки рекрутера нельзя так же, как из-за опроса."""
+        task_id = str(task.get('id') or '')
+        if self.trouble is not None and self.trouble[0] in (LOGIN_REQUIRED, BLOCKED):
+            return {'id': task_id, 'ok': False, 'trouble': self.trouble[0], 'error': self.trouble[1]}
+        try:
+            if task.get('kind') == 'search':
+                return dict(self._run_search(task), id=task_id, ok=True)
+            if task.get('kind') == 'resume':
+                return dict(self._run_resume(task), id=task_id, ok=True)
+            return {'id': task_id, 'ok': False, 'error': 'неизвестное задание: %s' % str(task.get('kind'))[:40]}
+        except SiteTrouble as exc:
+            if exc.kind != SITE_ERROR:
+                self.trouble, self.trouble_count = (exc.kind, str(exc)[:300]), max(self.trouble_count, 1)
+            return {'id': task_id, 'ok': False, 'trouble': exc.kind, 'error': str(exc)[:300],
+                    'gone': exc.status in (403, 404) and task.get('kind') == 'resume' and exc.kind == SITE_ERROR}
+        except Exception:  # noqa: BLE001 — hh поменял страницу: задание не выполнено, мост живёт дальше
+            log.exception('задание %s (%s) упало', task_id, task.get('kind'))
+            return {'id': task_id, 'ok': False, 'error': 'разбор страницы hh упал'}
+
+    def _run_search(self, task):
+        raw = task.get('params') if isinstance(task.get('params'), dict) else {}
+        params = {key: str(raw[key])[:500] for key in SEARCH_PARAMS if raw.get(key) not in (None, '')}
+        if not params.get('text'):
+            raise SiteTrouble(SITE_ERROR, 'поиск без ключевых слов')
+        try:
+            pages = max(1, min(int(task.get('pages') or 1), SEARCH_MAX_PAGES))
+        except (TypeError, ValueError):
+            pages = 1
+        stop_before = parse_moment(task.get('stop_before'))
+        items, seen, total, read = [], set(), None, 0
+        for number in range(pages):
+            if number:
+                self.site.sleep(random.uniform(*SEARCH_PAGE_PAUSE_SECONDS))
+            found, page_total = self.site.search(params, number)
+            read += 1
+            total = page_total if total is None else total
+            for item in found:
+                if item['hash'] not in seen:
+                    seen.add(item['hash'])
+                    items.append(item)
+            if len(found) < SEARCH_PAGE_SIZE:
+                break
+            # Выдача «по дате обновления»: страница, где все резюме старше прошлого поиска, — последняя нужная.
+            moments = [parse_moment(item.get('updated_at')) for item in found]
+            if stop_before and moments and all(moment is not None and moment < stop_before for moment in moments):
+                break
+        log.info('поиск по базе (вакансия %s): найдено hh %s, прочитано страниц %d, резюме %d',
+                 task.get('vacancy_id'), total, read, len(items))
+        return {'kind': 'search', 'total': total, 'pages': read, 'items': items}
+
+    def _run_resume(self, task):
+        if task.get('reason') == 'score':
+            # Фоновое чтение для балла ИИ — не залпом: пауза человека, переходящего к следующему резюме выдачи.
+            self.site.sleep(random.uniform(*BACKGROUND_RESUME_PAUSE_SECONDS))
+        resume, contacts, access = self.site.base_resume(task.get('hash'))
+        result = {'kind': 'resume', 'hash': task.get('hash'), 'reason': task.get('reason'), 'resume': resume,
+                  'access': access}
+        # Контакты — только когда их ждут после «Взять в работу»: в остальных случаях они порталу не нужны.
+        if task.get('reason') == 'contacts':
+            result['contacts'] = contacts
+        return result
+
+    def _sleep(self, wait):
+        """Пауза без заданий: пока последний такт прошёл как надо, пульс обновляется раз в HEARTBEAT_SECONDS."""
+        left = wait
+        while left > 0:
+            step = min(left, HEARTBEAT_SECONDS)
+            if self.stop_event.wait(step):
+                return True
+            left -= step
+            if left > 0 and self.healthy:
+                self._heartbeat()
+        return False
+
+    def _tasks_failed(self, exc):
+        self.tasks_failures += 1
+        if isinstance(exc, LookupError):
+            pause = TASKS_MISSING_SECONDS
+        else:
+            pause = TASKS_BACKOFF_SECONDS[min(self.tasks_failures, len(TASKS_BACKOFF_SECONDS)) - 1]
+        if self.tasks_failures in (1, 5) or self.tasks_failures % 20 == 0:
+            log.warning('задания портала не забираются (%s), повтор через %d с', exc, pause)
+        self.tasks_resume_at = self.clock() + pause
+
+    def rest(self, wait):
+        """Пауза до следующего такта. С заданиями — длинным опросом портала: задание (поиск, резюме, контакты) берётся
+        сразу, а не после паузы. Портал недоступен — пауза как прежде, опрос заданий отступает. True — мост
+        останавливают."""
+        if not self.tasks_enabled:
+            return self._sleep(wait)
+        deadline = self.clock() + wait
+        beat = self.clock()
+        while True:
+            now = self.clock()
+            left = deadline - now
+            if left <= 0:
+                return False
+            if self.stop_event.is_set():
+                return True
+            if self.portal_failures or now < self.tasks_resume_at:
+                step = min(left, HEARTBEAT_SECONDS, max(1.0, self.tasks_resume_at - now))
+                if self.stop_event.wait(step):
+                    return True
+            else:
+                started = self.clock()
+                try:
+                    handled = self.tasks_round(min(left, TASKS_WAIT_SECONDS))
+                    self.tasks_failures = 0
+                except Exception as exc:  # noqa: BLE001
+                    handled = 0
+                    self._tasks_failed(exc)
+                # Портал ответил мгновенно и пусто (не держит опрос) — не долбить его: короткая пауза.
+                if not handled and self.clock() - started < 1.0 and self.tasks_failures == 0:
+                    if self.stop_event.wait(min(max(0.0, deadline - self.clock()), 5.0)):
+                        return True
+            if self.healthy and self.clock() - beat >= HEARTBEAT_SECONDS:
+                self._heartbeat()
+                beat = self.clock()
 
     def run(self):
         log.info('Мост hh %s запущен. Портал: %s (ключ %s), кабинет: %s, id: %s', VERSION, self.portal,
@@ -877,20 +1216,6 @@ class HhBridge:
                 break
         log.info('Мост hh остановлен')
         return 0
-
-    def rest(self, wait):
-        """Пауза до следующего такта; пока последний такт прошёл как надо, пульс обновляется раз в HEARTBEAT_SECONDS
-        (ночная пауза — до двух часов, а проверка контейнера ждёт пульс не реже раза в 15 минут). True — мост
-        останавливают."""
-        left = wait
-        while left > 0:
-            step = min(left, HEARTBEAT_SECONDS)
-            if self.stop_event.wait(step):
-                return True
-            left -= step
-            if left > 0 and self.healthy:
-                self._heartbeat()
-        return False
 
     def stop(self, *_args):
         self.stop_event.set()

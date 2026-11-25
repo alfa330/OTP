@@ -113,6 +113,7 @@ def clean_item(raw):
         'phone': _text(raw.get('phone'), 40),
         'city': _text(raw.get('city'), 120),
         'resume_url': resume_url(resume_hash, vacancy_id, topic_id),
+        'resume_hash': resume_hash if _HASH.match(resume_hash) else None,
         'resume': clean_resume(raw.get('resume')),
         'letter': _long_text(raw.get('letter'), LETTER_MAX),
     }
@@ -262,7 +263,9 @@ def clean_vacancies(raw):
             continue
         seen.add(vacancy_id)
         responses = item.get('responses')
+        area_id = _digits(item.get('area_id'))
         out.append({'id': vacancy_id, 'name': name, 'area': _text(item.get('area'), 120),
+                    'area_id': int(area_id) if area_id and len(area_id) <= 9 else None,
                     'responses': responses if isinstance(responses, int) and responses >= 0 else None})
     return out
 
