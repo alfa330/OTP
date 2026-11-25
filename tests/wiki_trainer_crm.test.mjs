@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import React from 'react';
@@ -55,7 +55,8 @@ async function loadCrm() {
     buildSync({
         stdin: {
             contents: [
-                "export { DeskScreen, makeUi, viewPatch, crmTitle } from './screensCrm.jsx';",
+                "export { DeskScreen, makeUi, viewPatch, crmTitle, switchTabPatch, windowsTabs } from './screensCrm.jsx';",
+                "export { tipForCall } from './WinBuddy.jsx';",
                 "export { accountSearchPatch, CODE_CONFIRM } from './crmDrivers.jsx';",
                 "export { yaAppealFrom } from './crmYandexAppeals.jsx';",
                 "export { FRAME_CSS } from './crmFrame.jsx';",
@@ -1190,4 +1191,100 @@ test('парящий Барс: облачко не закрывает ни це�
     // Вплотную к цели — тоже мешает: запас 10 px.
     assert.equal(overlaps({ left: 0, top: 0, right: 10, bottom: 10 }, { left: 15, top: 0, right: 20, bottom: 10 }), true);
     assert.equal(overlaps({ left: 0, top: 0, right: 10, bottom: 10 }, { left: 25, top: 0, right: 30, bottom: 10 }), false);
+});
+
+test('среда Windows: браузер на весь экран, iCORE Phone, панель задач; входящий — окно «Входящий вызов»', () => {
+    const run = startRun(call, { now: NOW });
+    const ringing = { ...run.world, call: { ...run.world.call, state: 'ringing', phone: '+7 700 555 02 18', queue: 'Линия водителей', waitedSec: 41 } };
+    const html = renderToStaticMarkup(React.createElement(CRM.DeskScreen, {
+        world: ringing, tap() {}, browse() {}, onUi() {}, misses: () => false, emit: null, target: null,
+        onCall() {}, environment: 'windows',
+        desktopMenu: [{ label: 'Новый звонок…', onClick() {} }],
+    }));
+    assert.match(html, /wt-windesk/, 'нет рабочего стола');
+    assert.match(html, /wt-taskbar/, 'нет панели задач');
+    assert.match(html, /wt-win wt-win--windows/, 'браузер не в виде Windows');
+    for (const id of ['win_min', 'win_max', 'win_close']) assert.match(html, new RegExp(`data-tap="${id}"`));
+    assert.doesNotMatch(html, /wt-win__lights/, 'в Windows «светофор» macOS');
+    assert.match(html, /aria-label="iCORE Phone"/, 'нет окна iCORE Phone');
+    assert.match(html, /Входящий вызов/);
+    assert.match(html, /\+7 700 555 02 18/);
+    assert.match(html, />\s*Ответить\s*</);
+    assert.match(html, />\s*Отклонить\s*</);
+    assert.doesNotMatch(html, /wt-cp /, 'в среде Windows осталась плашка звонка вместо iCORE Phone');
+
+    // Курс — по-прежнему окно macOS без панели задач.
+    const course = renderDesk(atDesk());
+    assert.doesNotMatch(course, /wt-taskbar|wt-win--windows/);
+});
+
+/* Дело голосового тренажёра — то, что сервер отдаёт браузеру (public_case):
+   ключ, версия и public. В нём есть Диспетчерская (gps_log), значит в среде
+   Windows у браузера три вкладки. */
+const voiceCase = (key) => {
+    const full = JSON.parse(readFileSync(new URL(`../voice_trainer/cases/${key}.json`, import.meta.url), 'utf8'));
+    return { key: full.key, version: full.version, ...full.public };
+};
+
+test('среда Windows: три вкладки — «Обращения», «Обращения в Яндекс», Диспетчерская; у каждой своя страница', () => {
+    const run = startRun(call, { now: NOW, caseData: voiceCase('payout_angry') });
+    const start = run.world;
+    assert.ok(start.fleetCase, 'дело голосового тренажёра не открылось в Диспетчерской');
+    assert.deepEqual(CRM.windowsTabs(start).map((t) => t.id), ['crm', 'crm_ya', 'fleet']);
+    const titles = CRM.windowsTabs(start).map((t) => t.title);
+    assert.match(titles[1], /Яндекс/, `вторая вкладка не про обращения в Яндекс: ${titles[1]}`);
+    assert.equal(titles[2], 'Диспетчерская');
+
+    // На первой вкладке открыта карточка водителя — уходим во вторую.
+    const onCard = { ...start, crmView: 'drv_card', drvOpenId: 50417, drvTab: 'statement' };
+    const toYa = CRM.switchTabPatch(onCard, 'crm_ya');
+    assert.equal(toYa.tab, 'crm_ya');
+    assert.equal(toYa.crmView, 'ya_list', 'вторая вкладка впервые — не список обращений в Яндекс');
+    assert.equal(toYa.drvOpenId, null, 'карточка водителя протекла во вторую вкладку');
+    assert.equal(toYa.tabPages.crm.drvOpenId, 50417);
+    assert.equal(toYa.tabPages.crm.drvTab, 'statement');
+
+    // Диспетчерская не трогает страницы CRM, а возврат на первую — к той же карточке.
+    const onYa = { ...onCard, ...toYa, yaOpen: 7 };
+    const toFleet = CRM.switchTabPatch(onYa, 'fleet');
+    assert.equal(toFleet.tab, 'fleet');
+    assert.equal(toFleet.tabPages.crm_ya.yaOpen, 7, 'открытое обращение в Яндекс не запомнилось');
+    assert.equal('crmView' in toFleet, false, 'уход в Диспетчерскую поменял страницу CRM');
+    const onFleet = { ...onYa, ...toFleet };
+    const back = CRM.switchTabPatch(onFleet, 'crm');
+    assert.equal(back.drvOpenId, 50417);
+    assert.equal(back.drvTab, 'statement');
+    assert.equal(CRM.switchTabPatch({ ...onFleet, ...back }, 'crm'), null, 'щелчок по своей вкладке — не переход');
+
+    // Заголовок неактивной вкладки — по её запомненной странице.
+    const later = { ...onFleet, ...back };
+    assert.equal(CRM.windowsTabs(later)[1].title, CRM.crmTitle({ ...later, ...later.tabPages.crm_ya }));
+
+    // Дело курса без Диспетчерской — вкладок две.
+    assert.deepEqual(CRM.windowsTabs(startRun(call, { now: NOW }).world).map((t) => t.id), ['crm', 'crm_ya']);
+});
+
+test('среда Windows: вкладка Диспетчерской — кабинет с исполнителями, CRM при этом не выгружается', () => {
+    const run = startRun(call, { now: NOW, caseData: voiceCase('payout_angry') });
+    const world = { ...run.world, tab: 'fleet' };
+    const html = renderToStaticMarkup(React.createElement(CRM.DeskScreen, {
+        world, tap() {}, browse() {}, onUi() {}, misses: () => false, emit: null, target: null,
+        onCall() {}, environment: 'windows', desktopMenu: [],
+    }));
+    assert.match(html, /class="wt-fl/, 'кабинета Диспетчерской нет');
+    assert.match(html, /Учебная CRM/, 'фрейм CRM размонтирован — при возврате он мигал бы');
+    const hero = world.fleetCase.contractor;
+    assert.ok(hero.last && html.includes(hero.last), `в списке исполнителей нет героя: ${hero.last}`);
+});
+
+test('Барс в смене говорит по ходу звонка', () => {
+    const tip = (call) => CRM.tipForCall(call);
+    assert.equal(tip({ state: 'ready' }).title, 'Ты на линии');
+    assert.match(tip({ state: 'ringing', phone: '+7 700 555 02 18' }).text, /\+7 700 555 02 18/);
+    assert.match(tip({ state: 'talking', phone: '+7 700 555 02 18' }).text, /по номеру \+7 700 555 02 18/);
+    assert.equal(tip({ state: 'held' }).title, 'Удержание');
+    assert.match(tip({ state: 'wrapup' }).text, /Обращения в Яндекс/);
+    assert.equal(tip({ state: 'ended', reason: 'rejected' }).title, 'Вызов отклонён');
+    assert.equal(tip({ state: 'ended' }).title, 'Звонок завершён');
+    assert.equal(tip(undefined).title, 'Ты на линии');
 });

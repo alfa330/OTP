@@ -32,13 +32,21 @@ import { Tap } from './screenKit';
 
 /* Значок вкладки рисуем сами, а не тянем картинку: в тренажёре она была бы
    единственным внешним файлом ради шестнадцати пикселей. */
-const TabIcon = () => (
+const TabIcon = ({ kind = 'crm' }) => (kind === 'fleet' ? (
+    /* Диспетчерская — тот же нейтральный знак, что в шапке её кабинета
+       (машинка), а не чужой логотип. */
+    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+        <rect width="16" height="16" rx="4" fill="#21201f" />
+        <path d="M3.6 10.6h8.8M4.9 10.6V7.4l1-2.5h4.2l1 2.5v3.2M6.1 12.4v-1.8m3.8 1.8v-1.8"
+            fill="none" stroke="#ffdc60" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+) : (
     <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
         <rect width="16" height="16" rx="4" fill="#4273fa" />
         <text x="8" y="11.6" textAnchor="middle" fontSize="8.6" fontWeight="700"
             fontFamily="system-ui, sans-serif" fill="#fff">iT</text>
     </svg>
-);
+));
 
 const NavIcon = ({ name }) => {
     const paths = {
@@ -83,10 +91,33 @@ const Lights = ({ tap, target }) => (
     </div>
 );
 
-/** Полоса вкладок: «светофор» macOS слева, за ним вкладки и «+». */
-const TabStrip = ({ tap, target, tabs, active, onSwitch }) => (
+/* Кнопки окна Windows — справа: свернуть, восстановить (окно развёрнуто),
+   закрыть. Те же цели движка, что у «светофора», — промах по ним объясняется. */
+const WinControls = ({ tap, target }) => (
+    <div className="wt-win__controls">
+        <Tap id="win_min" target={target} tap={tap} aria-label="Свернуть окно">
+            <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true">
+                <path d="M1.5 6h9" stroke="currentColor" strokeWidth="1" />
+            </svg>
+        </Tap>
+        <Tap id="win_max" target={target} tap={tap} aria-label="Свернуть в окно">
+            <svg viewBox="0 0 12 12" width="11" height="11" fill="none" aria-hidden="true">
+                <rect x="1.5" y="3.5" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1" />
+                <path d="M3.5 3.5V2.5a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1" stroke="currentColor" strokeWidth="1" />
+            </svg>
+        </Tap>
+        <Tap id="win_close" target={target} tap={tap} className="is-close" aria-label="Закрыть окно">
+            <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true">
+                <path d="M2 2l8 8M10 2 2 10" stroke="currentColor" strokeWidth="1" />
+            </svg>
+        </Tap>
+    </div>
+);
+
+/** Полоса вкладок: «светофор» macOS слева или кнопки Windows справа. */
+const TabStrip = ({ tap, target, tabs, active, onSwitch, windows = false }) => (
     <div className="wt-win__tabs">
-        <Lights tap={tap} target={target} />
+        {windows ? null : <Lights tap={tap} target={target} />}
         {/* Вкладка — НЕ одна большая кнопка: внутри неё живёт крестик, который
             сам является целью движка. Кнопка в кнопке — невалидная разметка, и
             клик по крестику заодно переключал бы вкладку. Поэтому переключение
@@ -102,7 +133,7 @@ const TabStrip = ({ tap, target, tabs, active, onSwitch }) => (
                     onClick={() => (tab.id === active ? null : onSwitch(tab.id))}
                     aria-current={tab.id === active ? 'page' : undefined}
                 >
-                    <TabIcon />
+                    <TabIcon kind={tab.icon} />
                     <span className="wt-win__tab-name">{tab.title}</span>
                 </button>
                 {tab.id === active ? (
@@ -123,12 +154,12 @@ const TabStrip = ({ tap, target, tabs, active, onSwitch }) => (
                 <path d="M12 5v14M5 12h14" />
             </svg>
         </Tap>
-
+        {windows ? <WinControls tap={tap} target={target} /> : null}
     </div>
 );
 
 /** Панель навигации с адресной строкой. */
-const Toolbar = ({ tap, target, url }) => (
+const Toolbar = ({ tap, target, url, windows = false }) => (
     <div className="wt-win__bar">
         <Tap id="browser_back" target={target} tap={tap} className="wt-win__nav"
             aria-label="Назад"><NavIcon name="back" /></Tap>
@@ -150,17 +181,28 @@ const Toolbar = ({ tap, target, url }) => (
                 <path d="M4.6 19.4c1.3-3.5 4.1-5.3 7.4-5.3s6.1 1.8 7.4 5.3z" />
             </svg>
         </span>
+        {/* «⋮» — меню браузера в Windows: только картинка. */}
+        {windows ? (
+            <span className="wt-win__kebab" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                    <circle cx="12" cy="5.5" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="12" cy="18.5" r="1.6" />
+                </svg>
+            </span>
+        ) : null}
     </div>
 );
 
-/** Окно браузера целиком: полоса вкладок, панель навигации и содержимое. */
+/** Окно браузера целиком: полоса вкладок, панель навигации и содержимое.
+ *  variant="windows" — окно Windows, развёрнутое на весь экран (среда
+ *  «Звонок ИИ-водителя»); по умолчанию — окно macOS (курс). */
 export default function BrowserChrome({
-    tap, target, tabs, active, onSwitch, url, children,
+    tap, target, tabs, active, onSwitch, url, children, variant = 'mac',
 }) {
+    const windows = variant === 'windows';
     return (
-        <div className="wt-win">
-            <TabStrip tap={tap} target={target} tabs={tabs} active={active} onSwitch={onSwitch} />
-            <Toolbar tap={tap} target={target} url={url} />
+        <div className={`wt-win${windows ? ' wt-win--windows' : ''}`}>
+            <TabStrip tap={tap} target={target} tabs={tabs} active={active} onSwitch={onSwitch} windows={windows} />
+            <Toolbar tap={tap} target={target} url={url} windows={windows} />
             <div className="wt-win__page">{children}</div>
         </div>
     );

@@ -17,6 +17,7 @@ import { callNext, emptyCall, syncReady, talkMs } from './callMachine';
 import { EVENT_TITLES, createEventLog } from './trainerEvents';
 import { SCREENS } from './screenMap';
 import { chooseCorner, measureFloat } from './floatCorner';
+import WinBuddy, { tipForCall } from './WinBuddy';
 import './trainer.css';
 
 /* Сцена с машиной приезжает отдельным чанком вместе с three.js.
@@ -133,6 +134,13 @@ export function TrainerPlayer({
        Держится в ref — новая функция из родителя на каждом рендере не должна
        перезапускать эффект завершения. */
     onFinished = null,
+    /* Среда рабочего места. 'windows' — рабочий стол Windows на весь экран:
+       браузер с CRM, iCORE Phone, панель задач (раздел «Тренажёр», звонок
+       ИИ-водителя; владелец, 25.11.2026). Без Барса и плашки прогресса: это
+       смена на настоящем компьютере, а не урок. */
+    environment = null,
+    /* Меню «Учебная смена» на панели задач: [{ label, onClick, danger }]. */
+    desktopMenu = null,
 }) {
     const [run, setRun] = useState(() => startRun(scenario, { caseData }));
     const onFinishedRef = useRef(onFinished);
@@ -157,6 +165,7 @@ export function TrainerPlayer({
        края экрана читается как жест телефона, а окно на компьютере так себя не
        ведёт. */
     const deskMode = scenario.stage === 'desktop';
+    const windowsMode = deskMode && environment === 'windows';
     /* Свободная среда: шагов нет, значит нет ни прогресса, ни целей, ни
        подсказок. Показывать «шаг 1 из 1» и кнопку «Подсказка», за которой
        ничего не стоит, — обещать урок, которого не будет. */
@@ -417,6 +426,13 @@ export function TrainerPlayer({
         if (onCall) onCall(type, payload);
     }, [applyCall, onCall]);
 
+    /* «Завершить постобработку» в iCORE Phone — то же, что «Завершить
+       попытку» на плашке прогресса: звонок закрыт, попытка закончена. */
+    const doFinishAttempt = useCallback(() => {
+        handleCall('finish');
+        doTap('finish_attempt');
+    }, [handleCall, doTap]);
+
     /* Линия: звонки приходят только тому, кто на линии (world.onLine). В
        режиме звонка стажёр на линии с начала смены — рабочее место одна CRM. */
     useEffect(() => {
@@ -496,8 +512,8 @@ export function TrainerPlayer({
         navigator.mediaDevices.getUserMedia({ audio: true })
             .then((stream) => { stream.getTracks().forEach((t) => t.stop()); setMicError(''); })
             .catch(() => setMicError(
-                'Микрофон недоступен: браузер не дал разрешение. Разговор можно провести '
-                + 'без голоса — кнопки панели звонка работают.',
+                'Микрофон недоступен: браузер не дал разрешение. Разрешите микрофон значком '
+                + 'в адресной строке — без него водитель вас не услышит.',
             ));
     }, [callMode, voice, callState]);
 
@@ -752,6 +768,7 @@ export function TrainerPlayer({
             className={`wt-root${settled && !leaving ? '' : ' wt-root--locked'}`
                 + `${worldMode ? ' wt-root--world' : ''}`
                 + `${deskMode ? ' wt-root--desk' : ''}`
+                + `${windowsMode ? ' wt-root--windows' : ''}`
                 + `${noLesson ? ' wt-root--sandbox' : ''}`}
             style={{ fontFamily: APPLE_FONT }}
         >
@@ -903,6 +920,14 @@ export function TrainerPlayer({
                                         micLevel={micLevel}
                                         micError={micError}
                                         devMode={devMode}
+                                        environment={environment}
+                                        desktopMenu={desktopMenu}
+                                        onFinishAttempt={callMode ? doFinishAttempt : null}
+                                        /* Барс в среде Windows — помощник, которого можно
+                                           переставить (WinBuddy); говорит по ходу звонка. */
+                                        buddy={windowsMode
+                                            ? <WinBuddy leo={leoLayers} tip={tipForCall(run.world.call)} />
+                                            : null}
                                         onRing={callMode && devMode
                                             ? () => callApiRef.current.ring({
                                                 phone: run.world.case.call.phone_pretty
@@ -1038,7 +1063,7 @@ export function TrainerPlayer({
                 </motion.div>
                 </div>
                 )}
-                {deskMode ? helperFloat : null}
+                {deskMode && !windowsMode ? helperFloat : null}
             </motion.div>
 
             {/* ── СПРАВА: прогресс ─────────────────────────────────────────
@@ -1046,6 +1071,7 @@ export function TrainerPlayer({
                 «сколько осталось», список — «что именно осталось». В отдельной
                 колонке список помещается целиком, поэтому прятать его больше
                 не нужно. Выезжает из-за телефона зеркально помощнику. */}
+            {windowsMode ? null : (
             <motion.aside
                 className="wt-side"
                 initial={animateEntrance && !reduceMotion
@@ -1216,6 +1242,7 @@ export function TrainerPlayer({
                     </div>
                 </div>
             </motion.aside>
+            )}
         </div>
     );
 }
@@ -1236,6 +1263,7 @@ export function TrainerPlayer({
 export default function TrainerModal({
     scenario, onClose, record = null,
     caseData = null, voice = null, onCallApi = null, onCall = null,
+    environment = null, desktopMenu = null,
     /* layer="top" — поверх окна «Новость дня» (z-index 120): оттуда тренажёр
        открывают, пока окно остаётся на месте (задача #342). */
     onFinished = null, layer = null,
@@ -1251,12 +1279,15 @@ export default function TrainerModal({
     }, [reduceMotion, onClose]);
 
     // Esc закрывает. Слушатель на документе, потому что фокус в момент нажатия
-    // стоит на кнопке внутри учебного телефона.
+    // стоит на кнопке внутри учебного телефона. В среде Windows — нет: там Esc
+    // закрывает списки CRM, и смена со звонком обрывалась бы от одного нажатия;
+    // выход — меню «Учебная смена».
     useEffect(() => {
+        if (environment === 'windows') return undefined;
         const onKey = (event) => { if (event.key === 'Escape') requestClose(); };
         document.addEventListener('keydown', onKey);
         return () => document.removeEventListener('keydown', onKey);
-    }, [requestClose]);
+    }, [requestClose, environment]);
 
     /* Страховка: если анимация почему-то не доиграет (вкладку свернули, кадры не
        идут), окно всё равно закроется. Молча «не закрывается» — худший исход из
@@ -1291,6 +1322,8 @@ export default function TrainerModal({
                 voice={voice}
                 onCallApi={onCallApi}
                 onCall={onCall}
+                environment={environment}
+                desktopMenu={desktopMenu}
                 onFinished={onFinished}
             />
         </div>,

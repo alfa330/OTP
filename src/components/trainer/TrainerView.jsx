@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    AlertTriangle, BookOpen, ChevronLeft, Clock, Gauge, Loader2, Mic, MicOff,
+    AlertTriangle, BookOpen, ChevronLeft, Clock, Gauge, Loader2, Mic, MicOff, Monitor,
     RefreshCw, Sparkles, Square, Wallet,
 } from 'lucide-react';
+import lazyWithRetry from '../../utils/lazyWithRetry';
 import {
     APPLE_FONT, IosBadge, IosSection, IosSegmented, iosBtnGhost, iosBtnPrimary,
     iosBtnSecondary, iosCard, iosGroupLabel, scoreTone,
@@ -13,6 +14,19 @@ import {
     applySpeech, fmtCost, fmtDuration, fmtLangs, fmtMs, mergeMetrics, paceTone,
     roleLabel, roleSide, statusLabel, summarize,
 } from './trainerFormat';
+
+/* Смена в среде Windows (CRM + iCORE Phone + звонок ИИ-водителя) — отдельным
+   чанком: он тянет учебную CRM целиком, а раздел открывают и ради журнала. */
+const VoiceDesk = lazyWithRetry(() => import('./VoiceDesk'));
+
+/* Полный экран просим ПРЯМО в обработчике нажатия: браузер разрешает его
+   только по жесту человека, а чанк смены грузится уже после. */
+const askFullscreen = () => {
+    try {
+        const node = document.documentElement;
+        if (!document.fullscreenElement && node.requestFullscreen) node.requestFullscreen().catch(() => {});
+    } catch { /* не дали — смена откроется во всё окно браузера */ }
+};
 
 /* Раздел «Тренажёр» — голосовой разговор с ИИ и разбор после него.
  *
@@ -139,6 +153,8 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
     const [sessions, setSessions] = useState([]);
     const [detail, setDetail] = useState(null);
     const [loadingLog, setLoadingLog] = useState(false);
+    /* Смена в среде Windows: с кем начать (ключ сценария или 'random'). */
+    const [desk, setDesk] = useState(null);
 
     const linkRef = useRef(null);
     const sessionRef = useRef(null);
@@ -478,12 +494,21 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
                                     />
                                 </div>
                             )}
+                            {!running && mode === 'driver' ? (
+                                /* Владелец, 25.11.2026: смена — как на компьютере
+                                   оператора: Windows на весь экран, CRM в браузере,
+                                   звонок ИИ-водителя приходит в iCORE Phone. */
+                                <button className={iosBtnPrimary} disabled={!scenario || phase === 'starting'}
+                                        onClick={() => { askFullscreen(); setDesk(scenario); }}>
+                                    <Monitor className="h-4 w-4" /> Начать смену
+                                </button>
+                            ) : null}
                             {!running ? (
-                                <button className={iosBtnPrimary} onClick={start}
+                                <button className={mode === 'driver' ? iosBtnSecondary : iosBtnPrimary} onClick={start}
                                         disabled={phase === 'starting' || (mode === 'driver' && !scenario)}>
                                     {phase === 'starting'
                                         ? <><Loader2 className="h-4 w-4 animate-spin" /> Подключаем микрофон…</>
-                                        : <><Mic className="h-4 w-4" /> Начать разговор</>}
+                                        : <><Mic className="h-4 w-4" /> {mode === 'driver' ? 'Только голос' : 'Начать разговор'}</>}
                                 </button>
                             ) : (
                                 <button className={iosBtnSecondary} onClick={finish}>
@@ -564,6 +589,19 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
                     onReload={loadLog}
                 />
             )}
+
+            {desk ? (
+                <Suspense fallback={null}>
+                    <VoiceDesk
+                        api={api}
+                        apiBaseUrl={apiBaseUrl}
+                        headers={headers}
+                        scenarios={scenarios}
+                        initialKey={desk}
+                        onExit={() => { setDesk(null); if (tab === 'log') loadLog(); }}
+                    />
+                </Suspense>
+            ) : null}
         </div>
     );
 };

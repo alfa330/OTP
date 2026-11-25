@@ -359,6 +359,18 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             for key, value in scenarios.SCENARIOS.items()
         ]})
 
+    @trainer_route('/cases/<key>')
+    def trainer_case(user, key):
+        """Дело водителя для учебного рабочего места (CRM в среде Windows).
+
+        Звонок ИИ-водителя приходит в учебный iCORE Phone, а оператор ищет
+        его в учебной CRM — по этим данным. Отдаём только public: ответ и
+        критерии остаются здесь (scenarios.public_case)."""
+        case = scenarios.public_case(key)
+        if case is None:
+            return jsonify({'error': 'Дело не найдено'}), 404
+        return jsonify(case)
+
     @trainer_route('/tokens', methods=('POST',))
     def trainer_tokens(user):
         """Короткоживущий ключ для браузера: только распознавание.
@@ -1604,7 +1616,13 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             for h in history)
         prompt = scenarios.review_prompt(session['scenario_key'] or scenarios.DEFAULT)
         started = time.perf_counter()
-        generation = {'maxOutputTokens': 4000,
+        # 25.11.2026: при 4000 разбор на gemini-3-flash обрывался посреди JSON —
+        # «мышление» модели тарифицируется как выход и съедало лимит, и вместо
+        # разбора стажёр видел «Unterminated string». Мышление — коротким
+        # (thinkingConfig снимается сам, если модель его не берёт), лимит — с
+        # запасом: длина ответа — разбор на полстраницы, а не роман.
+        generation = {'maxOutputTokens': 16000,
+                      'thinkingConfig': {'thinkingLevel': 'LOW'},
                       'responseMimeType': 'application/json',
                       'responseSchema': _gemini_schema(scenarios.REVIEW_SCHEMA)}
         content = [{'role': 'user', 'parts': [{'text': f'СТЕНОГРАММА:\n{transcript}'}]}]
@@ -1633,9 +1651,13 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                     if response.status_code >= 400:
                         raise RuntimeError(f'HTTP {response.status_code} {response.text[:200]}')
                     data = response.json()
-                parts = ((data.get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
-                return json.loads(''.join(p.get('text', '') for p in parts
-                                          if not p.get('thought'))), {
+                candidate = (data.get('candidates') or [{}])[0]
+                parts = (candidate.get('content') or {}).get('parts') or []
+                text = ''.join(p.get('text', '') for p in parts if not p.get('thought'))
+                if candidate.get('finishReason') == 'MAX_TOKENS':
+                    # Обрыв по лимиту — говорим прямо, а не «JSONDecodeError».
+                    raise RuntimeError(f'ответ оборван по лимиту токенов ({len(text)} симв.)')
+                return json.loads(text), {
                     'provider': name, 'model': model,
                     'elapsed_ms': int((time.perf_counter() - started) * 1000)}
             except Exception as exc:  # noqa: BLE001

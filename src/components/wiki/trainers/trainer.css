@@ -4770,3 +4770,1463 @@
 /* Этапы: подпись, дельта под ней и время справа. Секунды здесь важны —
    ожидание клиента считается как «В пути» минус «На месте». */
 
+
+/* ═════════════════════════════════════════════════════════════════════════
+   СРЕДА WINDOWS — звонок ИИ-водителя (раздел «Тренажёр»)
+   ─────────────────────────────────────────────────────────────────────────
+   Владелец, 25.11.2026: «при запуске — как среда Windows, на весь экран, как
+   обычный браузер CRM, и звонилка наш iCORE Phone; удобно и аккуратно, в
+   стиле Windows». Вид — Windows 11: шрифт Segoe UI, акцент #0067c0,
+   окна со скруглением 8 px и мягкой тенью, панель задач с размытием.
+   Браузер развёрнут на весь экран — CRM в нём один к одному, без масштаба.
+   ═════════════════════════════════════════════════════════════════════════ */
+.wt-root--windows {
+    --win-accent: #0067c0;
+    --win-text: #1b1b1b;
+    --win-text-2: #5d5d5d;
+    --win-line: rgba(0, 0, 0, .08);
+    --win-card: #fbfbfb;
+    --win-shadow: 0 0 0 1px rgba(0, 0, 0, .07), 0 16px 32px rgba(0, 0, 0, .16);
+    display: block;
+    padding: 0;
+    overflow: hidden;
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif !important;
+    color: var(--win-text);
+}
+.wt-root--windows .wt-stage { width: 100%; height: 100%; }
+.wt-root--windows .wt-desk { gap: 0; }
+
+.wt-windesk {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    background:
+        radial-gradient(1100px 700px at 75% 115%, #1d5fd2 0%, rgba(29, 95, 210, 0) 60%),
+        radial-gradient(900px 600px at 15% -10%, #a8c8ff 0%, rgba(168, 200, 255, 0) 55%),
+        linear-gradient(160deg, #d3e3fb 0%, #7ea7ef 45%, #2457c0 100%);
+}
+.wt-windesk__screen { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
+
+/* ── Браузер Windows, развёрнутый на весь экран ───────────────────────── */
+.wt-win--windows {
+    flex: 1 1 auto;
+    border-radius: 0;
+    background: #dfe3e8;
+    box-shadow: none;
+}
+.wt-win--windows .wt-win__tabs { height: 40px; gap: 2px; padding: 0 0 0 8px; }
+.wt-win--windows .wt-win__tab { height: 32px; border-radius: 8px 8px 0 0; }
+.wt-win--windows .wt-win__tab:not(.is-active) { background: transparent; color: #3d3d3d; }
+.wt-win--windows .wt-win__tab:not(.is-active):hover { background: rgba(255, 255, 255, .55); }
+.wt-win--windows .wt-win__tab-add { margin: 0 0 6px 4px; border-radius: 50%; }
+.wt-win__controls { display: flex; align-self: stretch; margin-left: auto; }
+.wt-win__controls button {
+    display: grid;
+    place-items: center;
+    width: 46px;
+    padding: 0;
+    color: var(--win-text, #1b1b1b);
+    background: none;
+    border: 0;
+    transition: background .1s ease;
+}
+.wt-win__controls button:hover { background: rgba(0, 0, 0, .06); }
+.wt-win__controls .is-close:hover { color: #fff; background: #c42b1c; }
+.wt-win--windows .wt-win__bar { height: 44px; gap: 2px; background: #fff; border-bottom: 1px solid #e3e3e3; }
+.wt-win--windows .wt-win__nav { border-radius: 50%; }
+.wt-win--windows .wt-win__omni { height: 32px; margin: 0 8px; border-radius: 999px; background: #f1f3f4; }
+.wt-win--windows .wt-win__omni:hover { background: #e8eaed; }
+.wt-win__kebab {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    margin-left: 2px;
+    border-radius: 50%;
+    color: #444;
+}
+
+/* ── Заголовок окна Windows (iCORE Phone, «Входящий вызов») ─────────────── */
+.wt-winbar {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    height: 32px;
+    padding-left: 10px;
+    user-select: none;
+    touch-action: none;
+    cursor: default;
+}
+.wt-winbar__icon { display: flex; margin-right: 8px; }
+.wt-winbar__title { flex: 1 1 auto; font-size: 12px; color: var(--win-text, #1b1b1b); }
+.wt-winbar__btn {
+    display: grid;
+    place-items: center;
+    width: 46px;
+    height: 32px;
+    padding: 0;
+    color: var(--win-text, #1b1b1b);
+    background: none;
+    border: 0;
+}
+.wt-winbar__btn:hover { background: rgba(0, 0, 0, .06); }
+.wt-winbar__btn.is-close:hover { color: #fff; background: #c42b1c; }
+.wt-winbar__btn:last-child { border-top-right-radius: 8px; }
+
+/* ── iCORE Phone ──────────────────────────────────────────────────────── */
+.wt-icp {
+    position: absolute;
+    top: 96px;
+    right: 18px;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    width: 272px;
+    font-size: 12.5px;
+    color: var(--win-text, #1b1b1b);
+    background: var(--win-card, #fbfbfb);
+    border-radius: 8px;
+    box-shadow: var(--win-shadow);
+}
+.wt-icp__status { display: flex; align-items: center; justify-content: space-between; padding: 4px 12px 8px; }
+.wt-icp__pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 10px 4px 9px;
+    font-weight: 600;
+    background: rgba(52, 199, 89, .1);
+    border: 1px solid rgba(52, 199, 89, .4);
+    border-radius: 999px;
+}
+.wt-icp__dot { width: 8px; height: 8px; border-radius: 50%; background: #34c759; }
+.wt-icp__dot.is-busy { background: #ff9500; }
+.wt-icp__menu { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 4px; color: var(--win-text-2, #5d5d5d); }
+
+.wt-icp__tabs { display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--win-line); }
+.wt-icp__tabs span {
+    position: relative;
+    padding: 7px 9px 8px;
+    font-size: 12.5px;
+    color: var(--win-text-2, #5d5d5d);
+}
+.wt-icp__tabs span.is-active { font-weight: 600; color: var(--win-text, #1b1b1b); }
+.wt-icp__tabs span.is-active::after {
+    content: '';
+    position: absolute;
+    right: 9px;
+    bottom: -1px;
+    left: 9px;
+    height: 3px;
+    background: var(--win-accent, #0067c0);
+    border-radius: 3px;
+}
+
+.wt-icp__number {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 10px 12px 8px;
+    padding: 7px 10px;
+    background: #fff;
+    border: 1px solid #d6d6d6;
+    border-bottom-color: #8a8a8a;
+    border-radius: 4px;
+}
+.wt-icp__number span { min-height: 20px; font-size: 16px; font-weight: 600; letter-spacing: .01em; font-variant-numeric: tabular-nums; }
+.wt-icp__number small { font-size: 11.5px; color: var(--win-text-2, #5d5d5d); font-variant-numeric: tabular-nums; }
+
+.wt-icp__keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 0 12px; }
+.wt-icp__keys span {
+    display: grid;
+    place-items: center;
+    height: 34px;
+    font-size: 15px;
+    background: #fff;
+    border: 1px solid #e3e3e3;
+    border-radius: 4px;
+}
+.wt-icp__dial { display: flex; gap: 6px; padding: 8px 12px 0; }
+.wt-icp__note { margin: 8px 12px 0; font-size: 11.5px; color: var(--win-text-2, #5d5d5d); }
+
+.wt-icp-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 32px;
+    padding: 0 10px;
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--win-text, #1b1b1b);
+    background: #fff;
+    border: 1px solid #d6d6d6;
+    border-bottom-color: #b9b9b9;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background .1s ease;
+}
+.wt-icp-btn:hover { background: #f6f6f6; }
+.wt-icp-btn.is-on { color: var(--win-accent, #0067c0); background: #eaf2fb; border-color: #b9d4f1; }
+.wt-icp-btn.is-call { flex: 1 1 auto; color: #fff; background: #107c10; border-color: #107c10; }
+.wt-icp-btn.is-icon { width: 36px; padding: 0; }
+.wt-icp-btn.is-off { opacity: .45; cursor: default; }
+.wt-icp-btn.is-end { width: calc(100% - 24px); margin: 10px 12px 0; color: #fff; background: #c42b1c; border-color: #c42b1c; }
+.wt-icp-btn.is-end:hover { background: #a82418; }
+.wt-icp-btn.is-primary { color: #fff; background: var(--win-accent, #0067c0); border-color: var(--win-accent, #0067c0); }
+.wt-icp-btn.is-primary:hover { background: #005fb8; }
+.wt-icp-btn.is-answer { flex: 1 1 0; color: #fff; background: #107c10; border-color: #107c10; }
+.wt-icp-btn.is-answer:hover { background: #0e6b0e; }
+.wt-icp-btn.is-decline { flex: 1 1 0; color: #fff; background: #c42b1c; border-color: #c42b1c; }
+.wt-icp-btn.is-decline:hover { background: #a82418; }
+
+.wt-icp__talk { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 2px 12px 0; }
+.wt-icp__ai {
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #8944ab;
+    background: rgba(175, 82, 222, .12);
+    border-radius: 999px;
+}
+.wt-icp__wave { display: flex; align-items: center; gap: 3px; height: 30px; }
+.wt-icp__wave i {
+    display: block;
+    width: 4px;
+    height: 6px;
+    background: #c9c9c9;
+    border-radius: 2px;
+    transition: background .2s ease;
+}
+.wt-icp__wave.is-on i { background: var(--win-accent, #0067c0); animation: wt-icp-wave .9s ease-in-out infinite; }
+@keyframes wt-icp-wave {
+    0%, 100% { height: 6px; }
+    50% { height: 26px; }
+}
+.wt-icp__who { font-size: 12.5px; font-weight: 600; }
+.wt-icp__mic { position: relative; display: flex; align-items: center; gap: 6px; width: 120px; color: var(--win-text-2, #5d5d5d); }
+.wt-icp__mic i { display: block; flex: 1 1 auto; height: 4px; background: #34c759; border-radius: 2px; transition: width .15s ease; }
+/* Кнопки разговора — значок над подписью, как в звонилках: три в ряд без
+   переносов подписи. */
+.wt-icp__actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; width: 100%; }
+.wt-icp__actions .wt-icp-btn {
+    flex-direction: column;
+    gap: 3px;
+    width: 100%;
+    min-height: 50px;
+    padding: 4px 2px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+.wt-icp__talk .wt-icp-btn.is-end { width: 100%; margin: 2px 0 0; }
+.wt-icp__transfer { position: relative; }
+.wt-icp__dir {
+    position: absolute;
+    right: -60px;
+    bottom: calc(100% + 6px);
+    z-index: 5;
+    width: 240px;
+    max-height: 280px;
+    padding: 4px;
+    overflow-y: auto;
+    background: #f9f9f9;
+    border-radius: 8px;
+    box-shadow: var(--win-shadow);
+}
+.wt-icp__dir-head { padding: 6px 8px 2px; font-size: 11px; color: var(--win-text-2, #5d5d5d); }
+.wt-icp__dir button {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    padding: 7px 8px;
+    font: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    background: none;
+    border: 0;
+    border-radius: 4px;
+}
+.wt-icp__dir button:hover { background: rgba(0, 0, 0, .05); }
+.wt-icp__dir b { font-weight: 400; color: var(--win-text-2, #5d5d5d); }
+
+.wt-icp__wrap { display: flex; flex-direction: column; gap: 8px; padding: 0 12px; }
+.wt-icp__wrap b { font-size: 14px; }
+.wt-icp__wrap span { font-size: 12.5px; line-height: 1.45; color: var(--win-text-2, #5d5d5d); }
+
+.wt-icp__levels { display: flex; flex-direction: column; gap: 6px; padding: 12px 12px 0; color: var(--win-text-2, #5d5d5d); }
+.wt-icp__levels span { display: flex; align-items: center; gap: 8px; }
+.wt-icp__levels i { position: relative; display: block; flex: 1 1 auto; height: 4px; background: #d6d6d6; border-radius: 2px; }
+.wt-icp__levels b { position: absolute; top: 0; left: 0; height: 100%; background: var(--win-accent, #0067c0); border-radius: 2px; }
+.wt-icp__foot {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 10px;
+    padding: 6px 12px;
+    font-size: 11px;
+    color: var(--win-text-2, #5d5d5d);
+    border-top: 1px solid var(--win-line);
+}
+.wt-icp__err { padding: 6px 12px 8px; font-size: 11.5px; color: #c42b1c; }
+
+/* ── «Входящий вызов» — справа внизу, над часами, как у MicroSIP ─────────── */
+.wt-icp-ring {
+    position: absolute;
+    right: 18px;
+    bottom: 18px;
+    z-index: 35;
+    width: 300px;
+    background: var(--win-card, #fbfbfb);
+    border-radius: 8px;
+    box-shadow: var(--win-shadow);
+    animation: wt-icp-in .32s cubic-bezier(.22, 1, .36, 1);
+}
+@keyframes wt-icp-in {
+    from { opacity: 0; transform: translateY(14px) scale(.97); }
+    to { opacity: 1; transform: none; }
+}
+.wt-icp-ring__body { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 16px 16px; }
+.wt-icp-ring__pulse {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    margin-bottom: 4px;
+    color: #fff;
+    background: #107c10;
+    border-radius: 50%;
+    animation: wt-icp-pulse 1.4s ease-out infinite;
+}
+@keyframes wt-icp-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(16, 124, 16, .45); }
+    80%, 100% { box-shadow: 0 0 0 14px rgba(16, 124, 16, 0); }
+}
+.wt-icp-ring__number { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.wt-icp-ring__line { font-size: 12.5px; color: var(--win-text-2, #5d5d5d); }
+.wt-icp-ring__wait { font-size: 11.5px; color: var(--win-text-2, #5d5d5d); }
+.wt-icp-ring__buttons { display: flex; gap: 8px; width: 100%; margin-top: 10px; }
+
+/* ── Панель задач Windows 11 ──────────────────────────────────────────── */
+.wt-taskbar {
+    position: relative;
+    z-index: 40;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    flex: 0 0 auto;
+    height: 48px;
+    padding: 0 8px;
+    background: rgba(238, 241, 246, .92);
+    -webkit-backdrop-filter: saturate(150%) blur(30px);
+    backdrop-filter: saturate(150%) blur(30px);
+    border-top: 1px solid rgba(0, 0, 0, .08);
+}
+.wt-taskbar__left { position: relative; justify-self: start; }
+.wt-taskbar__widget {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 40px;
+    padding: 0 10px 0 8px;
+    font: inherit;
+    text-align: left;
+    color: var(--win-text, #1b1b1b);
+    background: none;
+    border: 0;
+    border-radius: 4px;
+}
+.wt-taskbar__widget:hover,
+.wt-taskbar__widget.is-open { background: rgba(0, 0, 0, .05); }
+.wt-taskbar__widget svg { color: var(--win-accent, #0067c0); }
+.wt-taskbar__widget b { display: block; font-size: 12px; font-weight: 600; }
+.wt-taskbar__widget small { display: block; font-size: 11px; color: var(--win-text-2, #5d5d5d); }
+
+.wt-taskbar__apps { display: flex; gap: 4px; }
+.wt-taskbar__app {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    background: none;
+    border: 0;
+    border-radius: 4px;
+}
+.wt-taskbar__app:hover { background: rgba(255, 255, 255, .7); }
+.wt-taskbar__app.is-open::after {
+    content: '';
+    position: absolute;
+    bottom: 2px;
+    left: 50%;
+    width: 6px;
+    height: 3px;
+    background: #8a8a8a;
+    border-radius: 3px;
+    transform: translateX(-50%);
+    transition: width .2s ease, background .2s ease;
+}
+.wt-taskbar__app.is-active { background: rgba(255, 255, 255, .7); }
+.wt-taskbar__app.is-active::after { width: 16px; background: var(--win-accent, #0067c0); }
+.wt-taskbar__app.is-flash { animation: wt-taskbar-flash 1s ease-in-out infinite; }
+@keyframes wt-taskbar-flash {
+    0%, 100% { background: rgba(255, 255, 255, .3); }
+    50% { background: rgba(255, 140, 0, .55); }
+}
+
+.wt-taskbar__tray { display: flex; align-items: center; justify-self: end; gap: 2px; color: var(--win-text, #1b1b1b); }
+.wt-taskbar__tray-btn { display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 8px; border-radius: 4px; }
+.wt-taskbar__lang { padding: 0 8px; font-size: 12px; }
+.wt-taskbar__clock {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    height: 40px;
+    padding: 0 8px;
+    font-size: 12px;
+    line-height: 1.3;
+    font-variant-numeric: tabular-nums;
+}
+
+.wt-winmenu {
+    position: absolute;
+    bottom: 52px;
+    left: 0;
+    min-width: 280px;
+    padding: 4px;
+    background: rgba(249, 249, 249, .97);
+    -webkit-backdrop-filter: blur(30px);
+    backdrop-filter: blur(30px);
+    border-radius: 8px;
+    box-shadow: var(--win-shadow);
+    animation: wt-icp-in .2s cubic-bezier(.22, 1, .36, 1);
+}
+.wt-winmenu button {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    width: 100%;
+    padding: 8px 12px;
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    color: var(--win-text, #1b1b1b);
+    background: none;
+    border: 0;
+    border-radius: 4px;
+}
+.wt-winmenu button:hover { background: rgba(0, 0, 0, .05); }
+.wt-winmenu button small { font-size: 11.5px; color: var(--win-text-2, #5d5d5d); }
+.wt-winmenu button.is-danger { color: #c42b1c; }
+
+/* ── Уведомление Windows ──────────────────────────────────────────────── */
+.wt-wintoast {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    z-index: 36;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 364px;
+    padding: 12px 14px 14px;
+    background: rgba(249, 249, 249, .97);
+    -webkit-backdrop-filter: blur(30px);
+    backdrop-filter: blur(30px);
+    border-radius: 8px;
+    box-shadow: var(--win-shadow);
+    animation: wt-icp-in .36s cubic-bezier(.22, 1, .36, 1);
+}
+.wt-wintoast__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.wt-wintoast__app { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--win-text-2, #5d5d5d); }
+.wt-wintoast__app svg { color: var(--win-accent, #0067c0); }
+.wt-wintoast__x {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    font-size: 16px;
+    color: var(--win-text-2, #5d5d5d);
+    background: none;
+    border: 0;
+    border-radius: 4px;
+}
+.wt-wintoast__x:hover { background: rgba(0, 0, 0, .06); }
+.wt-wintoast__title { font-size: 14px; font-weight: 600; }
+.wt-wintoast__text { font-size: 13px; line-height: 1.45; color: #3d3d3d; }
+
+@media (prefers-reduced-motion: reduce) {
+    .wt-icp-ring, .wt-winmenu, .wt-wintoast { animation: none; }
+    .wt-icp-ring__pulse, .wt-icp__wave.is-on i, .wt-taskbar__app.is-flash { animation: none; }
+}
+
+/* ── Окна поверх рабочего стола: «Кто позвонит?», «Разбор звонка» ───────── */
+.wt-winlayer {
+    --win-accent: #0067c0;
+    --win-text: #1b1b1b;
+    --win-text-2: #5d5d5d;
+    position: fixed;
+    inset: 0;
+    z-index: 140;
+    pointer-events: none;
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    color: var(--win-text);
+}
+.wt-winlayer__smoke {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    pointer-events: auto;
+    background: rgba(0, 0, 0, .32);
+    animation: wt-win-fade .2s ease;
+}
+@keyframes wt-win-fade { from { opacity: 0; } to { opacity: 1; } }
+.wt-winlayer__wait { padding: 14px 20px; font-size: 14px; color: #fff; }
+.wt-windlg {
+    display: flex;
+    flex-direction: column;
+    width: min(460px, calc(100vw - 32px));
+    max-height: calc(100vh - 64px);
+    overflow: hidden;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .1), 0 32px 64px rgba(0, 0, 0, .24);
+    animation: wt-icp-in .3s cubic-bezier(.22, 1, .36, 1);
+}
+.wt-windlg.is-wide { width: min(560px, calc(100vw - 32px)); }
+.wt-windlg__body { display: flex; flex-direction: column; gap: 12px; padding: 24px 24px 20px; overflow-y: auto; }
+.wt-windlg__title { margin: 0; font-size: 20px; font-weight: 600; }
+.wt-windlg__text { margin: 0; font-size: 14px; line-height: 1.5; color: #3d3d3d; }
+/* Как в Windows: главная кнопка — слева, «Отмена» — справа. */
+.wt-windlg__foot {
+    display: flex;
+    flex-direction: row;
+    gap: 8px;
+    padding: 20px 24px;
+    background: #f3f3f3;
+    border-top: 1px solid rgba(0, 0, 0, .06);
+}
+.wt-winbtn {
+    flex: 1 1 0;
+    min-height: 32px;
+    padding: 0 12px;
+    font: inherit;
+    font-size: 14px;
+    color: var(--win-text);
+    background: #fdfdfd;
+    border: 1px solid rgba(0, 0, 0, .1);
+    border-bottom-color: rgba(0, 0, 0, .18);
+    border-radius: 4px;
+    cursor: pointer;
+}
+.wt-winbtn:hover { background: #f6f6f6; }
+.wt-winbtn.is-accent { color: #fff; background: var(--win-accent); border-color: var(--win-accent); }
+.wt-winbtn.is-accent:hover { background: #005fb8; }
+.wt-winbtn:disabled { opacity: .6; cursor: default; }
+
+.wt-windlg__options { display: flex; flex-direction: column; gap: 4px; }
+.wt-winradio {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    width: 100%;
+    padding: 10px 12px;
+    font: inherit;
+    text-align: left;
+    color: var(--win-text);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+}
+.wt-winradio:hover { background: rgba(0, 0, 0, .04); }
+.wt-winradio.is-on { background: #eaf2fb; border-color: #b9d4f1; }
+.wt-winradio i {
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    margin-top: 1px;
+    border: 1px solid #8a8a8a;
+    border-radius: 50%;
+}
+.wt-winradio.is-on i { border: 5px solid var(--win-accent); }
+.wt-winradio b { display: block; font-size: 14px; font-weight: 600; }
+.wt-winradio small { display: block; margin-top: 1px; font-size: 12.5px; color: var(--win-text-2); }
+
+.wt-windlg__score { display: flex; align-items: baseline; gap: 6px; }
+.wt-windlg__score b { font-size: 40px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.wt-windlg__score b.is-good { color: #107c10; }
+.wt-windlg__score b.is-mid { color: #c27c0e; }
+.wt-windlg__score b.is-low { color: #c42b1c; }
+.wt-windlg__score span { font-size: 14px; color: var(--win-text-2); }
+.wt-windlg__criteria { display: flex; flex-direction: column; }
+.wt-windlg__criterion { display: flex; gap: 16px; justify-content: space-between; padding: 9px 0; border-top: 1px solid #ececec; }
+.wt-windlg__criterion b { display: block; font-size: 13.5px; font-weight: 600; }
+.wt-windlg__criterion small { display: block; margin-top: 2px; font-size: 12.5px; line-height: 1.45; color: var(--win-text-2); }
+.wt-windlg__criterion em { flex: 0 0 auto; font-style: normal; font-weight: 600; font-variant-numeric: tabular-nums; }
+.wt-windlg__critical { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; font-size: 13px; color: #9f1c13; background: #fde7e9; border-radius: 6px; }
+
+.wt-winlayer__toast {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    width: 360px;
+    padding: 12px 14px;
+    font-size: 13px;
+    pointer-events: auto;
+    background: rgba(249, 249, 249, .97);
+    border-left: 3px solid #c42b1c;
+    border-radius: 8px;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .07), 0 16px 32px rgba(0, 0, 0, .16);
+    animation: wt-icp-in .3s cubic-bezier(.22, 1, .36, 1);
+}
+.wt-winlayer__toast b { font-size: 13px; }
+@media (prefers-reduced-motion: reduce) {
+    .wt-windlg, .wt-winlayer__toast, .wt-winlayer__smoke { animation: none; }
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   ДИСПЕТЧЕРСКАЯ — вкладка браузера в среде Windows (раздел «Тренажёр»)
+   ─────────────────────────────────────────────────────────────────────────
+   Владелец, 25.11.2026: в браузере смены три вкладки — «Обращения» и
+   «Обращения в Яндекс» в CRM и Диспетчерская. Стили кабинета — прежние, до
+   23.11.2026 (тогда рабочее место курса стало одной CRM).
+   ═════════════════════════════════════════════════════════════════════════ */
+.wt-fl {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    min-height: 100%;
+    background: #f5f4f2;
+    font-size: 13px;
+    color: #21201f;
+}
+.wt-fl .wt-mark { position: absolute; top: 8px; right: 132px; z-index: 6; }
+.wt-fl__side {
+    display: flex;
+    flex: 0 0 56px;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 0;
+    background: #f5f4f2;
+}
+.wt-fl__logo {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    margin-bottom: 8px;
+    border-radius: 9px;
+    background: #21201f;
+    color: #fff;
+}
+.wt-fl__nav {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    color: #6d6b68;
+}
+.wt-fl__nav:hover { background: rgba(0, 0, 0, .06); color: #21201f; }
+.wt-fl__nav.is-on { background: #e8e6e2; color: #21201f; }
+.wt-fl__side-foot { margin-top: auto; color: #a9a6a1; }
+.wt-fl__body { display: flex; flex: 1 1 auto; min-width: 0; flex-direction: column; }
+.wt-fl__head {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    gap: 12px;
+    padding: 12px 16px 10px 4px;
+}
+.wt-fl__head h1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+}
+.wt-fl__head h1 b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wt-fl__arrow { color: #a9a6a1; }
+.wt-fl__head-right { display: flex; align-items: center; gap: 10px; margin-left: auto; color: #6d6b68; }
+.wt-fl__park {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px 4px 4px;
+    border-radius: 9px;
+    background: #eceae6;
+}
+.wt-fl__park b {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    background: #dcd9d3;
+    font-size: 10.5px;
+    color: #4b4945;
+}
+.wt-fl__park span { display: flex; flex-direction: column; font-size: 11.5px; line-height: 1.25; color: #21201f; }
+.wt-fl__park small { font-size: 10.5px; color: #8f8c87; }
+.wt-fl__content {
+    flex: 1 1 auto;
+    min-height: 0;
+    margin: 0 12px 12px;
+    padding: 14px 16px 18px;
+    border-radius: 14px;
+    background: #fff;
+}
+.wt-fl__fabs { position: absolute; right: 16px; bottom: 14px; display: flex; gap: 8px; }
+.wt-fl__fab {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: #21201f;
+    color: #fff;
+}
+.wt-fl__fab--bell { background: #fc5230; }
+.wt-fl__fab i {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    padding: 0 4px;
+    border-radius: 7px;
+    background: #fc5230;
+    font-size: 9.5px;
+    font-style: normal;
+    font-weight: 700;
+    color: #fff;
+}
+.wt-fl__chip--period {
+    padding: 5px 11px;
+    border-radius: 8px;
+    background: #f0eeea;
+    font-size: 12px;
+    color: #4b4945;
+}
+.wt-fl__tiles {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0.95fr) minmax(0, 1.5fr) minmax(0, 1.15fr);
+    gap: 12px;
+    margin-top: 12px;
+}
+.wt-fl__tile {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: #f7f6f4;
+}
+.wt-fl__tile-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: #21201f;
+    text-align: left;
+}
+.wt-fl__tile-head svg { flex: 0 0 auto; }
+.wt-fl__tile-head.is-plain { cursor: default; }
+.wt-fl__tile-head svg:last-child { margin-left: -2px; color: #a9a6a1; }
+.wt-fl__big { display: flex; align-items: baseline; gap: 8px; font-size: 30px; font-weight: 600; }
+.wt-fl__big span { font-size: 12.5px; font-weight: 400; color: #6d6b68; }
+.wt-fl__legend { display: flex; flex-wrap: wrap; gap: 3px 10px; margin: 0; padding: 0; list-style: none; }
+.wt-fl__legend li { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: #6d6b68; }
+.wt-fl__legend i { width: 7px; height: 7px; border-radius: 2px; }
+.wt-fl__bars { display: flex; align-items: flex-end; gap: 5px; height: 54px; }
+.wt-fl__bars i { flex: 1 1 auto; border-radius: 3px 3px 0 0; }
+.wt-fl__mini { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.wt-fl__mini div { padding: 7px 9px; border-radius: 9px; background: #fff; }
+.wt-fl__mini span { display: block; font-size: 10.5px; color: #8f8c87; }
+.wt-fl__mini b { font-size: 15px; font-weight: 600; }
+.wt-fl__mini em { font-size: 11px; font-style: normal; color: #fc5230; }
+.wt-fl__loyalty { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
+.wt-fl__grade { min-width: 0; padding: 9px 10px; border-radius: 11px; background: #fff; }
+.wt-fl__grade.is-bronze { background: linear-gradient(160deg, #d9b6ad, #c39a90); color: #40241e; }
+.wt-fl__grade b { font-size: 12.5px; }
+.wt-fl__grade small { display: block; margin-bottom: 5px; font-size: 10px; opacity: .8; }
+.wt-fl__grade ul {
+    margin: 0;
+    padding-left: 13px;
+    list-style: disc;
+    font-size: 9.6px;
+    line-height: 1.5;
+}
+.wt-fl__grade li { overflow-wrap: break-word; }
+.wt-fl__grade small { overflow-wrap: break-word; }
+.wt-fl__grade b { overflow-wrap: break-word; }
+.wt-fl__tile--narrow { gap: 6px; }
+.wt-fl__dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.wt-fl__dot.is-red { background: #fc5230; }
+.wt-fl__dot.is-blue { background: #4060e3; }
+.wt-fl__row-link {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: #fff;
+    font-size: 11.5px;
+    color: #21201f;
+    text-align: left;
+}
+.wt-fl__row-link em {
+    flex: 0 0 auto;
+    padding: 1px 5px;
+    border-radius: 6px;
+    background: #fc5230;
+    font-size: 9.5px;
+    font-style: normal;
+    font-weight: 700;
+    color: #fff;
+}
+.wt-fl__row-link.is-off { color: #6d6b68; }
+.wt-fl__row-link.is-off em { background: #4060e3; }
+.wt-fl__banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-radius: 11px;
+    background: #029154;
+    font-size: 12px;
+    color: #fff;
+}
+.wt-fl__banner-btn {
+    margin-left: auto;
+    flex: 0 0 auto;
+    padding: 5px 12px;
+    border-radius: 8px;
+    background: #fff;
+    font-weight: 600;
+    color: #21201f;
+}
+.wt-fl__chips { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
+.wt-fl__pill {
+    padding: 4px 11px;
+    border-radius: 20px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #fff;
+}
+.wt-fl__pill.is-red { background: #fc5230; }
+.wt-fl__pill.is-orange { background: #fc9000; }
+.wt-fl__pill.is-blue { background: #4060e3; }
+.wt-fl__chips-sep { width: 4px; height: 4px; border-radius: 50%; background: #d3d0cb; }
+.wt-fl__seg {
+    padding: 4px 11px;
+    border-radius: 20px;
+    background: #fff;
+    border: 1px solid #eae7e2;
+    font-size: 11.5px;
+}
+.wt-fl__seg em { font-style: normal; color: #8f8c87; }
+.wt-fl__toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.wt-fl__search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px 5px 5px;
+    border-radius: 9px;
+    background: #f0eeea;
+    font-size: 11.5px;
+    color: #8f8c87;
+}
+.wt-fl__search b {
+    padding: 3px 8px;
+    border-radius: 7px;
+    background: #dcd9d3;
+    font-size: 11px;
+    color: #4b4945;
+}
+.wt-fl__filter-add,
+.wt-fl__filter-chip {
+    padding: 6px 11px;
+    border-radius: 9px;
+    background: #f0eeea;
+    font-size: 11.5px;
+    color: #4b4945;
+}
+.wt-fl__filter-chip { background: #e5e2dc; font-weight: 600; }
+.wt-fl__tools { display: flex; gap: 12px; margin-left: auto; font-size: 11.5px; color: #6d6b68; }
+.wt-fl__table { width: 100%; margin-top: 12px; border-collapse: collapse; font-size: 12px; }
+.wt-fl__table th {
+    padding: 8px 10px;
+    border-bottom: 1px solid #eeece8;
+    font-size: 11px;
+    font-weight: 400;
+    color: #8f8c87;
+    text-align: left;
+}
+.wt-fl__table td { padding: 9px 10px; border-bottom: 1px solid #f4f2ef; vertical-align: middle; }
+.wt-fl__table .is-right { text-align: right; }
+.wt-fl__table .is-bad { color: #cc2d32; }
+.wt-fl__table .is-good { color: #029154; }
+.wt-fl__table tr.is-open { cursor: pointer; }
+.wt-fl__table tr.is-open:hover { background: #faf9f7; }
+.wt-fl__table tr.is-park td:first-child { box-shadow: inset 3px 0 0 #fc9000; }
+.wt-fl__who { display: flex; align-items: center; gap: 9px; }
+.wt-fl__who span { display: flex; flex-direction: column; line-height: 1.3; }
+.wt-fl__who small { font-size: 10.5px; color: #8f8c87; }
+.wt-fl__ava { flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%; background: #e5e2dc; }
+.wt-fl__ava.is-big { width: 44px; height: 44px; border-radius: 10px; }
+.wt-fl__limit { margin-left: 6px; color: #8f8c87; }
+.wt-fl__note { margin: 12px 0 0; font-size: 11px; color: #8f8c87; }
+.wt-fl__sub { margin-bottom: 8px; font-size: 11.5px; color: #8f8c87; }
+.wt-fl__badge {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 8px 12px;
+    overflow-x: auto;
+    border-radius: 12px;
+    background: #f7f6f4;
+}
+.wt-fl__badge > span { flex: 0 0 auto; }
+.wt-fl__badge > b { margin: 0 16px 0 12px; font-size: 14px; font-weight: 600; }
+.wt-fl__badge > span {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0 16px;
+    border-left: 1px solid #e6e3de;
+    font-size: 13px;
+}
+.wt-fl__badge small { font-size: 10.5px; color: #8f8c87; }
+.wt-fl__acct {
+    flex-direction: row !important;
+    align-items: baseline;
+    gap: 6px !important;
+    
+    white-space: nowrap;
+}
+.wt-fl__acct small { flex-basis: 100%; }
+.wt-fl__acct u { color: #fc5230; text-decoration: none; }
+.wt-fl__acct em { font-style: normal; color: #fc5230; }
+.wt-fl__acct em.is-plus { color: #029154; }
+.wt-fl__warn { margin: 7px 0 0; font-size: 11.5px; color: #fc5230; }
+.wt-fl__tabs {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 16px;
+    margin-top: 10px;
+    overflow-x: auto;
+    border-bottom: 1px solid #eeece8;
+    scrollbar-width: thin;
+}
+.wt-fl__tabs button { flex: 0 0 auto; white-space: nowrap; }
+.wt-fl__tabs button {
+    padding: 6px 0 9px;
+    border-bottom: 2px solid transparent;
+    font-size: 12.5px;
+    color: #6d6b68;
+}
+.wt-fl__tabs button:hover { color: #21201f; }
+.wt-fl__tabs button.is-on { border-bottom-color: #21201f; color: #21201f; font-weight: 500; }
+.wt-fl__tab-body { padding-top: 14px; }
+.wt-fl__h3 {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0 0 8px;
+    font-size: 15px;
+    font-weight: 600;
+}
+.wt-fl__h3.is-caps { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: #6d6b68; }
+.wt-fl__hint { margin: 0 0 12px; font-size: 11.5px; color: #8f8c87; }
+.wt-fl__hint u { color: #4060e3; text-decoration: none; }
+.wt-fl__cols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 40px; }
+.wt-fl__field { display: grid; grid-template-columns: 150px minmax(0, 1fr); align-items: center; gap: 10px; padding: 5px 0; }
+.wt-fl__field span { font-size: 11.5px; color: #6d6b68; }
+.wt-fl__field b {
+    padding: 7px 10px;
+    border-radius: 8px;
+    background: #f4f2ef;
+    font-size: 12.5px;
+    font-weight: 400;
+    color: #21201f;
+}
+.wt-fl__seg-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 12px; }
+.wt-fl__seg-row span { padding: 5px 12px; border-radius: 8px; background: #f0eeea; color: #6d6b68; }
+.wt-fl__seg-row span.is-on { background: #e5e2dc; color: #21201f; }
+.wt-fl__seg-row u { color: #4060e3; text-decoration: none; }
+.wt-fl__filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.wt-fl__filters span { padding: 5px 11px; border-radius: 8px; background: #f0eeea; font-size: 11.5px; color: #4b4945; }
+.wt-fl__check { display: flex; align-items: center; gap: 9px; font-size: 12px; }
+.wt-fl__check i {
+    display: grid;
+    place-items: center;
+    width: 19px;
+    height: 19px;
+    border-radius: 5px;
+    background: #fce000;
+    font-size: 11px;
+    font-style: normal;
+    color: #21201f;
+}
+.wt-fl__table--tx td:nth-child(6) { max-width: 210px; color: #6d6b68; }
+.wt-fl__income { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 16px; }
+.wt-fl__report { padding: 12px 14px; border-radius: 12px; background: #f7f6f4; }
+.wt-fl__report-row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 12px; }
+.wt-fl__report-row span { color: #4b4945; text-decoration: underline dotted #d3d0cb; }
+.wt-fl__report-row .is-good { color: #029154; }
+.wt-fl__report-row .is-bad { color: #cc2d32; }
+.wt-fl__report-row .is-zero { color: #8f8c87; }
+.wt-fl__charts { padding: 12px 14px; border-radius: 12px; background: #f7f6f4; }
+.wt-fl__chart { display: flex; align-items: flex-end; gap: 10px; height: 110px; padding: 0 6px; }
+.wt-fl__chart i { flex: 0 0 46px; border-radius: 4px 4px 0 0; }
+.wt-fl__chart-foot { margin: 6px 0 14px; font-size: 11px; color: #8f8c87; }
+.wt-fl__gps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.wt-fl__gps-tile { padding: 12px 14px; border: 1px solid #eeece8; border-radius: 12px; }
+.wt-fl__gps-tile span { font-size: 11.5px; color: #6d6b68; }
+.wt-fl__gps-tile b { display: block; margin-top: 10px; font-size: 22px; font-weight: 500; }
+.wt-fl__photo section { margin-bottom: 16px; }
+.wt-fl__shots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.wt-fl__shots figure { margin: 0; border: 1px solid #eeece8; border-radius: 11px; overflow: hidden; }
+.wt-fl__shots figcaption { padding: 7px 10px; font-size: 11.5px; }
+.wt-fl__shot {
+    height: 96px;
+    background: repeating-linear-gradient(135deg, #ecebe8 0 10px, #e3e1dd 10px 20px);
+}
+.wt-fl__empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 54px 20px;
+    text-align: center;
+}
+.wt-fl__empty b { font-size: 16px; font-weight: 600; }
+.wt-fl__empty span { max-width: 420px; font-size: 12px; color: #8f8c87; }
+.wt-fl__yellow {
+    margin-top: 10px;
+    padding: 8px 18px;
+    border-radius: 9px;
+    background: #fce000;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: #21201f;
+}
+.wt-fl__wa {
+    display: inline-block;
+    margin-top: 16px;
+    padding: 8px 14px;
+    border-radius: 9px;
+    background: #029154;
+    font-size: 12px;
+    color: #fff;
+}
+.wt-fl--picker { align-items: center; justify-content: center; }
+.wt-fl__picker { display: flex; align-items: center; gap: 60px; }
+.wt-fl__picker h2 { margin: 0; font-size: 22px; font-weight: 600; }
+.wt-fl__picker-list { display: flex; flex-direction: column; gap: 4px; width: 260px; }
+.wt-fl__picker-search {
+    padding: 7px 12px;
+    margin-bottom: 6px;
+    border-radius: 9px;
+    background: #eceae6;
+    font-size: 12px;
+    color: #8f8c87;
+}
+.wt-fl__picker-list button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 9px;
+    border-radius: 10px;
+    text-align: left;
+}
+.wt-fl__picker-list button:hover { background: #f0eeea; }
+.wt-fl__picker-list button.is-on { background: #e8e6e2; }
+.wt-fl__picker-list b {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: #dcd9d3;
+    font-size: 11px;
+    color: #4b4945;
+}
+.wt-fl__picker-list span { display: flex; flex-direction: column; font-size: 12.5px; line-height: 1.3; }
+.wt-fl__picker-list small { font-size: 10.5px; color: #8f8c87; }
+@media (max-width: 1023px) {
+    .wt-fl__tiles { grid-template-columns: 1fr 1fr; }
+    .wt-fl__cols,
+    .wt-fl__income { grid-template-columns: minmax(0, 1fr); }
+    .wt-fl__gps,
+    .wt-fl__shots { grid-template-columns: 1fr 1fr; }
+    .wt-fl__field { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+    .wt-fl .wt-mark { right: 10px; }
+}
+.wt-fl__icon-btn {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    color: #6d6b68;
+}
+.wt-fl__icon-btn:hover { background: #eceae6; color: #21201f; }
+.wt-fl__submenu {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 56px;
+    z-index: 7;
+    display: flex;
+    width: 210px;
+    flex-direction: column;
+    padding: 12px 8px;
+    background: #fff;
+    box-shadow: 6px 0 24px rgba(15, 23, 42, .12);
+}
+.wt-fl__submenu-head {
+    padding: 6px 10px 10px;
+    font-size: 11px;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: #8f8c87;
+}
+.wt-fl__submenu button {
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 12.5px;
+    text-align: left;
+}
+.wt-fl__submenu button:hover { background: #f4f2ef; }
+.wt-fl__overlay {
+    position: absolute;
+    top: 50px;
+    right: 16px;
+    z-index: 8;
+    display: flex;
+    width: 340px;
+    max-height: calc(100% - 80px);
+    flex-direction: column;
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 18px 44px rgba(15, 23, 42, .2);
+}
+.wt-fl__overlay.is-wide { width: 560px; }
+.wt-fl__overlay header {
+    display: flex;
+    align-items: center;
+    padding: 11px 14px;
+    border-bottom: 1px solid #eeece8;
+    font-size: 13.5px;
+    font-weight: 600;
+}
+.wt-fl__overlay header button { margin-left: auto; color: #8f8c87; }
+.wt-fl__overlay-body { min-height: 0; overflow: auto; padding: 12px 14px 14px; }
+.wt-fl__overlay-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.wt-fl__filters-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+.wt-fl__filters-grid b { display: block; margin-bottom: 4px; font-size: 12px; }
+.wt-fl__filters-grid ul { margin: 0; padding-left: 14px; font-size: 11px; line-height: 1.55; color: #6d6b68; }
+.wt-fl__checklist { margin: 0; padding: 0; list-style: none; }
+.wt-fl__checklist li { display: flex; align-items: center; gap: 9px; padding: 6px 0; font-size: 12.5px; }
+.wt-fl__checklist i {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    border: 1px solid #dfdcd6;
+    border-radius: 4px;
+}
+.wt-fl__checklist i.is-on { border-color: #fce000; background: #fce000; }
+.wt-fl__search-big {
+    padding: 9px 12px;
+    border: 1px solid #dfdcd6;
+    border-radius: 8px;
+    font-size: 12.5px;
+    color: #a9a6a1;
+}
+.wt-fl__found {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    margin-top: 10px;
+    padding: 8px;
+    border-radius: 10px;
+    text-align: left;
+}
+.wt-fl__found:hover { background: #f4f2ef; }
+.wt-fl__found span { display: flex; flex-direction: column; font-size: 12.5px; line-height: 1.3; }
+.wt-fl__found small { font-size: 11px; color: #8f8c87; }
+.wt-fl__notice { padding: 9px 0; border-bottom: 1px solid #f4f2ef; }
+.wt-fl__notice b { display: block; font-size: 12.5px; font-weight: 500; }
+.wt-fl__notice small { font-size: 11px; color: #8f8c87; }
+.wt-fl__block { margin-bottom: 16px; }
+.wt-fl__block .wt-fl__cols { gap: 2px 40px; }
+.wt-fl__totals {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: #f7f6f4;
+}
+.wt-fl__totals span { display: block; font-size: 11px; color: #8f8c87; }
+.wt-fl__totals b { font-size: 15px; font-weight: 600; }
+.wt-fl__changes { max-width: 520px; }
+.wt-fl__change { padding: 9px 0; border-bottom: 1px solid #f4f2ef; }
+.wt-fl__change b { display: block; font-size: 12.5px; font-weight: 500; }
+.wt-fl__change span { font-size: 11px; color: #8f8c87; }
+.wt-fl__status { padding: 3px 9px; border-radius: 20px; font-size: 11px; }
+.wt-fl__status.is-ok { background: #e3fff0; color: #1d7a4f; }
+.wt-fl__status.is-off { background: #f0eeea; color: #6d6b68; }
+.wt-fl__status.is-wait { background: #fff3df; color: #8a5d16; }
+.wt-fl__grades { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.wt-fl__grades .wt-fl__grade { padding: 14px 16px; }
+.wt-fl__grades .wt-fl__grade ul { font-size: 11.5px; }
+.wt-fl__form { max-width: 520px; }
+.wt-fl__tools button { font-size: 11.5px; color: #6d6b68; }
+.wt-fl__tools button:hover { color: #21201f; }
+@media (max-width: 1023px) {
+    .wt-fl__overlay { right: 8px; left: 8px; width: auto; }
+    .wt-fl__overlay.is-wide { width: auto; }
+    .wt-fl__filters-grid { grid-template-columns: minmax(0, 1fr); }
+    .wt-fl__totals { grid-template-columns: 1fr 1fr; }
+    .wt-fl__grades { grid-template-columns: minmax(0, 1fr); }
+    .wt-fl__submenu { left: 54px; width: 180px; }
+}
+.wt-fl__search input,
+.wt-fl__search-big input {
+    min-width: 0;
+    flex: 1 1 auto;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: 11.5px;
+    color: #21201f;
+    outline: none;
+}
+.wt-fl__search-big {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    border: 1px solid #dfdcd6;
+    border-radius: 8px;
+}
+.wt-fl__search-big b {
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: #f0eeea;
+    font-size: 11px;
+    color: #4b4945;
+}
+.wt-fl__search-big input { font-size: 12.5px; }
+.wt-fl__hits { margin-top: 8px; }
+.wt-fl__filters-grid li button { font: inherit; color: #4060e3; text-align: left; }
+.wt-fl__checklist li button { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; }
+.wt-fl__card-foot { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.wt-fl__act {
+    padding: 8px 14px;
+    border: 1px solid #dfdcd6;
+    border-radius: 9px;
+    background: #fff;
+    font-size: 12px;
+    color: #4b4945;
+}
+.wt-fl__act:hover { border-color: #c3c0b9; }
+.wt-fl__hdr-btn {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0 16px;
+    border-left: 1px solid #e6e3de;
+    font-size: 13px;
+    color: #21201f;
+    text-align: left;
+}
+.wt-fl__hdr-btn small { font-size: 10.5px; color: #8f8c87; }
+.wt-fl__hdr-btn:hover { color: #4060e3; }
+.wt-fl__diag { margin: 0 0 10px; font-size: 14px; }
+.wt-fl__scroll-x { overflow-x: auto; overscroll-behavior-x: contain; }
+.wt-fl__table--wide { min-width: 1700px; }
+.wt-fl__table--wide th,
+.wt-fl__table--wide td { white-space: nowrap; }
+.wt-fl__link { font: inherit; color: #4060e3; text-decoration: underline; }
+.wt-fl__link:hover { color: #2f4fc0; }
+.wt-fl__docs { display: flex; flex-wrap: wrap; gap: 12px; padding-top: 4px; }
+.wt-fl__doc-add {
+    display: grid;
+    place-items: center;
+    width: 96px;
+    height: 96px;
+    border-radius: 12px;
+    background: #f0eeea;
+    font-size: 26px;
+    color: #8f8c87;
+}
+.wt-fl__doc-add:hover { background: #e8e6e2; }
+.wt-fl__order {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) auto;
+    gap: 16px;
+    align-items: start;
+}
+.wt-fl__ord-head { padding: 14px 16px; border-radius: 14px; }
+.wt-fl__ord-head.is-done { background: #e6f6ec; }
+.wt-fl__ord-head.is-cancelled { background: #fdeceb; }
+.wt-fl__ord-head > b { display: block; margin-bottom: 10px; font-size: 14px; }
+.wt-fl__ord-who { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; font-size: 13px; }
+.wt-fl__ord-map {
+    height: 120px;
+    margin: 12px 0;
+    border-radius: 10px;
+    background: repeating-linear-gradient(135deg, #eceae6 0 12px, #e3e1dd 12px 24px);
+}
+.wt-fl__ord-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 0;
+    border-bottom: 1px solid #f0eeea;
+    font-size: 12.5px;
+}
+.wt-fl__ord-row span { color: #6d6b68; }
+.wt-fl__ord-row b { font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+.wt-fl__ord-row.is-open b { color: #21201f; }
+.wt-fl__ord-main { min-width: 0; }
+.wt-fl__ord-block-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 18px 0 4px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #eeece8;
+    font-size: 15px;
+    font-weight: 600;
+}
+.wt-fl__ord-block-head:first-child { margin-top: 0; }
+.wt-fl__chip { padding: 4px 11px; border-radius: 8px; background: #f0eeea; font-size: 11.5px; font-weight: 400; }
+.wt-fl__stages { margin: 2px 0 6px; border-radius: 10px; background: #f7f6f4; }
+.wt-fl__stages.is-inline { margin-bottom: 10px; }
+.wt-fl__stage {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #efedea;
+    font-size: 12.5px;
+}
+.wt-fl__stage:last-child { border-bottom: 0; }
+.wt-fl__stage span { display: flex; flex-direction: column; }
+.wt-fl__stage i { font-size: 10.5px; font-style: normal; color: #8f8c87; }
+.wt-fl__stage b { font-weight: 400; }
+.wt-fl__ord-comment {
+    min-height: 76px;
+    margin-top: 8px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #f4f2ef;
+    font-size: 12.5px;
+    color: #a9a6a1;
+}
+.wt-fl__ord-foot { display: flex; gap: 8px; margin-top: 10px; }
+.wt-fl__ord-side { display: flex; }
+@media (max-width: 1023px) {
+    .wt-fl__order { grid-template-columns: minmax(0, 1fr); }
+    .wt-fl__hdr-btn { padding: 0 10px; }
+}
+
+/* ── Барс-помощник в среде Windows ────────────────────────────────────────
+   Слева внизу над панелью задач; переставляется мышью; облачко над ним. */
+.wt-buddy {
+    position: absolute;
+    left: 14px;
+    bottom: 12px;
+    z-index: 34;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    width: 280px;
+    pointer-events: none;
+}
+.wt-buddy.is-placed { bottom: auto; }
+.wt-buddy__cloud {
+    position: relative;
+    width: 100%;
+    padding: 10px 12px 12px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--win-text, #1b1b1b);
+    pointer-events: auto;
+    background: rgba(249, 249, 249, .97);
+    -webkit-backdrop-filter: blur(30px);
+    backdrop-filter: blur(30px);
+    border-radius: 8px;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .07), 0 12px 28px rgba(0, 0, 0, .16);
+    animation: wt-icp-in .3s cubic-bezier(.22, 1, .36, 1);
+}
+.wt-buddy__cloud::after {
+    content: '';
+    position: absolute;
+    bottom: -6px;
+    left: 30px;
+    width: 12px;
+    height: 12px;
+    background: inherit;
+    border-right: 1px solid rgba(0, 0, 0, .07);
+    border-bottom: 1px solid rgba(0, 0, 0, .07);
+    transform: rotate(45deg);
+}
+.wt-buddy__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: -2px 0 2px;
+    font-size: 11.5px;
+    color: var(--win-text-2, #5d5d5d);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+}
+.wt-buddy__head i { font-style: normal; letter-spacing: -1px; }
+.wt-buddy__cloud b { display: block; margin-bottom: 2px; font-size: 13.5px; }
+.wt-buddy__cloud p { margin: 0; color: #3d3d3d; }
+.wt-buddy__leo {
+    position: relative;
+    width: 72px;
+    aspect-ratio: 120 / 132;
+    padding: 0;
+    pointer-events: auto;
+    cursor: grab;
+    touch-action: none;
+    background: none;
+    border: 0;
+    filter: drop-shadow(0 8px 12px rgba(0, 0, 0, .18));
+    animation: wt-hover 3.4s ease-in-out infinite;
+}
+.wt-buddy__leo:active { cursor: grabbing; }
+.wt-buddy__leo .wt-helper__leo-layer { position: absolute; inset: 0; display: flex; justify-content: center; }
+.wt-buddy__leo .wt-leo { width: 100%; }
+@media (prefers-reduced-motion: reduce) {
+    .wt-buddy__leo, .wt-buddy__cloud { animation: none; }
+}

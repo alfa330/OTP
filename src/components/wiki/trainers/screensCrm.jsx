@@ -1,7 +1,11 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 
 import BrowserChrome from './BrowserChrome';
 import CallPanel from './CallPanel';
+import IcorePhone, { IncomingCall, useDrag } from './IcorePhone';
+import WinDesktop from './WinDesktop';
+import FleetApp, { fleetUrl } from './screensFleet';
+import { applyEdit } from './fleetCase.js';
 import { DIRECTORY } from './callDirectory.js';
 import CrmFrame from './crmFrame';
 import CrmShell from './crmShell';
@@ -167,31 +171,167 @@ const CrmApp = ({ ui }) => {
  * Плашка звонка стоит ПОВЕРХ окна: во время разговора оператор листает CRM,
  * и кнопки «Удержание» и «Перевод» обязаны оставаться под рукой.
  */
+/* ── Вкладки браузера в среде Windows ───────────────────────────────────────
+   Владелец, 25.11.2026: «должны быть три вкладки — одна для обращений, другая
+   для обращений в Яндекс и ещё одна для Диспетчерской». Две первые — одна и та
+   же CRM, но у каждой вкладки своя страница: «Обращения» помнит форму и
+   список, «Обращения в Яндекс» — свой список и переписку. Поля «где мы» в мире
+   общие (CRM одна), поэтому при смене вкладки текущие уходят в tabPages, а у
+   новой — восстанавливаются (впервые — стартовая страница вкладки). */
+const PAGE_FIELDS = ['crmView', 'crmStub', 'crmShown', 'crmGroups', 'crmMenuQuery', 'drvQuery', 'drvSearched',
+    'drvOpenId', 'drvOpenNumber', 'drvTab', 'drvModal', 'drvOrder', 'drvOpenedAt', 'yaOpen', 'yaFilter'];
+const PAGE_BLANK = {
+    crmStub: null, crmShown: null, crmMenuQuery: '', drvQuery: '', drvSearched: null, drvOpenId: null,
+    drvOpenNumber: null, drvTab: 'general', drvModal: null, drvOrder: null, drvOpenedAt: null, yaOpen: null, yaFilter: null,
+};
+const TAB_START = {
+    crm: { ...PAGE_BLANK, crmView: 'request_new', crmGroups: ['tickets'] },
+    crm_ya: { ...PAGE_BLANK, crmView: 'ya_list', crmGroups: ['support'] },
+};
+const pageOf = (world) => Object.fromEntries(PAGE_FIELDS.map((key) => [key, world[key]]));
+
+/** Переход на вкладку next: что записать в мир (null — уже там). */
+export const switchTabPatch = (world, next) => {
+    const current = world.tab || 'crm';
+    if (next === current) return null;
+    const pages = { ...(world.tabPages || {}) };
+    if (current !== 'fleet') pages[current] = pageOf(world);
+    const restore = next === 'fleet' ? {} : (pages[next] || TAB_START[next] || {});
+    return { tab: next, tabPages: pages, ...restore };
+};
+
+/** Вкладки окна браузера среды Windows: заголовок каждой — по её странице. */
+export const windowsTabs = (world) => {
+    const pageFor = (id) => (id === (world.tab || 'crm') ? world
+        : { ...world, ...((world.tabPages || {})[id] || TAB_START[id]) });
+    const tabs = [
+        { id: 'crm', title: crmTitle(pageFor('crm')), icon: 'crm' },
+        { id: 'crm_ya', title: crmTitle(pageFor('crm_ya')), icon: 'crm' },
+    ];
+    if (world.fleetCase) tabs.push({ id: 'fleet', title: 'Диспетчерская', icon: 'fleet' });
+    return tabs;
+};
+
+/* Уведомление при входе в смену — первое, что видно в среде Windows. */
+const SHIFT_TOAST = {
+    app: 'Тренажёр',
+    title: 'Вы на линии водителей',
+    text: 'Входящий придёт в iCORE Phone через несколько секунд. Ответьте, выслушайте водителя '
+        + 'и найдите его в CRM по номеру — правда о его деле в карточке.',
+};
+
+/**
+ * Среда Windows (владелец, 25.11.2026): браузер с CRM на весь экран, поверх —
+ * iCORE Phone, внизу панель задач. Окно телефона перетаскивается за заголовок
+ * и сворачивается на панель задач; на входящий оно открывается само — звонок
+ * пропустить нельзя. Окно «Входящий вызов» — слева от телефона.
+ */
+const WinDesk = ({
+    world, crm, onCall, voice, aiSpeaking, micLevel, micError, onFinishAttempt, desktopMenu, buddy,
+}) => {
+    const call = world.call || {};
+    const [phoneOpen, setPhoneOpen] = useState(true);
+    const [toast, setToast] = useState(SHIFT_TOAST);
+    const { pos, handlers } = useDrag(null);
+    const ringing = call.state === 'ringing';
+
+    // Входящий: телефон открывается сам, а уведомление уступает место окну
+    // «Входящий вызов» — оба живут справа внизу.
+    useEffect(() => {
+        if (!ringing) return;
+        setPhoneOpen(true);
+        setToast(null);
+    }, [ringing]);
+    useEffect(() => {
+        if (!toast) return undefined;
+        const id = setTimeout(() => setToast(null), 11000);
+        return () => clearTimeout(id);
+    }, [toast]);
+
+    const phoneStyle = pos ? { left: pos.left, top: pos.top, right: 'auto', bottom: 'auto' } : null;
+    return (
+        <WinDesktop
+            browser={crm}
+            phone={phoneOpen ? (
+                <IcorePhone
+                    call={call}
+                    onCall={onCall}
+                    directory={DIRECTORY}
+                    voice={voice}
+                    aiSpeaking={aiSpeaking}
+                    micLevel={micLevel}
+                    micError={micError}
+                    onFinishAttempt={onFinishAttempt}
+                    onMinimize={() => setPhoneOpen(false)}
+                    style={phoneStyle}
+                    dragHandlers={handlers}
+                />
+            ) : null}
+            ring={ringing ? <IncomingCall call={call} onCall={onCall} /> : null}
+            phoneOpen={phoneOpen}
+            onPhoneToggle={() => setPhoneOpen((open) => !open)}
+            ringing={ringing}
+            menu={desktopMenu || []}
+            toast={toast}
+            onToastClose={() => setToast(null)}
+            buddy={buddy}
+        />
+    );
+};
+
 export const DeskScreen = ({
     world, tap, target, browse, emit, onUi, misses, onCall, voice, aiSpeaking,
-    micLevel, micError, onRing, devMode,
+    micLevel, micError, onRing, devMode, environment = null, desktopMenu = null, onFinishAttempt = null,
+    buddy = null,
 }) => {
-    const tabs = [{ id: 'crm', title: crmTitle(world), icon: 'crm' }];
+    const windows = environment === 'windows';
+    const tab = windows ? (world.tab || 'crm') : 'crm';
+    const tabs = windows ? windowsTabs(world) : [{ id: 'crm', title: crmTitle(world), icon: 'crm' }];
+    const switchTab = (id) => {
+        const patch = switchTabPatch(world, id);
+        if (!patch || !browse) return;
+        if (emit) emit('ui.tab', { tab: id });
+        browse(patch);
+    };
+    /* Правки в учебной Диспетчерской — только над копией дела в попытке. */
+    const fleetAct = (what, args) => {
+        if (browse && world.fleetCase) browse({ fleetCase: applyEdit(world.fleetCase, what, args) });
+    };
     const ui = makeUi({ world, onUi, browse, emit, target, misses });
     /* Кнопки самого браузера («Назад», «Закрыть вкладку») — тем же путём, что
        кнопки CRM: на практике и в смене чужое нажатие не промах, а ловушка
        сценария объясняется везде. */
     const chromeTap = onUi ? (id) => onUi({ kind: 'act', id }) : tap;
+    const browser = (
+        <BrowserChrome
+            tap={chromeTap}
+            target={target}
+            tabs={tabs}
+            active={tab}
+            onSwitch={switchTab}
+            url={tab === 'fleet' ? fleetUrl(world) : crmUrl(world)}
+            variant={windows ? 'windows' : 'mac'}
+        >
+            {/* CRM не размонтируется при уходе на Диспетчерскую: фрейм со
+                стилями CRM грузился бы заново и мигал. */}
+            <CrmFrame title="Учебная CRM" hidden={tab === 'fleet'}
+                focusKey={target ? `${world.crmView}:${[].concat(target).join(',')}` : ''}>
+                <CrmApp ui={ui} />
+            </CrmFrame>
+            {tab === 'fleet' && world.fleetCase
+                ? <FleetApp world={world} go={browse} emit={emit || (() => {})} act={fleetAct} /> : null}
+        </BrowserChrome>
+    );
+    if (windows) {
+        return (
+            <WinDesk world={world} crm={browser} onCall={onCall} voice={voice} aiSpeaking={aiSpeaking}
+                micLevel={micLevel} micError={micError} onFinishAttempt={onFinishAttempt}
+                desktopMenu={desktopMenu} buddy={buddy} />
+        );
+    }
     return (
         <div className="wt-desk__inner">
-            <BrowserChrome
-                tap={chromeTap}
-                target={target}
-                tabs={tabs}
-                active="crm"
-                onSwitch={() => {}}
-                url={crmUrl(world)}
-            >
-                <CrmFrame title="Учебная CRM"
-                    focusKey={target ? `${world.crmView}:${[].concat(target).join(',')}` : ''}>
-                    <CrmApp ui={ui} />
-                </CrmFrame>
-            </BrowserChrome>
+            {browser}
 
             {onCall ? (
                 <CallPanel

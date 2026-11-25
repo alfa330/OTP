@@ -521,6 +521,37 @@ SCENARIOS = {
 
 DEFAULT = "payout_angry"
 
+
+# ── Слепки дел ───────────────────────────────────────────────────────────────
+# Вторая половина сценария: данные водителя, которые стажёр видит в учебной CRM
+# и по которым обязан проверить слова ИИ-водителя (cases/README.md). Файл — по
+# ключу сценария; ключ берётся ТОЛЬКО из SCENARIOS, поэтому путь к файлу снаружи
+# не подставить.
+_CASES_DIR = __import__('pathlib').Path(__file__).resolve().parent / 'cases'
+
+
+def load_case(key: str) -> dict | None:
+    """Слепок дела целиком (public + private) или None, если сценария нет."""
+    if key not in SCENARIOS:
+        return None
+    path = _CASES_DIR / f'{key}.json'
+    if not path.is_file():
+        return None
+    import json
+    with path.open(encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def public_case(key: str) -> dict | None:
+    """То, что видит браузер: ключ, версия и public — и ничего больше.
+
+    private (в чём причина, что стажёр обязан сделать) остаётся на сервере:
+    иначе ответ читался бы из devtools за пять секунд."""
+    case = load_case(key)
+    if case is None:
+        return None
+    return {'key': key, 'version': case.get('version'), **(case.get('public') or {})}
+
 # Рамка для озвучки: модель разговорная, а не диктор. Без этой строки она
 # начинает ОТВЕЧАТЬ на поданный текст вместо того, чтобы его произнести.
 SAY_EXACTLY = "Произнеси ровно этот текст и ничего больше, без комментариев:\n\n"

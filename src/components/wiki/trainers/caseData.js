@@ -165,7 +165,7 @@ const fromFleetContract = (source) => {
 };
 
 /* Форма кабинета узнаётся по строковым суммам ведомости или журналу GPS. */
-const isFleetContract = (source) => Array.isArray(source.gps_log)
+export const isFleetContract = (source) => Array.isArray(source.gps_log)
     || list(source.transactions).some((t) => typeof t.sum === 'string');
 
 /* Точка во времени для строки: ISO со сдвигом, день для фильтра, подпись. */

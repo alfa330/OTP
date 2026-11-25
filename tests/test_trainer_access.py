@@ -8,6 +8,7 @@
 
 import contextlib
 import re
+import json
 import unittest
 from pathlib import Path
 from tests import source_cache
@@ -204,6 +205,33 @@ class AccessTest(unittest.TestCase):
         ))
         response = app.test_client().get('/api/trainer/scenarios')
         self.assertEqual(404, response.status_code)
+
+
+class CaseTest(unittest.TestCase):
+    """Дело водителя для учебной CRM: только public, только свои сценарии."""
+
+    def test_every_scenario_has_its_case_and_only_public_leaves(self):
+        from voice_trainer import scenarios
+        client = client_for('trainer')
+        for key in scenarios.SCENARIOS:
+            response = client.get(f'/api/trainer/cases/{key}')
+            self.assertEqual(200, response.status_code, key)
+            data = response.get_json()
+            self.assertEqual(key, data['key'])
+            self.assertNotIn('private', data, 'ответ дела ушёл в браузер')
+            for leak in ('answer', 'checks', 'root_cause'):
+                self.assertNotIn(leak, json.dumps(data, ensure_ascii=False), f'{key}: {leak}')
+            # Звонок приходит с номера водителя из его же карточки.
+            self.assertEqual(data['call']['phone'], data['contractor']['phone'], key)
+
+    def test_unknown_key_and_path_tricks_are_404(self):
+        client = client_for('trainer')
+        for key in ('nope', '..%2Fschema', 'README', 'payout_angry.json'):
+            self.assertEqual(404, client.get(f'/api/trainer/cases/{key}').status_code, key)
+
+    def test_case_is_behind_the_section_gate(self):
+        response = client_for('operator').get('/api/trainer/cases/payout_angry')
+        self.assertEqual(403, response.status_code)
 
 
 class PingTest(unittest.TestCase):

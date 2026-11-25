@@ -11,7 +11,8 @@
  */
 
 import { emptyCall } from './callMachine.js';
-import { prepareCase } from './caseData.js';
+import { isFleetContract, prepareCase } from './caseData.js';
+import { prepareFleetCase } from './fleetCase.js';
 import { emptyForm } from './crmModel.js';
 import { emptyYaForm } from './crmYandex.js';
 import { CRM_PEOPLE, DEFAULT_CASE } from './crmPeople.js';
@@ -22,6 +23,20 @@ export { emptyForm };
  * Собрать мир. caseData — дело героя; не приехал — берём учебное. Остальные
  * водители учебной CRM — всегда свои: по ним идут курс и аттестация.
  */
+/* Стартовая страница Диспетчерской (вкладка 'fleet' среды Windows). */
+const FLEET_START = {
+    fleetView: 'contractors',
+    fleetTab: 'details',
+    // Фильтры кабинета накапливаются между переходами, как в настоящем.
+    fleetFilters: [],
+    fleetPanel: null,
+    fleetMenu: null,
+    fleetQuery: '',
+    fleetOpenId: null,
+    fleetOrderId: null,
+    fleet404: false,
+};
+
 export const createDeskWorld = ({ today, caseData }) => {
     const prepared = prepareCase(caseData || DEFAULT_CASE, today);
     const heroId = prepared.contractor?.id;
@@ -31,10 +46,17 @@ export const createDeskWorld = ({ today, caseData }) => {
     const clock = new Date();
     const two = (value) => String(value).padStart(2, '0');
 
+    /* Дело в форме кабинета (дела голосового тренажёра) открывается и в
+       Диспетчерской — третьей вкладке браузера среды Windows. */
+    const raw = caseData || DEFAULT_CASE;
+    const fleetCase = raw && isFleetContract(raw) ? prepareFleetCase(raw, today) : null;
+
     return {
         case: prepared,
         // Все водители учебной CRM: герой первым — у него учётка 50417.
         crmCases: [prepared, ...people],
+        // Диспетчерская: дело в форме кабинета или null (вкладки нет).
+        fleetCase,
 
         now: `${two(today.day)}.${two(today.month)}.${today.year} `
             + `${two(clock.getHours())}:${two(clock.getMinutes())}:${two(clock.getSeconds())}`,
@@ -43,8 +65,14 @@ export const createDeskWorld = ({ today, caseData }) => {
         nowMs: new Date(today.year, today.month - 1, today.day,
             clock.getHours(), clock.getMinutes()).getTime(),
 
-        // В окне браузера одна вкладка — CRM.
+        /* Вкладка браузера: 'crm' — «Обращения»; в среде Windows ещё 'crm_ya' —
+           «Обращения в Яндекс» и 'fleet' — Диспетчерская. Страница CRM у каждой
+           вкладки своя (tabPages), см. screensCrm.switchTab. */
         tab: 'crm',
+        tabPages: {},
+
+        // Где мы внутри Диспетчерской — только когда она есть: у курса её нет.
+        ...(fleetCase ? FLEET_START : {}),
 
         /* Где мы внутри CRM. Браузер оператора на смене открыт на «Создать
            обращение» — с него и начинаем. */
