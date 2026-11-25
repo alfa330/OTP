@@ -615,6 +615,11 @@ RECRUITING_RUNTIME_MAX_JOBS = 20
 
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
+# Сжатие gzip — ПЕРВЫМ after_request: Flask зовёт их в обратном порядке, поэтому оно идёт последним
+# и сжимает окончательный ответ. Раньше JSON сжимал Cloudflare у Render; шлюз в Yandex Cloud не
+# сжимает, и сетка «Графиков работы» шла 19 МБ — причины в common/http_compression.py.
+from common import http_compression  # noqa: E402
+http_compression.install(app)
 
 
 def _append_server_timing(name, duration_ms):
