@@ -55547,6 +55547,9 @@ try:
         sensitive_access_granted=_sensitive_access_granted_for_user,
         client_ip=_client_ip,
         excel_text_warning=_excel_suppress_number_as_text_warning,
+        # Подпись ссылок на вложения Syntony (driver_chats/syntony.py): <img> не несёт
+        # заголовок с токеном, поэтому пропуск — подпись в адресе, от общего секрета сервера.
+        media_secret=JWT_SECRET,
     ))
     logging.info("Раздел «Чаты водителей»: Blueprint подключён на /api/driver_chats")
 except Exception:

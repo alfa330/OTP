@@ -149,6 +149,26 @@ def operator_statuses_page(config, start, end=None, cursor=None, limit=1000, **k
     return get(config, '/operator-statuses', params, **kwargs)
 
 
+def file_link(config, message_id, **kwargs):
+    """Короткая ссылка на вложение сообщения (§3.5) → {url, expiresAt, mimeType, fileName}.
+
+    Ссылка живёт 5 минут, и хранить её нельзя: запрашивается, когда файл открывают
+    («Чаты водителей», driver_chats/syntony.py). Адрес обязан быть https на домене Syntony —
+    его отдают браузеру переадресацией, и посторонний хост или схема там недопустимы."""
+    payload = get(config, '/files/%s' % quote(str(message_id), safe=''), **kwargs)
+    url = str(payload.get('url') or '').strip()
+    try:
+        parsed = urlsplit(url)
+        ok = (parsed.scheme == 'https' and _on_syntony_domain(parsed.hostname)
+              and parsed.username is None and parsed.password is None
+              and parsed.port in (None, 443) and not any(ord(char) < 33 for char in url))
+    except ValueError:
+        ok = False
+    if not ok:
+        raise SyntonyHistoryError('bad_file_url', 200)
+    return dict(payload, url=url)
+
+
 def conversation_messages_page(config, conversation_id, cursor=None, limit=1000, **kwargs):
     """Все сообщения одного диалога (§3.2), страницы по курсору."""
     params = {'limit': int(limit)}

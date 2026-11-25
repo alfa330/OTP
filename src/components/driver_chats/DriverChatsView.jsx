@@ -18,13 +18,17 @@ import {
     todayISO, EXPORT_MAX_DAYS, KIND_TONE,
 } from './journalMeta';
 import { recallTabs, rememberTabs, sectionTabs } from './settingsMeta';
+import { absolutizeMediaLinks, driverKeyOf, handoffTexts } from './chatSource';
 
 /* Раздел «Чаты водителей» (задача #271).
  *
  * Оператор СЗоВ вводит номер телефона водителя, видит его переписку за двое
  * суток, открывает нужный чат, снимает скриншот средствами системы и жмёт
- * «Передан» — в этот же чат уходит внутренний комментарий Chat2Desk, который
- * водитель не видит, а чат-менеджер видит у себя в рабочем окне.
+ * «Передан». Пока переписка шла из Chat2Desk, в этот же чат уходил внутренний
+ * комментарий, который водитель не видит, а чат-менеджер видит у себя. С
+ * 25.11.2026 переписка — из Syntony (номера СЗоВ переехали туда 16–23.11), а у
+ * её API внутренних заметок нет: «Передан» остаётся отметкой в журнале и в
+ * ленте раздела (handoff_to_chat в /context, тексты — chatSource.js).
  *
  * ЧЕГО ЗДЕСЬ НАМЕРЕННО НЕТ:
  *
@@ -83,10 +87,11 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, userId 
        Держим до тех пор, пока та же заметка не приедет от вендора: id у копий
        один, и склейка идёт по нему.
 
-       Рядом с сообщением лежит clientId, и это НЕ перестраховка: адрес заметки —
-       парк, а парк у водителей общий (у «Ясной поляны» их тысячи). Без привязки
-       к водителю заметка, отправленная одному, показалась бы в чате следующего
-       найденного по тому же парку — и уехала бы туда на скриншоте. */
+       Рядом с сообщением лежит водитель (driverKeyOf: клиент Chat2Desk, а у Syntony —
+       номер), и это НЕ перестраховка: адрес заметки — парк, а парк у водителей
+       общий (у «Ясной поляны» их тысячи). Без привязки к водителю заметка,
+       отправленная одному, показалась бы в чате следующего найденного по тому же
+       парку — и уехала бы туда на скриншоте. */
     const [pendingNotes, setPendingNotes] = useState([]);
 
     const [handoffOpen, setHandoffOpen] = useState(false);
@@ -198,7 +203,8 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, userId 
                 setSearchError(data.error || 'Не удалось найти чаты');
                 return;
             }
-            const chats = data.chats || [];
+            // Вложения Syntony приходят адресом нашей ручки — дописываем к ним адрес API.
+            const chats = absolutizeMediaLinks(data.chats || [], apiBaseUrl);
             setLimitReached(false);
             setSearchError('');
             // Заметка доехала от вендора — своя копия больше не нужна. Ключ
@@ -217,6 +223,9 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, userId 
                 notFound: Boolean(data.not_found),
                 truncated: Boolean(data.truncated),
                 fetchedAt: data.fetched_at || null,
+                // Переписка Syntony в базе давно не пополнялась (сторож и вебхук молчат):
+                // свежего сообщения водителя на экране может не быть.
+                staleMinutes: typeof data.stale_minutes === 'number' ? data.stale_minutes : null,
             });
             if (refresh) {
                 // Открытый чат остаётся открытым. Съехать он может только если
@@ -259,10 +268,11 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, userId 
     const chats = useMemo(() => {
         const base = result.chats || [];
         if (!pendingNotes.length) return base;
+        const driver = driverKeyOf(result);
         return base.map((chat) => {
             const known = new Set((chat.messages || []).map((m) => m.id));
             const mine = pendingNotes
-                .filter((item) => item.clientId === result.clientId
+                .filter((item) => item.driver === driver
                     && !known.has(item.message.id)
                     && noteBelongsTo(item.message, chat))
                 .map((item) => item.message);
@@ -276,7 +286,7 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, userId 
                 last_at: messages[messages.length - 1]?.created || chat.last_at,
             };
         });
-    }, [result.chats, result.clientId, pendingNotes]);
+    }, [result, pendingNotes]);
 
     const activeChat = useMemo(
         () => chats.find((chat) => chatKey(chat) === activeKey) || chats[0] || null,
@@ -339,8 +349,9 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, userId 
                 }),
             });
             const data = await response.json().catch(() => ({}));
+            const texts = handoffTexts(context?.handoff_to_chat);
             if (!response.ok) {
-                toast(data.error || 'Не удалось отправить комментарий', 'error');
+                toast(data.error || texts.failed, 'error');
                 return;
             }
             setHandedOff((prev) => ({ ...prev, [chatKey(activeChat)]: true }));
@@ -355,15 +366,18 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, userId 
                 setPendingNotes((prev) => (
                     prev.some((item) => item.message.id === data.message.id)
                         ? prev
-                        : [...prev, { clientId: result.clientId, message: data.message }]));
+                        : [...prev, { driver: driverKeyOf(result), message: data.message }]));
             }
-            toast('Комментарий отправлен — он уже в ленте', 'success');
+            toast(texts.sent, 'success');
         } catch {
-            toast('Сеть недоступна. Комментарий не отправлен', 'error');
+            toast(context?.handoff_to_chat === true
+                ? 'Сеть недоступна. Комментарий не отправлен'
+                : 'Сеть недоступна. Отметка не сохранена', 'error');
         } finally {
             setHandoffSending(false);
         }
-    }, [activeChat, apiBaseUrl, handoffNote, handoffSending, headers, result, toast]);
+    }, [activeChat, apiBaseUrl, context?.handoff_to_chat, handoffNote, handoffSending, headers,
+        result, toast]);
 
     const snapshot = useMemo(() => (activeChat ? {
         messages: activeChat.messages || [],
@@ -420,6 +434,8 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, userId 
                             inputRef={inputRef}
                             leftToday={leftToday}
                             fetchedAt={result.fetchedAt}
+                            staleMinutes={result.staleMinutes}
+                            handoffToChat={context?.handoff_to_chat}
                         />
 
                         {searchError && (
@@ -503,6 +519,7 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, userId 
                 onSend={sendHandoff}
                 maxLength={context?.comment_max_length || 500}
                 authorName={context?.me?.name || ''}
+                subtitle={handoffTexts(context?.handoff_to_chat).subtitle}
             />
         </div>
     );
@@ -571,7 +588,10 @@ const SEARCH_STEPS = [
     },
     {
         title: 'Передайте чат-менеджеру',
-        text: 'Снимите экран средствами системы и нажмите «Передан» — в чат уйдёт внутренний комментарий, водитель его не увидит.',
+        /* У Syntony «Передан» остаётся отметкой в журнале раздела — в API нет внутренних
+           заметок; у Chat2Desk уходил в чат (textToChat, handoff_to_chat в /context). */
+        text: 'Снимите экран средствами системы и нажмите «Передан» — отметка с вашим комментарием сохранится в журнале раздела.',
+        textToChat: 'Снимите экран средствами системы и нажмите «Передан» — в чат уйдёт внутренний комментарий, водитель его не увидит.',
     },
 ];
 
@@ -584,7 +604,7 @@ const COLLAPSE = 'overflow-hidden transition-all duration-500'
     + ' ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none';
 
 const SearchStage = ({ compact, value, onChange, onSubmit, searching, inputRef,
-                       leftToday, fetchedAt }) => {
+                       leftToday, fetchedAt, staleMinutes = null, handoffToChat }) => {
     /* Рост поля при наведении курсора в него — та самая «небольшая анимация».
        Держим её состоянием, а не `focus-within`: у Tailwind нет варианта,
        который дотянулся бы отсюда и до ширины обёртки, и до тени, и до высоты
@@ -659,6 +679,14 @@ const SearchStage = ({ compact, value, onChange, onSubmit, searching, inputRef,
                     {Boolean(fetchedAt) && (
                         <span className="tabular-nums">Обновлено в {formatTime(fetchedAt)}</span>
                     )}
+                    {/* Только когда правда: переписка Syntony в базе не пополняется дольше
+                        10 минут. Иначе «обновлено» над лентой без свежих сообщений
+                        читалось бы как «водитель не писал». */}
+                    {typeof staleMinutes === 'number' && (
+                        <span className="tabular-nums text-amber-600">
+                            Syntony не отвечает {staleMinutes} мин — свежих сообщений может не быть
+                        </span>
+                    )}
                     {typeof leftToday === 'number' && leftToday <= 20 && (
                         <span className="tabular-nums text-amber-600">
                             Осталось поисков сегодня: {leftToday}
@@ -681,7 +709,9 @@ const SearchStage = ({ compact, value, onChange, onSubmit, searching, inputRef,
                                 </span>
                                 <span className="text-[13px] font-semibold text-slate-800">{step.title}</span>
                             </div>
-                            <p className="mt-1 text-[12px] leading-snug text-slate-500">{step.text}</p>
+                            <p className="mt-1 text-[12px] leading-snug text-slate-500">
+                                {handoffToChat === true && step.textToChat ? step.textToChat : step.text}
+                            </p>
                         </li>
                     ))}
                 </ol>
@@ -851,12 +881,13 @@ const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff,
 
 // ── Окно «Передан» ──────────────────────────────────────────────────────────
 
-const HandoffModal = ({ open, onClose, note, onNote, sending, onSend, maxLength, authorName }) => (
+const HandoffModal = ({ open, onClose, note, onNote, sending, onSend, maxLength, authorName,
+                        subtitle }) => (
     <IosModal
         open={open}
         onClose={onClose}
         title="Передать чат-менеджеру"
-        subtitle="В чат уйдёт внутренний комментарий. Водитель его не увидит"
+        subtitle={subtitle}
         footer={(
             <div className="flex justify-end gap-2">
                 <button type="button" onClick={onClose} disabled={sending} className={iosBtnSecondary}>

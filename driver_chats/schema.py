@@ -107,6 +107,13 @@ DDL = (
     # несколько. Отдельным ALTER, а не колонкой в CREATE TABLE: таблица уже
     # живёт на проде, и `CREATE TABLE IF NOT EXISTS` её не тронет.
     "ALTER TABLE dch_events ADD COLUMN IF NOT EXISTS channel_id BIGINT",
+    # Источник переписки (25.11.2026): чаты СЗоВ переехали из Chat2Desk в Syntony, а у Syntony
+    # канал и диалог — GUID строкой, в BIGINT-колонки Chat2Desk они не ложатся. Пусто в source —
+    # строка эпохи Chat2Desk. По этим полям отметка «Передан» и встаёт в ленту своего чата:
+    # в сам Syntony она не уходит (driver_chats/syntony.py).
+    "ALTER TABLE dch_events ADD COLUMN IF NOT EXISTS source TEXT",
+    "ALTER TABLE dch_events ADD COLUMN IF NOT EXISTS syntony_channel_id TEXT",
+    "ALTER TABLE dch_events ADD COLUMN IF NOT EXISTS syntony_conversation_id TEXT",
 
     # ── Кеш переписки ────────────────────────────────────────────────────────
     #

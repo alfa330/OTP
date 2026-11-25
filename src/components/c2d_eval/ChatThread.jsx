@@ -355,9 +355,11 @@ const ChatThread = forwardRef(function ChatThread({
                                     <Headset size={11} /> {'author' in m ? m.author : snapshot.operator_name}
                                 </div>
                             )}
+                            {/* Подпись — из сообщения, если источник её знает: у Syntony это
+                                ИИ-агент («Чаты водителей»), а не робот парка. Без неё — как было. */}
                             {auto && (
                                 <div className="mb-0.5 flex items-center gap-1 text-[11px] font-semibold text-slate-500">
-                                    <Bot size={11} /> Автоответ
+                                    <Bot size={11} /> {m.label || 'Автоответ'}
                                 </div>
                             )}
                             {note && (

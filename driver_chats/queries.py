@@ -749,12 +749,13 @@ _EVENT_INSERT_SQL = """
     INSERT INTO dch_events
         (kind, user_id, user_name, user_role, department_id, phone, client_id,
          channel_id, dialog_id, request_id, channel_name, comment_text,
-         c2d_message_id, messages_count, ip_address, user_agent)
+         c2d_message_id, messages_count, ip_address, user_agent,
+         source, syntony_channel_id, syntony_conversation_id)
     VALUES
         (%(kind)s, %(user_id)s, %(user_name)s, %(user_role)s, %(department_id)s,
          %(phone)s, %(client_id)s, %(channel_id)s, %(dialog_id)s, %(request_id)s,
          %(channel_name)s, %(comment_text)s, %(c2d_message_id)s, %(messages_count)s,
-         %(ip)s, %(ua)s)
+         %(ip)s, %(ua)s, %(source)s, %(syntony_channel_id)s, %(syntony_conversation_id)s)
     RETURNING id, created_at
 """
 
@@ -783,6 +784,11 @@ def log_event(cursor, ctx, kind, **fields):
         'messages_count': fields.get('messages_count'),
         'ip': fields.get('ip_address'),
         'ua': (fields.get('user_agent') or '')[:500] or None,
+        # Syntony (25.11.2026): канал и диалог — GUID строкой, у Chat2Desk их место —
+        # channel_id/dialog_id выше. source пуст у строк Chat2Desk.
+        'source': fields.get('source'),
+        'syntony_channel_id': fields.get('syntony_channel_id'),
+        'syntony_conversation_id': fields.get('syntony_conversation_id'),
     })
     row = cursor.fetchone()
     return {'id': row[0], 'created_at': row[1].isoformat() if row and row[1] else None}

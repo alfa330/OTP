@@ -23,6 +23,7 @@ tests/test_sensitive_section_qr_gate.py — там же, где гейты ви�
 """
 
 import json
+import os
 import re
 import sys
 from contextlib import contextmanager
@@ -49,6 +50,19 @@ from tests import source_cache
 APP_JSX = ROOT / 'src' / 'App.jsx'
 JOURNAL_META = ROOT / 'src' / 'components' / 'driver_chats' / 'journalMeta.js'
 VIEW_JSX = ROOT / 'src' / 'components' / 'driver_chats' / 'DriverChatsView.jsx'
+
+# Этот файл — про путь Chat2Desk. С 25.11.2026 раздел по умолчанию читает Syntony, если её
+# переписка идёт в базу (driver_chats/syntony.py), — то есть зависит от окружения машины, где
+# гоняют тесты. Путь Syntony — tests/test_driver_chats_syntony.py.
+_SOURCE_ENV = mock.patch.dict(os.environ, {'DRIVER_CHATS_SOURCE': 'chat2desk'})
+
+
+def setUpModule():
+    _SOURCE_ENV.start()
+
+
+def tearDownModule():
+    _SOURCE_ENV.stop()
 
 
 def ctx(role='operator', department_code='szov', direction_model=None, headed=()):
@@ -1414,8 +1428,13 @@ class VendorLagTests(unittest.TestCase):
         клиенту заметка, отправленная одному, показалась бы в чате следующего
         найденного по тому же парку — и уехала бы туда на скриншоте."""
         merge = self.view.split('const chats = useMemo(')[1].split('}, [')[0]
-        self.assertIn('item.clientId === result.clientId', merge)
+        # Водитель — клиент Chat2Desk, а у Syntony (25.11.2026) — номер: driverKeyOf
+        # (chatSource.js, правило под node --test). Ставит отметку тот же ключ.
+        self.assertIn('const driver = driverKeyOf(result);', merge)
+        self.assertIn('item.driver === driver', merge)
         self.assertIn('noteBelongsTo(item.message, chat)', merge)
+        handoff = self.view.split('const sendHandoff')[1].split('const snapshot')[0]
+        self.assertIn('driver: driverKeyOf(result)', handoff)
 
     def test_counter_agrees_with_what_the_thread_shows(self):
         """Заметка в ленте есть, а под ней «4 сообщ.» — и человек поверит

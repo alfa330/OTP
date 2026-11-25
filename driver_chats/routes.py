@@ -12,6 +12,7 @@ OPTIONS и первым делом отдаётся preflight, авториза�
     queries.py    SQL
     access.py     кто что может
     chat2desk.py  разговор с вендором
+    syntony.py    переписка Syntony из своей базы (источник с 25.11.2026)
     report.py     сборка книги xlsx
     routes.py     только разбор запроса и коды ответов
 
@@ -27,9 +28,11 @@ import logging
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, jsonify, redirect, request, send_file
 
-from . import access, chat2desk, queries, report, schema
+from syntony_chats import client as syntony_client
+
+from . import access, chat2desk, queries, report, schema, syntony
 
 XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -126,7 +129,7 @@ def extra_searches_note(person, extra, previous):
 
 def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                  resolve_requester, sensitive_access_granted,
-                                 client_ip=None, excel_text_warning=None):
+                                 client_ip=None, excel_text_warning=None, media_secret=None):
     """Собирает Blueprint раздела.
 
     sensitive_access_granted — (user_id) -> bool: подтверждена ли ТЕКУЩАЯ сессия
@@ -142,8 +145,13 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
     excel_text_warning — хелпер `<ignoredErrors>` для выгрузки. Без него книга
     соберётся, просто с зелёным уголком «Число сохранено как текст» на каждом
     телефоне.
+
+    media_secret — общий секрет сервера (JWT_SECRET), от которого подписываются
+    ссылки на вложения Syntony (syntony.py). Без него фото и файлы в ленте Syntony
+    не показываются — переписка показывается.
     """
     bp = Blueprint('driver_chats', __name__, url_prefix='/api/driver_chats')
+    media_key = syntony.media_key(media_secret)
 
     def _ip():
         try:
@@ -253,8 +261,11 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 DAILY_SEARCH_LIMIT, extra)
         else:
             reached = 'На сегодня исчерпан лимит поисков (%d).' % DAILY_SEARCH_LIMIT
+        # Про квоту Chat2Desk — только пока переписка оттуда: на Syntony поиск идёт по своей
+        # базе и квоты не тратит, и объяснение было бы неправдой.
         why = (' Лимит защищает общую квоту запросов к Chat2Desk, от которой '
-               'зависят табло и метрики отдела.')
+               'зависят табло и метрики отдела.'
+               if syntony.source() == syntony.SOURCE_CHAT2DESK else '')
         if access.can_receive_extra_searches(ctx) and extra < MAX_EXTRA_SEARCHES:
             left = MAX_EXTRA_SEARCHES - extra
             if left == 1:
@@ -292,9 +303,91 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             },
             'comment_max_length': chat2desk.MAX_COMMENT_LENGTH,
             'me': {'user_id': ctx['user_id'], 'name': ctx.get('name')},
+            # Откуда переписка и уходит ли «Передан» в сам чат: у Chat2Desk — внутренней
+            # заметкой, у Syntony — только отметкой в журнале и ленте раздела (syntony.py).
+            'source': syntony.source(),
+            'handoff_to_chat': syntony.source() == syntony.SOURCE_CHAT2DESK,
         }), 200
 
     # ── Поиск чатов водителя ─────────────────────────────────────────────────
+
+    def _search_syntony(ctx, raw_phone, phone, tail):
+        """Поиск по переписке Syntony в своей базе (syntony.py). Ни одного вызова API.
+
+        Ответ — той же формы, что у Chat2Desk-пути: экран, журнал и лимит у источников
+        общие. Отличия: client_id нет (у Syntony водитель — номер), «обращений» и оценок
+        нет, вложения — подписанными адресами ручки /media, а stale_minutes говорит, что
+        переписка Syntony в базе давно не пополнялась."""
+        window_from, window_to = chat2desk.window_bounds()
+        start, end = syntony.window_range(window_from, window_to)
+        channels = syntony.channel_ids()
+        window = {'from': window_from.isoformat(), 'to': window_to.isoformat()}
+        with db._get_cursor() as cursor:
+            used_today, extra_today = queries.search_usage_today(cursor, ctx['user_id'])
+            limit_today = DAILY_SEARCH_LIMIT + extra_today
+            limited = access.is_search_limited(ctx)
+            if limited and used_today >= limit_today:
+                return jsonify({
+                    "error": _limit_reached_message(ctx, extra_today),
+                    "code": "DAILY_LIMIT_REACHED",
+                }), 429
+            found = syntony.find_contact(cursor, phone, tail, channels)
+            if found and found[0] == 'ambiguous':
+                queries.log_event(cursor, ctx, 'search', phone=phone or tail,
+                                  source=syntony.SOURCE_SYNTONY,
+                                  ip_address=_ip(), user_agent=_ua())
+                return jsonify({
+                    "error": "По последним цифрам этого номера нашлось несколько "
+                             "водителей. Введите номер целиком, с кодом страны.",
+                    "code": "PHONE_AMBIGUOUS",
+                }), 400
+            if not found:
+                queries.log_event(cursor, ctx, 'search', phone=phone or tail,
+                                  source=syntony.SOURCE_SYNTONY,
+                                  ip_address=_ip(), user_agent=_ua())
+                return jsonify({
+                    'phone': phone or raw_phone.strip(), 'client_id': None, 'chats': [],
+                    'window': window, 'not_found': True, 'source': syntony.SOURCE_SYNTONY,
+                    'fetched_at': chat2desk.now_almaty().isoformat(),
+                    'searches_left': (max(0, limit_today - used_today - 1)
+                                      if limited else None),
+                }), 200
+            number, client_name = found
+            rows, truncated = syntony.window_rows(cursor, number, channels, start, end)
+            notes = syntony.handoff_messages(cursor, number, window_from, window_to)
+            stale = syntony.stale_minutes(cursor)
+            # Журнал — под номером, как он лежит у Syntony: под ним же лягут «открыл» и
+            # «Передан», и выгрузка по водителю соберёт их вместе.
+            queries.log_event(cursor, ctx, 'search', phone=number,
+                              messages_count=len(rows), source=syntony.SOURCE_SYNTONY,
+                              ip_address=_ip(), user_agent=_ua())
+        build_media = syntony.media_url_builder(media_key, ctx['user_id'])
+        messages = [item for item in (syntony.message_from_row(row, build_media) for row in rows)
+                    if item]
+        known = {item['id'] for item in messages}
+        messages += [note for note in notes if note['id'] not in known]
+        chats = chat2desk.group_chats(messages)
+        names = syntony.channel_names(rows)
+        for note in notes:
+            names.setdefault(note['channelId'], syntony.channel_name(note['channelId']))
+        for chat in chats:
+            chat['channel_name'] = names.get(chat.get('channel_id')) or syntony.channel_name(
+                chat.get('channel_id'))
+            chat['operator_name'] = ', '.join(chat['authors']) if chat['authors'] else None
+            chat['rating_score'] = None
+        return jsonify({
+            'phone': number,
+            'client_id': None,
+            'client_name': client_name,
+            'chats': chats,
+            'window': window,
+            'truncated': truncated,
+            'from_cache': False,
+            'source': syntony.SOURCE_SYNTONY,
+            'stale_minutes': stale,
+            'fetched_at': chat2desk.now_almaty().isoformat(),
+            'searches_left': (max(0, limit_today - used_today - 1) if limited else None),
+        }), 200
 
     @dch_route('/search')
     def driver_chats_search(ctx):
@@ -316,6 +409,9 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                          "+998 90 123 45 67",
                 "code": "BAD_PHONE",
             }), 400
+
+        if syntony.source() == syntony.SOURCE_SYNTONY:
+            return _search_syntony(ctx, raw_phone, phone, tail)
 
         window_from, window_to = chat2desk.window_bounds()
 
@@ -551,6 +647,18 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         phone = chat2desk.normalize_phone(data.get('phone'))
         if not phone:
             return jsonify({"error": "Не указан телефон водителя", "code": "BAD_PHONE"}), 400
+        if syntony.source() == syntony.SOURCE_SYNTONY:
+            # У Syntony канал и диалог — GUID строкой: их место — свои колонки журнала.
+            with db._get_cursor() as cursor:
+                event = queries.log_event(
+                    cursor, ctx, 'open', phone=phone,
+                    channel_name=(data.get('channel_name') or None),
+                    messages_count=_int_or_none(data.get('messages_count')),
+                    source=syntony.SOURCE_SYNTONY,
+                    syntony_channel_id=syntony.clean_id(data.get('channel_id')),
+                    syntony_conversation_id=syntony.clean_id(data.get('dialog_id')),
+                    ip_address=_ip(), user_agent=_ua())
+            return jsonify({'status': 'ok', 'event': event}), 200
         with db._get_cursor() as cursor:
             event = queries.log_event(
                 cursor, ctx, 'open',
@@ -569,9 +677,47 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
 
     # ── «Передан»: заметка в чат + журнал ────────────────────────────────────
 
+    def _handoff_syntony(ctx, data):
+        """«Передан» на Syntony: отметка в журнале раздела, в ленту своего чата — сразу.
+
+        В сам Syntony отметка не уходит: в API истории внутренних заметок нет (он только
+        читает), отправка в чат — партнёрский API. Экран так и говорит (handoff_to_chat=false
+        в /context), а ответ несёт delivered_to_chat=false."""
+        phone = chat2desk.normalize_phone(data.get('phone'))
+        channel = syntony.clean_id(data.get('channel_id'))
+        if not phone or not channel or channel not in set(syntony.channel_ids()):
+            return jsonify({"error": "Не указан чат водителя", "code": "BAD_TARGET"}), 400
+        note = str(data.get('note') or '').strip()
+        if len(note) > chat2desk.MAX_COMMENT_LENGTH:
+            return jsonify({
+                "error": "Комментарий длиннее %d символов" % chat2desk.MAX_COMMENT_LENGTH,
+                "code": "COMMENT_TOO_LONG",
+            }), 400
+        text = chat2desk.build_handoff_text(ctx.get('name'), note)
+        conversation = syntony.clean_id(data.get('dialog_id'))
+        with db._get_cursor() as cursor:
+            # Отметку ставят только на свой чат: номер СЗоВ, где этот водитель писал.
+            if not syntony.contact_has_channel(cursor, phone, channel):
+                return jsonify({"error": "Этого чата у водителя нет", "code": "BAD_TARGET"}), 400
+            event = queries.log_event(
+                cursor, ctx, 'handoff', phone=phone,
+                channel_name=(data.get('channel_name') or None),
+                comment_text=text, source=syntony.SOURCE_SYNTONY,
+                syntony_channel_id=channel, syntony_conversation_id=conversation,
+                ip_address=_ip(), user_agent=_ua())
+        return jsonify({
+            'status': 'ok', 'sent': None, 'text': text, 'event': event,
+            'delivered_to_chat': False,
+            'message': syntony.handoff_message(
+                event_id=event['id'], text=text, created=event.get('created_at'),
+                channel_id=channel, conversation_id=conversation),
+        }), 200
+
     @dch_route('/handoff', methods=('POST',))
     def driver_chats_handoff(ctx):
         data = _payload()
+        if syntony.source() == syntony.SOURCE_SYNTONY:
+            return _handoff_syntony(ctx, data)
         phone = chat2desk.normalize_phone(data.get('phone'))
         client_id = _int_or_none(data.get('client_id'))
         if not phone or not client_id:
@@ -833,6 +979,68 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         logging.info('driver_chats: %s поставил(а) %s доп. поисков на сегодня — %s',
                      ctx.get('name'), extra, person.get('name'))
         return jsonify({'user_id': user_id, 'used_today': used_today, **saved}), 200
+
+    # ── Вложения Syntony ─────────────────────────────────────────────────────
+    #
+    # Ручка БЕЗ общего require_api_key: её зовут <img>, <audio> и ссылка в новой вкладке, а
+    # они не несут заголовок с токеном портала (сайт и API на разных адресах, вход — токеном
+    # в заголовке). Пропуск — подпись в адресе (syntony.check_media_link): её выдаёт только
+    # поиск, прошедший все гейты раздела, она привязана к сообщению и человеку и живёт 2–3
+    # часа. На каждом открытии заново проверяем человека (работает, в периметре раздела) и
+    # сообщение (номер СЗоВ, не удалено, вложение есть) — и только потом берём у Syntony
+    # ссылку на 5 минут и переадресуем на неё. Ссылку не храним: так велит Syntony (§3.5).
+
+    def _media_refusal(message, code, status, retry_after=None):
+        response = jsonify({"error": message, "code": code})
+        response.status_code = status
+        response.headers['Cache-Control'] = 'no-store'
+        if retry_after:
+            response.headers['Retry-After'] = str(int(retry_after))
+        return response
+
+    @bp.route('/media/<message_id>', methods=['GET'])
+    def driver_chats_media(message_id):
+        user_id = syntony.check_media_link(media_key, message_id, request.args)
+        if user_id is None:
+            return _media_refusal("Ссылка на файл устарела — обновите переписку",
+                                  'MEDIA_LINK_INVALID', 403)
+        try:
+            with db._get_cursor() as cursor:
+                person = queries.load_access_context(cursor, user_id)
+                person_ok = bool(person) and str(person.get('status') or 'working').strip().lower() \
+                    not in ('fired', 'dismissal') and access.can_open_section(person)
+                file_ok = person_ok and syntony.media_allowed(cursor, message_id,
+                                                              syntony.channel_ids())
+        except Exception:  # noqa: BLE001
+            logging.exception('driver_chats: вложение Syntony — ошибка базы')
+            return _media_refusal("Файл сейчас недоступен", 'MEDIA_ERROR', 500)
+        if not person_ok:
+            return _media_refusal("Раздел «Чаты водителей» вам не открыт",
+                                  'DRIVER_CHATS_SECTION_CLOSED', 403)
+        if not file_ok:
+            return _media_refusal("Файл не найден", 'MEDIA_NOT_FOUND', 404)
+        config = syntony_client.load_config()
+        if config is None:
+            return _media_refusal("Syntony не подключена: на сервере нет ключа",
+                                  'SYNTONY_NOT_CONFIGURED', 503)
+        try:
+            link = syntony_client.file_link(config, message_id)
+        except syntony_client.SyntonyHistoryError as exc:
+            # В журнал — код и статус, без адреса: в нём бывает номер и подпись.
+            logging.warning('driver_chats: вложение Syntony — отказ %s', exc.code)
+            if exc.status in (409, 429, 503):
+                return _media_refusal("Файл ещё загружается — откройте через минуту",
+                                      'MEDIA_NOT_READY', 503, exc.retry_after or 30)
+            if exc.status in (404, 410):
+                return _media_refusal("Файл недоступен: у Syntony его больше нет",
+                                      'MEDIA_GONE', 410)
+            return _media_refusal("Syntony не отдала файл", 'MEDIA_UPSTREAM', 502)
+        response = redirect(link['url'], code=302)
+        # Ссылку Syntony хранить нельзя (живёт 5 минут), значит и переадресацию на неё — тоже.
+        # Открытая картинка браузером второй раз в той же странице не запрашивается.
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Referrer-Policy'] = 'no-referrer'
+        return response
 
     @dch_route('/ping')
     def driver_chats_ping(ctx):

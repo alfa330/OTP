@@ -114,6 +114,19 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_syntony_chat_conversations_created "
     "ON syntony_chat_conversations (created_at)",
 
+    # «Чаты водителей» (driver_chats/syntony.py, 25.11.2026): оператор вводит номер водителя —
+    # диалоги ищутся по девяти последним цифрам номера (выражение СЛОВО В СЛОВО как в запросе,
+    # иначе планировщик индекс не возьмёт; номер собеседника в диалоге не меняется, так что
+    # переписывание диалога его сообщениями остаётся HOT), а переписка двух суток — по диалогу и
+    # времени. Здесь, а не в схеме раздела: та разворачивается раньше этой, и на пустой базе
+    # индекс по ещё не созданной таблице уронил бы схему раздела целиком.
+    r"""
+    CREATE INDEX IF NOT EXISTS idx_syntony_chat_conversations_phone_tail
+    ON syntony_chat_conversations (right(regexp_replace(contact_phone, '\D', '', 'g'), 9))
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_syntony_chat_messages_conversation "
+    "ON syntony_chat_messages (conversation_id, created_at)",
+
     # Статусы операторов сети (метод /operator-statuses, statuses.py): интервал «оператор был в
     # статусе с … по …», ended_at IS NULL — статус сейчас. Строка переписывается, пока интервал
     # открыт, потом закрывается один раз. partner_user_ids — id оператора в iCORE (то, что мы

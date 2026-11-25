@@ -668,12 +668,33 @@ def chat_key(channel_id=None, dialog_id=None):
 
     Порядок обязан совпадать с фронтовым: на этом ключе держатся выбранный чат,
     отметка «передан» и защита от повторной записи в журнал.
+
+    У Syntony (driver_chats/syntony.py) канал и диалог — GUID строкой: ключ — та же
+    строка, как её и подставляет фронт (`c${chat.channel_id}`).
     """
     if channel_id:
-        return 'c%s' % int(channel_id)
+        return 'c%s' % _key_part(channel_id)
     if dialog_id:
-        return 'd%s' % int(dialog_id)
+        return 'd%s' % _key_part(dialog_id)
     return 'x0'
+
+
+def _key_part(value):
+    """Число Chat2Desk — числом (как раньше: «c3624», а не «c3624.0»), GUID Syntony — строкой."""
+    if isinstance(value, bool):
+        return str(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
+def _order_id(value):
+    """Ключ сортировки по id сообщения: числа Chat2Desk — по величине, строки Syntony
+    (и наши отметки «dch-…») — по тексту. Сравнение числа со строкой уронило бы сортировку."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return (0, value, '')
+    return (1, 0, str(value if value is not None else ''))
 
 
 def group_chats(messages):
@@ -718,7 +739,8 @@ def group_chats(messages):
 
     chats = []
     for bucket in buckets.values():
-        items = sorted(bucket['messages'], key=lambda m: (m.get('created') or '', m.get('id') or 0))
+        items = sorted(bucket['messages'],
+                       key=lambda m: (m.get('created') or '', _order_id(m.get('id') or 0)))
         incoming = [m for m in items if m.get('type') == 'from_client']
         outgoing = [m for m in items if m.get('type') == 'to_client']
         # Превью — последняя ЖИВАЯ реплика, а не последняя строка с текстом.
@@ -774,7 +796,8 @@ def group_chats(messages):
             'authors': sorted({m['author'] for m in items
                                if m.get('type') == 'to_client' and m.get('author')}),
         })
-    chats.sort(key=lambda c: (c.get('last_at') or '', c.get('channel_id') or 0), reverse=True)
+    chats.sort(key=lambda c: (c.get('last_at') or '', _order_id(c.get('channel_id') or 0)),
+               reverse=True)
     return chats
 
 
