@@ -584,6 +584,28 @@ class GuestSqlAgreementTest(unittest.TestCase):
         # И себя самого тоже.
         self.assertIn('u.id <> %(actor)s', text)
 
+    def test_candidates_come_whole_without_a_page_cap(self):
+        """Форма грузит список людей один раз и ищет в нём сама. Потолок в 200
+        строк отдавал супер-админу первых 200 по алфавиту — до «П», — и всех от
+        «Р» до «Я» найти в форме было нельзя (25.11.2026, сотрудник отдела
+        аналитики). Список — целиком, как у правил разделов."""
+        self.assertNotIn('LIMIT', _normalize(guests._CANDIDATES_SQL))
+        rows = [(i, 'Сотрудник %03d' % i, 'operator', 'СЗоВ') for i in range(450)]
+        cursor = _RowsCursor(rows)
+        people = guests.guest_candidates(cursor, actor_id=448,
+                                         ceiling=ROLE_LEVELS['super_admin'])
+        self.assertEqual(450, len(people))
+        self.assertEqual('Сотрудник 449', people[-1]['name'])
+        self.assertNotIn('limit', cursor.params)
+
+    def test_shareable_articles_come_whole_too(self):
+        """Та же беда была у поля «Статья»: первые 50 статей по алфавиту."""
+        self.assertNotIn('LIMIT', _normalize(guests._SHAREABLE_ARTICLES_SQL))
+        rows = [(i, 'Статья %03d' % i, 'a-%d' % i, 'published') for i in range(300)]
+        cursor = _RowsCursor(rows)
+        self.assertEqual(300, len(guests.shareable_articles(cursor, section_ids=None)))
+        self.assertNotIn('limit', cursor.params)
+
     def test_shareable_articles_offer_only_what_a_guest_can_open(self):
         """Форма не предлагает черновик и строгий режим.
 

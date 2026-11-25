@@ -3,8 +3,10 @@
 
 Решение владельца 06.10.2026 про сотрудника отдела аналитики: «чтобы у этого
 сотрудника отображался только раздел байга без qr, полный доступ к разделу».
-Доступ и замок раздела сторожит tests/test_baiga.py; здесь — то, что портал
-показывает человеку ПОМИМО раздела, то есть ничего.
+25.11.2026 владелец добавил ему «Вики» — с QR, как у всех операторов; вики
+открывает гостевой доступ в самом разделе. Доступ и замок «Байги» сторожит
+tests/test_baiga.py; здесь — то, что портал показывает человеку ПОМИМО двух
+разделов набора, то есть ничего.
 
 Что сторожится:
   * набор один и тот же во фронте и на сервере (departmentViews.js и
@@ -122,15 +124,24 @@ class MirrorTests(unittest.TestCase):
         front = _front_allowlist()
         server = _module_literal('PERSONAL_VIEW_ALLOWLIST')
         self.assertEqual(front, {user_id: tuple(views) for user_id, views in server.items()})
-        self.assertEqual(front, {ANALYST_ID: ('baiga',)})
+        self.assertEqual(front, {ANALYST_ID: ('baiga', 'wiki')})
 
     def test_everyone_in_the_set_really_gets_the_section(self):
         """Набор только прячет остальное. Человек из набора, которому сам
         раздел не выдан, увидел бы пустой портал."""
         granted_by = {'baiga': baiga_access.ANALYST_USER_IDS}
+        # «Вики» выдаётся не списком, а гостевым доступом в самом разделе (решение
+        # владельца 25.11.2026): пока выдачи нет, флаг вики ложен, пункта нет, а
+        # гард «Этап 10» уводит в ПЕРВЫЙ раздел набора. Поэтому первым обязан стоять
+        # раздел, выданный списком, — иначе без выдачи человек увидел бы пустой портал.
+        granted_in_section = {'wiki'}
+        self.assertIn("const OWN_FLAG_VIEWS = new Set(['wiki']);", _read(VIEWS_JS))
         for user_id, views in _front_allowlist().items():
             self.assertTrue(views, user_id)
+            self.assertIn(views[0], granted_by, 'первым в наборе — раздел, выданный списком')
             for view in views:
+                if view in granted_in_section:
+                    continue
                 self.assertIn(view, granted_by, 'раздел %s: допиши, каким списком он выдаётся' % view)
                 self.assertIn(user_id, granted_by[view], (user_id, view))
 
@@ -175,7 +186,7 @@ class MirrorTests(unittest.TestCase):
         if not node:
             self.skipTest('node недоступен')
         source = _read(VIEWS_JS)
-        emptied, replaced = re.subn(r"(const PERSONAL_VIEW_ALLOWLIST = \{\n\s+%d: )\['baiga'\]" % ANALYST_ID,
+        emptied, replaced = re.subn(r"(const PERSONAL_VIEW_ALLOWLIST = \{\n\s+%d: )\['baiga', 'wiki'\]" % ANALYST_ID,
                                     r'\1[]', source)
         self.assertEqual(replaced, 1)
         with tempfile.TemporaryDirectory() as folder:
@@ -193,10 +204,10 @@ class MirrorTests(unittest.TestCase):
 
     def test_server_rule_by_hand(self):
         views = _server_namespace()['_personal_views_for']
-        self.assertEqual(views(ANALYST_ID, 'operator'), ('baiga',))
-        self.assertEqual(views(str(ANALYST_ID), 'operator'), ('baiga',))
+        self.assertEqual(views(ANALYST_ID, 'operator'), ('baiga', 'wiki'))
+        self.assertEqual(views(str(ANALYST_ID), 'operator'), ('baiga', 'wiki'))
         for role in ('trainee', 'hr_manager', 'accounting_manager', 'marketing_manager'):
-            self.assertEqual(views(ANALYST_ID, role), ('baiga',), role)
+            self.assertEqual(views(ANALYST_ID, role), ('baiga', 'wiki'), role)
         self.assertIsNone(views(ANALYST_ID + 1, 'operator'))
         self.assertIsNone(views(None, 'operator'))
         self.assertIsNone(views('abc', 'operator'))
@@ -359,7 +370,10 @@ class BellTests(unittest.TestCase):
     def test_bell_of_the_named_person_is_silent_about_hidden_sections(self):
         viewer = self._viewer(ANALYST_ID, 'operator')
         self.assertEqual(set(viewer['hidden_sources']),
-                         {'tasks'} | set(sources.sources_outside_views(('baiga',))))
+                         {'tasks'} | set(sources.sources_outside_views(('baiga', 'wiki'))))
+        # «Вики» в наборе (25.11.2026): её источники колокол больше не прячет.
+        self.assertNotIn('wiki_ack', viewer['hidden_sources'])
+        self.assertNotIn('wiki_questions', viewer['hidden_sources'])
         self.assertEqual(len(viewer['hidden_sources']), len(set(viewer['hidden_sources'])))
         # Раздел «Задачи» открыт ролью — набор его всё равно прячет: в меню его нет.
         self.assertIn('tasks', self._viewer(ANALYST_ID, 'marketing_manager',
@@ -390,7 +404,7 @@ class BellTests(unittest.TestCase):
         # Источники со своим кругом (crm, complaints, payments, discipline, twofa, hiring,
         # client_cards, mail) набор не прячет: их гасит собственный периметр раздела — здесь он открыт.
         self.assertEqual(set(called), {'birthdays', 'training_plans', 'crm', 'complaints', 'payments', 'discipline',
-                                       'twofa', 'hiring', 'client_cards', 'mail'})
+                                       'twofa', 'hiring', 'client_cards', 'mail', 'wiki_ack', 'wiki_questions'})
         for name in viewer['hidden_sources']:
             self.assertEqual(counts[name], 0, name)
         self.assertEqual(counts['total'], 3 * len(set(called)))

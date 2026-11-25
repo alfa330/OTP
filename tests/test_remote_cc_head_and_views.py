@@ -1185,7 +1185,7 @@ class RemoteCcViewsMirrorTests(unittest.TestCase):
         # База не ответила — набора нет: лишнее уведомление дешевле пропавшего.
         self.assertIsNone(views(703, 'operator'))
         # Личный набор человека сильнее набора его отдела.
-        self.assertEqual(views(540, 'operator'), ('baiga',))
+        self.assertEqual(views(540, 'operator'), ('baiga', 'wiki'))
         # Набор — только рядовому, не возглавляющему отдел.
         calls.clear()
         for role in ('sv', 'supervisor', 'trainer', 'admin', 'super_admin', '', None):
@@ -1201,7 +1201,7 @@ class RemoteCcViewsMirrorTests(unittest.TestCase):
 
     def test_personal_set_does_not_ask_the_department(self):
         namespace, calls = _views_namespace({540: 'analytik'})
-        self.assertEqual(namespace['_personal_views_for'](540, 'operator'), ('baiga',))
+        self.assertEqual(namespace['_personal_views_for'](540, 'operator'), ('baiga', 'wiki'))
         self.assertEqual(calls, [])
 
 

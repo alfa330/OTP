@@ -134,10 +134,12 @@ test('набор не задел другие отделы и читает ко�
 });
 
 test('личный набор человека сильнее набора его отдела', () => {
-    // 540 — сотрудник с личным набором «Списки Байги»: переведи его в удалённый
-    // КЦ — останется при своём наборе.
-    assert.deepEqual(personalViewsOf(employee({ id: 540 })), ['baiga']);
-    assert.equal(personalViewsAllow(employee({ id: 540 }), 'wiki'), false);
+    // 540 — сотрудник с личным набором «Списки Байги» и «Вики» (25.11.2026):
+    // переведи его в удалённый КЦ — останется при своём наборе, и «Профиль» с
+    // «Моими сменами» из набора отдела у него не появятся.
+    assert.deepEqual(personalViewsOf(employee({ id: 540 })), ['baiga', 'wiki']);
+    assert.equal(personalViewsAllow(employee({ id: 540 }), 'profile'), false);
+    assert.equal(personalViewsAllow(employee({ id: 540 }), 'work_schedules'), false);
 });
 
 /* Объявление `const NAME ...;` из App.jsx целиком — App.jsx монолитен и не

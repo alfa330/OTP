@@ -2,7 +2,9 @@
 //
 // Решение владельца 06.10.2026 про сотрудника отдела аналитики: «чтобы у этого
 // сотрудника отображался только раздел байга». Набор строже карты отдела —
-// в нём нет ни общих «Ивентов», ни «Библиотеки» по роли, ни «Вики» по отделу.
+// в нём нет ни общих «Ивентов», ни «Библиотеки» по роли. 25.11.2026 владелец
+// добавил «Вики» (с QR, как у всех операторов): её открывает гостевой доступ,
+// и пункт появляется по флагу вики, а не по самому набору.
 //
 // Проверяем поведение предикатов, а не текст файла: карта из литералов, и
 // опечатка в id синтаксис не ломает — она молча снимает ограничение целиком
@@ -56,17 +58,21 @@ const analyst = (overrides = {}) => ({
 
 // Всё, что портал показал бы оператору отдела без карты разделов, и общее.
 const OTHER_VIEWS = [
-    'events', 'wiki', 'library', 'profile', 'hours', 'work_schedules', 'shift_auction',
+    'events', 'library', 'profile', 'hours', 'work_schedules', 'shift_auction',
     'evaluation', 'ai_feedback', 'surveys', 'salary', 'contests', 'tasks', 'lms',
     'call_evaluation', 'call_division', 'manage_operators', 'qr_access', 'driver_mailings',
 ];
 
-test('личный набор: человеку остаётся только «Списки Байги»', () => {
+test('личный набор: человеку остаются «Списки Байги» и «Вики»', () => {
     const user = analyst();
-    assert.deepEqual(personalViewsOf(user), ['baiga']);
+    assert.deepEqual(personalViewsOf(user), ['baiga', 'wiki']);
     assert.equal(departmentRestrictsViews(user), true);
     assert.equal(departmentAllowsView(user, 'baiga'), true);
     assert.equal(personalViewsAllow(user, 'baiga'), true);
+    // «Вики» набор не прячет, но и не открывает: у неё свой флаг (гостевой
+    // доступ, wiki_enabled в профиле), и гард пропускает её только по нему.
+    assert.equal(personalViewsAllow(user, 'wiki'), true);
+    assert.equal(departmentAllowsView(user, 'wiki'), false);
     for (const viewKey of OTHER_VIEWS) {
         assert.equal(departmentAllowsView(user, viewKey), false, viewKey);
         assert.equal(personalViewsAllow(user, viewKey), false, viewKey);
@@ -85,7 +91,7 @@ test('личный набор строже карты отдела: «Ивент
     // отдела, куда бы человека ни перевели, на него не действует.
     for (const code of ['op', 'tez', 'marketing', 'request_processing_department', 'szov', null]) {
         const moved = analyst({ department_code: code });
-        assert.deepEqual(personalViewsOf(moved), ['baiga'], String(code));
+        assert.deepEqual(personalViewsOf(moved), ['baiga', 'wiki'], String(code));
         assert.equal(departmentAllowsView(moved, 'baiga'), true, String(code));
         assert.equal(departmentAllowsView(moved, 'salary'), false, String(code));
         assert.equal(firstAllowedView(moved, []), 'baiga', String(code));
@@ -100,14 +106,14 @@ test('личный набор — для рядового сотрудника, 
         ['accounting_manager', 'hr_manager', 'marketing_manager', 'operator', 'trainee']);
     for (const role of RANK_AND_FILE) {
         const user = analyst({ role });
-        assert.deepEqual(personalViewsOf(user), ['baiga'], role);
+        assert.deepEqual(personalViewsOf(user), ['baiga', 'wiki'], role);
         assert.equal(departmentAllowsView(user, 'events'), false, role);
         assert.equal(firstAllowedView(user, []), 'baiga', role);
     }
     // Роль в профиле бывает в другом регистре и с пробелами.
-    assert.deepEqual(personalViewsOf(analyst({ role: ' Operator ' })), ['baiga']);
+    assert.deepEqual(personalViewsOf(analyst({ role: ' Operator ' })), ['baiga', 'wiki']);
     // Id в профиле бывает и строкой.
-    assert.deepEqual(personalViewsOf(analyst({ id: String(ANALYST_ID) })), ['baiga']);
+    assert.deepEqual(personalViewsOf(analyst({ id: String(ANALYST_ID) })), ['baiga', 'wiki']);
     assert.equal(departmentAllowsView(analyst({ id: String(ANALYST_ID) }), 'events'), false);
 });
 
@@ -143,7 +149,7 @@ test('«рядовой» у набора — тот же, что у ветки �
         BACK_OFFICE_EMPLOYEE_ROLES,
     );
     assert.deepEqual([...appRoles].sort(), [...RANK_AND_FILE].sort());
-    for (const role of appRoles) assert.deepEqual(personalViewsOf(analyst({ role })), ['baiga'], role);
+    for (const role of appRoles) assert.deepEqual(personalViewsOf(analyst({ role })), ['baiga', 'wiki'], role);
     assert.ok(appSource.includes('const isRankAndFileRole = (role) => RANK_AND_FILE_ROLES.includes(normalizeRole(role));'));
     // Ветка меню рядового — под тем же условием «не глава отдела».
     assert.ok(appSource.includes('{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && ('));
@@ -261,12 +267,15 @@ const settle = (user, start, access = {}) => {
 const STARTS = ['hours', 'events', 'library', 'wiki', 'profile', 'surveys', 'salary', 'tasks', 'lms',
     'four_you', 'work_schedules', 'evaluation', 'contests', 'manage_operators', 'baiga'];
 
-test('стражи: человек с набором из любого раздела приходит в «Списки Байги» и остаётся', () => {
+test('стражи: человек с набором приходит в «Списки Байги», а в выданной «Вики» остаётся', () => {
     for (const wiki of [true, false]) {
         for (const start of STARTS) {
             const result = settle(analyst(), start, { baiga: true, wiki, library: true });
             assert.equal(result.settled, true, `${start}: переброс не остановился: ${result.trail.join(' → ')}`);
-            assert.equal(result.view, 'baiga', `${start}: ${result.trail.join(' → ')}`);
+            // «Вики» — раздел набора с собственным флагом: выдана — человек в ней,
+            // не выдана — гард уводит в первый раздел набора, «Списки Байги».
+            const expected = start === 'wiki' && wiki ? 'wiki' : 'baiga';
+            assert.equal(result.view, expected, `${start}: ${result.trail.join(' → ')}`);
             assert.ok(result.trail.length <= 3, `${start}: лишние перебросы: ${result.trail.join(' → ')}`);
         }
     }
@@ -279,10 +288,13 @@ test('стражи: набор назвал раздел, а допуска не
        страж ролей уводил из «Списков Байги» в «Мои часы», гард «Этап 10» — обратно,
        без остановки и с запросами на каждом витке (на стенде ~5000 переходов за
        7 секунд). Человек остаётся на пустом экране своего раздела. */
-    for (const start of STARTS) {
-        const result = settle(analyst(), start, { baiga: false, wiki: true, library: true });
-        assert.equal(result.settled, true, `${start}: зациклился: ${result.trail.join(' → ')}`);
-        assert.equal(result.view, 'baiga', `${start}: ${result.trail.join(' → ')}`);
+    for (const wiki of [true, false]) {
+        for (const start of STARTS) {
+            const result = settle(analyst(), start, { baiga: false, wiki, library: true });
+            assert.equal(result.settled, true, `${start}: зациклился: ${result.trail.join(' → ')}`);
+            const expected = start === 'wiki' && wiki ? 'wiki' : 'baiga';
+            assert.equal(result.view, expected, `${start}: ${result.trail.join(' → ')}`);
+        }
     }
 });
 
@@ -319,8 +331,8 @@ test('стражи: у остальных перебросы прежние', ()
 });
 
 test('бар телефона: «Ивенты» не попадают в него тому, у кого их нет в меню', () => {
-    // Ровно то, что App считает человеку с личным набором «Списки Байги»:
-    // ни одного раздела из реестра бара у него нет.
+    // Ровно то, что App считает человеку с личным набором, пока вики ему не
+    // выдана: ни одного раздела из реестра бара у него нет.
     const access = {
         qrAccess: false, myHours: false, myShifts: false, myShiftAuction: false, myEvaluations: false,
         wiki: false, tasks: false, lms: false, events: false, workSchedules: false, surveys: false,
@@ -329,6 +341,8 @@ test('бар телефона: «Ивенты» не попадают в нег�
     assert.deepEqual(pickMobileTabs(access, { events: 5 }), []);
     // «Ивенты» — такой же раздел с гейтом, как остальные: открыт — стоит в баре.
     assert.deepEqual(pickMobileTabs({ ...access, events: true }).map((tab) => tab.view), ['events']);
+    // Выдали вики (флаг wikiSectionEnabled) — она встаёт в бар, как и в меню.
+    assert.deepEqual(pickMobileTabs({ ...access, wiki: true }).map((tab) => tab.view), ['wiki']);
     // Флаг, которого App не передал, раздел не открывает.
     const { events, ...withoutFlag } = access;
     assert.deepEqual(pickMobileTabs(withoutFlag), []);

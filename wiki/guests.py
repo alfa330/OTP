@@ -353,18 +353,23 @@ SELECT u.id, u.name, u.role, d.name
    AND (%(depts)s::int[] IS NULL OR u.department_id = ANY(%(depts)s::int[]))
    AND (%(query)s = '' OR u.name ILIKE %(like)s)
  ORDER BY u.name
- LIMIT %(limit)s
 """
 
 
-def guest_candidates(cursor, *, actor_id, ceiling, departments=None,
-                     query='', limit=MAX_PAGE):
+def guest_candidates(cursor, *, actor_id, ceiling, departments=None, query=''):
     """Кому этот человек вправе выдать гостевой доступ.
 
     Список считается теми же двумя правилами, что и проверка на записи, поэтому
     форма физически не может предложить того, кого сервер потом отвергнет.
     Шкала должностей уезжает в SQL из ROLE_LEVELS, а не переписывается в
     запросе: вторая копия шкалы однажды разойдётся с первой.
+
+    СПИСОК ЦЕЛИКОМ, без потолка — как structure.grantable_people у правил
+    разделов. Форма грузит его один раз и ищет в нём сама, и до 25.11.2026 здесь
+    стоял потолок ленты выдач MAX_PAGE (200): супер-админу, у которого нет
+    границы отдела, приезжали первые 200 человек по алфавиту — до «П», — и
+    всех от «Р» до «Я» найти в форме было нельзя (сотрудник отдела аналитики).
+    Размер списка ограничен штатом компании, а не данными, которые растут сами.
     """
     import json
 
@@ -376,7 +381,6 @@ def guest_candidates(cursor, *, actor_id, ceiling, departments=None,
         'depts': list(departments) if departments is not None else None,
         'query': text,
         'like': '%%%s%%' % text,
-        'limit': max(1, min(int(limit), MAX_PAGE)),
     })
     return [{'id': r[0], 'name': r[1], 'role': r[2], 'department_name': r[3]}
             for r in cursor.fetchall()]
@@ -416,12 +420,18 @@ SELECT a.id, a.title, a.slug, a.status
                     WHERE xs.article_id = a.id AND s.space_id = %(space)s::int))
    AND (%(query)s = '' OR a.title ILIKE %(like)s)
  ORDER BY a.title
- LIMIT %(limit)s
 """
 
 
-def shareable_articles(cursor, *, section_ids, space_id=None, query='', limit=50):
-    """Статьи, которые человек вправе открыть гостю. section_ids=None — любые."""
+def shareable_articles(cursor, *, section_ids, space_id=None, query=''):
+    """Статьи, которые человек вправе открыть гостю. section_ids=None — любые.
+
+    Тоже ЦЕЛИКОМ, без потолка, — по той же причине, что guest_candidates: форма
+    грузит список один раз и ищет в нём сама. Прежний потолок в 50 строк отдавал
+    первые 50 статей по алфавиту, и остальные статьи пространства в поле
+    «Статья» найти было нельзя (найдено 25.11.2026 рядом с людьми после «П»).
+    Строк — сколько опубликованных статей в пространстве, сотни, а не тысячи.
+    """
     text = (query or '').strip()
     cursor.execute(_SHAREABLE_ARTICLES_SQL, {
         'all': section_ids is None,
@@ -429,7 +439,6 @@ def shareable_articles(cursor, *, section_ids, space_id=None, query='', limit=50
         'space': space_id,
         'query': text,
         'like': '%%%s%%' % text,
-        'limit': max(1, min(int(limit), MAX_PAGE)),
     })
     return [{'id': r[0], 'title': r[1], 'slug': r[2], 'status': r[3]}
             for r in cursor.fetchall()]
