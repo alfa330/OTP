@@ -93,6 +93,9 @@ DRAFT_STATUSES = ('draft', 'applied', 'discarded')
 
 RUN_STATUSES = ('running', 'done', 'failed')
 
+# Фоновый прогон ИИ по пачке (olx_ads_gen_jobs, см. jobs.py).
+GEN_JOB_STATUSES = ('running', 'done', 'stopped', 'error')
+
 
 def _all_cabinet_codes_sql():
     """Коды кабинетов литералом массива — для переноса старого брифа на все кабинеты.
@@ -306,6 +309,60 @@ _STATEMENTS = [
 
     "CREATE INDEX IF NOT EXISTS idx_olx_ads_drafts_status "
     "ON olx_ads_drafts (status, created_at DESC)",
+
+    # ──────────────────────────────────────────────────────────────────────
+    # ФОНОВЫЙ ПРОГОН ИИ ПО ПАЧКЕ
+    #
+    # Строка = одно нажатие «Сочинить тексты ИИ» по пачке. До 25.11.2026 прогон
+    # жил в памяти процесса — так было можно, пока портал стоял на Render одним
+    # экземпляром. В Yandex Cloud на /api отвечают несколько процессов: опрос хода
+    # попадал в соседний, тот прогона не знал и отвечал 404 «Прогон не найден», а
+    # второе нажатие там же ставило ВТОРУЮ пачку параллельно первой. Теперь ход,
+    # остановка и итог — в базе, их видит любой процесс.
+    #
+    # `targets` — пачка в порядке экрана, `position` — сколько из неё пройдено:
+    # процесс, подхвативший прогон после перезапуска, продолжает с этого места.
+    # `owner` — кто ведёт прогон сейчас (процесс + аренда): бросивший прогон поток
+    # больше не может в него писать, даже если очнётся. `beat_at` — пульс ведущего;
+    # долгое молчание значит, что ведущий умер. Время — TIMESTAMPTZ и NOW(): тут
+    # его только сравнивают в SQL, человеку не показывают.
+    # ──────────────────────────────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS olx_ads_gen_jobs (
+        id              SERIAL PRIMARY KEY,
+        status          VARCHAR(16) NOT NULL DEFAULT 'running',
+
+        targets         JSONB NOT NULL DEFAULT '[]'::jsonb,
+        total           INTEGER NOT NULL DEFAULT 0,
+        position        INTEGER NOT NULL DEFAULT 0,
+        made            JSONB NOT NULL DEFAULT '[]'::jsonb,
+        failed          JSONB NOT NULL DEFAULT '[]'::jsonb,
+        skipped         JSONB NOT NULL DEFAULT '[]'::jsonb,
+        briefs          JSONB NOT NULL DEFAULT '{}'::jsonb,
+        current         JSONB,
+        note            TEXT,
+
+        instruction     TEXT,
+        actor_id        INTEGER,
+        actor_name      VARCHAR(200),
+
+        stop_requested  BOOLEAN NOT NULL DEFAULT FALSE,
+        owner           VARCHAR(120),
+        attempts        INTEGER NOT NULL DEFAULT 1,
+
+        error           TEXT,
+        error_code      VARCHAR(40),
+
+        started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        beat_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        finished_at     TIMESTAMPTZ
+    )
+    """,
+
+    # Прогон в разделе один. Держит база, а не память процесса: два нажатия в
+    # разные процессы не поставят две пачки.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uniq_olx_ads_gen_job_running "
+    "ON olx_ads_gen_jobs (status) WHERE status = 'running'",
 
     # ──────────────────────────────────────────────────────────────────────
     # КТО ИЗ МАРКЕТОЛОГОВ ПУБЛИКУЕТ

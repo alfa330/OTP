@@ -97,14 +97,18 @@ def jsonify(*args, **kwargs):
 
 
 def build_olx_ads_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                            resolve_requester):
+                            resolve_requester, run_sweeper=False):
     """Собирает Blueprint раздела.
 
     Все зависимости — обязательные keyword-only без значений по умолчанию:
     забытая зависимость должна уронить сборку блюпринта на старте, а не тихо
-    открыть запись в боевые кабинеты всем подряд.
+    открыть запись в боевые кабинеты всем подряд. `run_sweeper` — таймер подхвата
+    брошенных прогонов ИИ (jobs.start_sweeper): монолит включает его во всех
+    ролях, кроме realtime; тесты, собирающие блюпринт, — нет.
     """
     bp = Blueprint('olx_ads', __name__, url_prefix='/api/olx_ads')
+    if run_sweeper:
+        jobs.start_sweeper(db)
 
     def section_route(rule, methods=('GET',), content=False, apply=False,
                       manage=False):
@@ -411,32 +415,36 @@ def build_olx_ads_blueprint(*, db, require_api_key, build_cors_preflight_respons
                              actor_id=ctx.get('user_id'), actor_name=ctx.get('name'))
         except jobs.JobBusy as exc:
             return jsonify({'error': 'ИИ уже пишет пачку — дождитесь её или остановите',
-                            'code': 'busy', 'job': exc.job.snapshot()}), 409
-        return jsonify({'job': job.snapshot()}), 202
+                            'code': 'busy', 'job': exc.job}), 409
+        return jsonify({'job': job}), 202
+
+    # Ход прогона — из базы: на /api отвечает не один процесс, и опрос попадает в
+    # любой из них (см. jobs.py). Обход брошенных зовётся и отсюда — тот, кто
+    # смотрит на экран, увидит продолжение после перезапуска сразу.
 
     @section_route('/generate/active')
     def olx_ads_generate_active(ctx):
         """Идущий прогон, если есть: экран подключается к нему при открытии."""
-        job = jobs.active()
-        return jsonify({'job': job.snapshot() if job else None})
+        jobs.sweep(db)
+        return jsonify({'job': jobs.active(db)})
 
     @section_route('/generate/jobs/<job_id>')
     def olx_ads_generate_job(ctx, job_id):
-        job = jobs.get(job_id)
+        jobs.sweep(db)
+        job = jobs.get(db, job_id, full=True)
         if not job:
-            return jsonify({'error': 'Прогон не найден — возможно, сервер перезапускался. '
-                                     'Обновите список: написанные черновики целы',
+            return jsonify({'error': 'Прогон не найден — обновите список: '
+                                     'написанные черновики целы',
                             'code': 'job_not_found'}), 404
-        return jsonify({'job': job.snapshot(full=True)})
+        return jsonify({'job': job})
 
     @section_route('/generate/jobs/<job_id>/stop', methods=('POST',), content=True)
     def olx_ads_generate_stop(ctx, job_id):
         """Остановить после текущего объявления. Написанное остаётся."""
-        job = jobs.get(job_id)
+        job = jobs.request_stop(db, job_id)
         if not job:
             return jsonify({'error': 'Прогон не найден', 'code': 'job_not_found'}), 404
-        job.request_stop()
-        return jsonify({'job': job.snapshot()})
+        return jsonify({'job': job})
 
     @section_route('/drafts')
     def olx_ads_drafts(ctx):

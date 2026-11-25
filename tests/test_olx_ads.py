@@ -531,6 +531,15 @@ class SchemaTests(unittest.TestCase):
         self.assertLess(drop, new_index)
         self.assertLess(backfill, new_index)
 
+    def test_ai_job_lives_in_the_database_with_one_running_at_a_time(self):
+        ddl = ' '.join(schema._STATEMENTS)
+        self.assertIn('CREATE TABLE IF NOT EXISTS olx_ads_gen_jobs', ddl)
+        for column in ('targets', 'position', 'owner', 'beat_at', 'attempts',
+                       'stop_requested'):
+            self.assertIn(column, ddl)
+        self.assertIn('uniq_olx_ads_gen_job_running', ddl)
+        self.assertIn("ON olx_ads_gen_jobs (status) WHERE status = 'running'", ddl)
+
     def test_schema_is_wired_into_database_init(self):
         database = _read(source_cache.database_flat_path())
         self.assertIn('self._init_olx_ads_schema_tx(cursor)', database)
@@ -592,6 +601,18 @@ class RoutesTests(unittest.TestCase):
         app = _read(source_cache.monolith_flat_path())
         self.assertIn('from olx_ads.routes import build_olx_ads_blueprint', app)
         self.assertIn('build_olx_ads_blueprint(', app)
+
+    def test_ai_jobs_are_read_from_the_database_and_resumed_outside_realtime(self):
+        # На /api отвечает не один процесс: ручки прогона ходят в базу, а не в
+        # память процесса, и подхват брошенных включён везде, кроме realtime.
+        for handler in ('olx_ads_generate_active', 'olx_ads_generate_job',
+                        'olx_ads_generate_stop', 'olx_ads_generate_start'):
+            body = self.routes.split('def %s(' % handler, 1)[1].split('@section_route', 1)[0]
+            self.assertRegex(body, r'jobs\.\w+\(db', handler)
+            self.assertNotIn('.snapshot(', body, handler)
+        app = _read(source_cache.monolith_flat_path())
+        call = app.split('build_olx_ads_blueprint(', 1)[1].split('))', 1)[0]
+        self.assertIn('run_sweeper=ROLE_RUNS_BACKGROUND', call)
 
 
 class PublishPermissionRoutesTests(unittest.TestCase):
@@ -983,121 +1004,431 @@ class BriefPerCabinetGenerationTests(unittest.TestCase):
         self.assertEqual({'tenge'}, set(plan['briefs']))
 
 
-class GenerationJobsTests(unittest.TestCase):
-    """Фоновый прогон: один за раз, ход виден, остановка между объявлениями,
-    любой сбой закрывает прогон, а не оставляет его «идущим» навсегда."""
+class _UniqueViolation(Exception):
+    pgcode = '23505'
 
-    def setUp(self):
-        from olx_ads import jobs
 
-        self.jobs = jobs
-        jobs._jobs.clear()
-        self.addCleanup(jobs._jobs.clear)
-        self.plan = {
-            'adverts': [
-                {'cabinet_code': 'cr', 'advert_id': '1', 'title': 'Первое', 'city_name': 'Алматы'},
-                {'cabinet_code': 'cr', 'advert_id': '2', 'title': 'Второе', 'city_name': 'Астана'},
-            ],
-            'briefs': {'cr': {'id': 1}},
-        }
+class _FakeGenJobs(object):
+    """Таблица olx_ads_gen_jobs в памяти — с теми же условиями, что SQL в queries.py:
+    запись ведущего проходит, только пока прогон «идёт» и аренда его; второй идущий
+    прогон — unique_violation; молчание сравнивается с порогом. Настоящий SQL те же
+    сценарии проходит в tests/test_olx_ads_jobs_postgres.py."""
 
-    def _wait_finished(self, job):
-        import time
+    NAMES = ('create_gen_job', 'gen_job_summary', 'running_gen_job', 'gen_job_result',
+             'gen_job_work', 'mark_gen_job_current', 'set_gen_job_note',
+             'record_gen_job_item', 'beat_gen_job', 'finish_gen_job',
+             'request_gen_job_stop', 'orphan_gen_jobs', 'claim_gen_job',
+             'close_orphan_gen_job')
 
-        for _ in range(200):
-            if job.status != 'running':
-                return
-            time.sleep(0.02)
-        self.fail('прогон не завершился')
-
-    @staticmethod
-    def _quick_runner(db, plan, **kwargs):
-        return {'made': [], 'failed': [], 'skipped': [], 'stopped': False, 'briefs': []}
-
-    def test_one_job_at_a_time_progress_and_stop(self):
+    def __init__(self):
         import threading
 
-        gate = threading.Event()
-        at_first = threading.Event()
+        self.rows = {}
+        self.lock = threading.Lock()
+        self.seq = 0
 
-        def runner(db, plan, *, progress, should_stop, **kwargs):
-            adverts = plan['adverts']
-            made, skipped = [], []
-            for index, advert in enumerate(adverts):
-                if should_stop():
-                    skipped.extend({'cabinet': a['cabinet_code'], 'advert_id': a['advert_id']}
-                                   for a in adverts[index:])
-                    break
-                progress({'done': index, 'total': len(adverts), 'current': advert,
-                          'made': len(made), 'failed': 0})
-                if index == 0:
-                    at_first.set()
-                    gate.wait(5)
-                made.append({'cabinet': advert['cabinet_code'], 'advert_id': advert['advert_id'],
-                             'title': 'т', 'description': '<p>о</p>'})
-            progress({'done': len(made), 'total': len(adverts), 'current': None,
-                      'made': len(made), 'failed': 0})
-            return {'made': made, 'failed': [], 'skipped': skipped,
-                    'stopped': bool(skipped), 'briefs': []}
+    def install(self, test, queries):
+        for name in self.NAMES:
+            test.addCleanup(setattr, queries, name, getattr(queries, name))
+            setattr(queries, name, getattr(self, name))
 
-        job = self.jobs.start(None, self.plan, actor_name='Тест', runner=runner)
-        self.assertTrue(at_first.wait(5))
-        snap = job.snapshot()
-        self.assertEqual(('running', 0, 2, '1', 'Тест'),
-                         (snap['status'], snap['done'], snap['total'],
-                          snap['current']['advert_id'], snap['actor_name']))
-        self.assertNotIn('result', snap)
-        self.assertIs(job, self.jobs.active())
+    # ── помощники ───────────────────────────────────────────────────────
+    def _mine(self, job_id, owner):
+        row = self.rows.get(int(job_id))
+        if row and row['owner'] == owner and row['status'] == 'running':
+            return row
+        return None
 
-        # Второе нажатие, пока идёт первое: не второй прогон, а тот же самый.
+    def _summary(self, row):
+        import time
+
+        return dict(row, made_count=len(row['made']), failed_count=len(row['failed']),
+                    skipped_count=len(row['skipped']),
+                    elapsed=(row['finished_at'] or time.time()) - row['started_at'],
+                    beat_age=time.time() - row['beat_at'])
+
+    # ── те же имена и подписи, что в queries.py ─────────────────────────
+    def create_gen_job(self, cursor, targets, *, owner, instruction=None, actor_id=None,
+                       actor_name=None):
+        import copy
+        import time
+
+        with self.lock:
+            if any(r['status'] == 'running' for r in self.rows.values()):
+                raise _UniqueViolation('uniq_olx_ads_gen_job_running')
+            self.seq += 1
+            now = time.time()
+            self.rows[self.seq] = {
+                'id': self.seq, 'status': 'running', 'targets': copy.deepcopy(list(targets)),
+                'total': len(targets), 'position': 0, 'made': [], 'failed': [], 'skipped': [],
+                'briefs': {}, 'current': None, 'note': None, 'instruction': instruction,
+                'actor_id': actor_id, 'actor_name': actor_name, 'stop_requested': False,
+                'owner': owner, 'attempts': 1, 'error': None, 'error_code': None,
+                'started_at': now, 'beat_at': now, 'finished_at': None}
+            return self.seq
+
+    def gen_job_summary(self, cursor, job_id):
+        with self.lock:
+            row = self.rows.get(int(job_id))
+            return self._summary(row) if row else None
+
+    def running_gen_job(self, cursor):
+        with self.lock:
+            row = next((r for r in self.rows.values() if r['status'] == 'running'), None)
+            return self._summary(row) if row else None
+
+    def gen_job_result(self, cursor, job_id):
+        with self.lock:
+            row = self.rows.get(int(job_id))
+            return {k: row[k] for k in ('made', 'failed', 'skipped', 'briefs')} if row else None
+
+    def gen_job_work(self, cursor, job_id, owner):
+        with self.lock:
+            row = self._mine(job_id, owner)
+            if not row:
+                return None
+            return {'targets': list(row['targets']), 'position': row['position'],
+                    'instruction': row['instruction'], 'actor_id': row['actor_id'],
+                    'actor_name': row['actor_name'], 'made_count': len(row['made'])}
+
+    def _touch(self, job_id, owner, **changes):
+        import time
+
+        with self.lock:
+            row = self._mine(job_id, owner)
+            if not row:
+                return None
+            for key, value in changes.items():
+                if key in ('made', 'failed'):
+                    row[key] = row[key] + list(value)
+                elif key == 'briefs':
+                    row[key] = dict(row[key], **(value or {}))
+                else:
+                    row[key] = value
+            row['beat_at'] = time.time()
+            return row['stop_requested']
+
+    def mark_gen_job_current(self, cursor, job_id, owner, current, note=None):
+        return self._touch(job_id, owner, current=current, note=note)
+
+    def set_gen_job_note(self, cursor, job_id, owner, note):
+        return self._touch(job_id, owner, note=note)
+
+    def record_gen_job_item(self, cursor, job_id, owner, position, *, made=(), failed=(),
+                            briefs=None):
+        return self._touch(job_id, owner, position=int(position), made=made, failed=failed,
+                           briefs=briefs, note=None)
+
+    def beat_gen_job(self, cursor, job_id, owner):
+        return self._touch(job_id, owner)
+
+    def finish_gen_job(self, cursor, job_id, owner, status, *, skipped=(), failed=(),
+                       error=None, error_code=None):
+        import time
+
+        with self.lock:
+            row = self._mine(job_id, owner)
+            if not row:
+                return 0
+            row.update(status=status, skipped=row['skipped'] + list(skipped),
+                       failed=row['failed'] + list(failed), error=error,
+                       error_code=error_code, current=None, note=None,
+                       finished_at=time.time())
+            return 1
+
+    def request_gen_job_stop(self, cursor, job_id):
+        with self.lock:
+            row = self.rows.get(int(job_id))
+            if row and row['status'] == 'running':
+                row['stop_requested'] = True
+                return 1
+            return 0
+
+    def _silent(self, row, silence):
+        import time
+
+        return row['status'] == 'running' and row['beat_at'] < time.time() - silence
+
+    def orphan_gen_jobs(self, cursor, silence_seconds):
+        with self.lock:
+            return [{k: row[k] for k in ('id', 'attempts', 'stop_requested', 'targets',
+                                         'position')}
+                    for row in self.rows.values() if self._silent(row, silence_seconds)]
+
+    def claim_gen_job(self, cursor, job_id, owner, silence_seconds, note=None):
+        import time
+
+        with self.lock:
+            row = self.rows.get(int(job_id))
+            if not row or not self._silent(row, silence_seconds):
+                return None
+            row.update(owner=owner, attempts=row['attempts'] + 1, beat_at=time.time(),
+                       note=note)
+            return row['attempts']
+
+    def close_orphan_gen_job(self, cursor, job_id, silence_seconds, status, *, skipped=(),
+                             error=None, error_code=None):
+        import time
+
+        with self.lock:
+            row = self.rows.get(int(job_id))
+            if not row or not self._silent(row, silence_seconds):
+                return 0
+            row.update(status=status, skipped=row['skipped'] + list(skipped), error=error,
+                       error_code=error_code, current=None, note=None,
+                       finished_at=time.time())
+            return 1
+
+
+class GenerationJobsTests(unittest.TestCase):
+    """Фоновый прогон в базе: ход виден из любого процесса, один прогон за раз,
+    «Остановить» доходит до ведущего, брошенный прогон продолжается с места обрыва,
+    поток, у которого прогон забрали, больше в него не пишет.
+
+    Таблица прогонов — _FakeGenJobs, объявления/брифы/черновики — подменённые
+    функции queries. ИИ — заглушка с настоящей формой ответа.
+    """
+
+    def setUp(self):
+        import threading
+        from contextlib import contextmanager
+
+        from olx_ads import jobs, queries
+
+        self.jobs = jobs
+        self.queries = queries
+        self.store = _FakeGenJobs()
+        self.store.install(self, queries)
+        self.adverts = {
+            ('cr', str(n)): {'cabinet_code': 'cr', 'advert_id': str(n), 'category_id': 1812,
+                             'title': 'Объявление %d' % n, 'city_name': 'Город %d' % n}
+            for n in range(1, 5)}
+        self.briefs = {'cr': {'id': 9, 'title': 'Декабрь', 'offer': 'Комиссия 2 процента'}}
+        self.drafts = []
+        self.calls = []
+        self.gate = None                  # threading.Event: ИИ ждёт его перед ответом
+        self.ai_down = 0                  # сколько ближайших вызовов ИИ «лежит»
+        self.ai_lock = threading.Lock()
+        for name in ('get_advert', 'active_briefs_for', 'upsert_draft'):
+            self.addCleanup(setattr, queries, name, getattr(queries, name))
+        queries.get_advert = lambda cursor, cab, adv: self.adverts.get((cab, str(adv)))
+        queries.active_briefs_for = (
+            lambda cursor, codes: {c: self.briefs[c] for c in codes if c in self.briefs})
+
+        def _upsert(cursor, cab, adv, title, description, **kwargs):
+            self.drafts.append((cab, adv))
+            return len(self.drafts)
+
+        queries.upsert_draft = _upsert
+
+        class _Db(object):
+            @contextmanager
+            def _get_cursor(inner):
+                yield object()
+
+        self.db = _Db()
+        for name in ('HEARTBEAT_SECONDS', 'ORPHAN_SECONDS', 'SWEEP_MIN_GAP'):
+            self.addCleanup(setattr, jobs, name, getattr(jobs, name))
+        jobs.HEARTBEAT_SECONDS = 0.05
+        jobs.ORPHAN_SECONDS = 0.4
+        jobs.SWEEP_MIN_GAP = 0
+
+    def _ai(self, system, user, **kwargs):
+        with self.ai_lock:
+            self.calls.append(user)
+            down = self.ai_down > 0
+            if down:
+                self.ai_down -= 1
+        if self.gate is not None:
+            self.gate.wait(5)
+        if down:
+            raise ai.AiUnavailable('все провайдеры цепочки отказали: vertex 429')
+        return ('ЗАГОЛОВОК: Работа в такси без ИП и отчётности\nОПИСАНИЕ:\n<p>%s</p>'
+                % (_LONG_BODY,), {'provider': 'vertex', 'model': 'fake'})
+
+    def _plan(self, *numbers):
+        return {'adverts': [self.adverts[('cr', str(n))] for n in numbers],
+                'briefs': self.briefs}
+
+    def _start(self, *numbers, **kwargs):
+        kwargs.setdefault('generate_fn', self._ai)
+        kwargs.setdefault('pause', 0.05)
+        return self.jobs.start(self.db, self._plan(*numbers), actor_name='Тест', **kwargs)
+
+    def _wait(self, job_id, status=None, timeout=5.0):
+        import time
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            snap = self.jobs.get(self.db, job_id, full=True)
+            if (status and snap['status'] == status) or (not status and snap['status'] != 'running'):
+                return snap
+            time.sleep(0.02)
+        self.fail('прогон %s не дошёл до %s: %s' % (job_id, status or 'конца',
+                                                     self.jobs.get(self.db, job_id)))
+
+    def test_batch_runs_to_the_end_and_result_carries_texts(self):
+        import threading
+
+        self.gate = threading.Event()
+        job = self._start(1, 2, 3)
+        self.assertEqual(('running', 3, 'Тест'), (job['status'], job['total'], job['actor_name']))
+        self.assertNotIn('result', job)
+        self.gate.set()
+        snap = self._wait(job['id'])
+        self.assertEqual(('done', 3, 3, 0, 0), (snap['status'], snap['done'], snap['made'],
+                                                snap['failed'], snap['skipped']))
+        self.assertEqual(['1', '2', '3'], [m['advert_id'] for m in snap['result']['made']])
+        self.assertTrue(all(m['title'] and m['description'] and m['draft_id']
+                            for m in snap['result']['made']))
+        self.assertEqual([{'id': 9, 'title': 'Декабрь'}], snap['result']['briefs'])
+        self.assertEqual(3, len(self.drafts))
+        self.assertIsNone(self.jobs.active(self.db))
+
+    def test_poll_from_another_process_sees_the_same_job(self):
+        # Корень жалобы 25.11.2026: опрос попадал в соседний процесс и получал 404.
+        # Теперь ход читается из базы: процесс-ведущий в опросе не участвует.
+        import threading
+
+        self.gate = threading.Event()
+        job = self._start(1, 2)
+        with self.jobs._live_lock:
+            self.jobs._live.clear()       # «соседний процесс» не знает ведущего
+        snap = self.jobs.get(self.db, job['id'])
+        self.assertEqual(('running', 2), (snap['status'], snap['total']))
+        self.assertEqual(job['id'], self.jobs.active(self.db)['id'])
+        self.gate.set()
+        self.assertEqual('done', self._wait(job['id'])['status'])
+
+    def test_second_press_joins_the_running_job_instead_of_a_parallel_batch(self):
+        import threading
+
+        self.gate = threading.Event()
+        job = self._start(1, 2)
         with self.assertRaises(self.jobs.JobBusy) as ctx:
-            self.jobs.start(None, self.plan, runner=runner)
-        self.assertIs(job, ctx.exception.job)
+            self._start(3, 4)
+        self.assertEqual(job['id'], ctx.exception.job['id'])
+        self.gate.set()
+        self._wait(job['id'])
+        self.assertEqual({('cr', '1'), ('cr', '2')}, set(self.drafts))
 
-        job.request_stop()
-        self.assertTrue(job.snapshot()['stop_requested'])
-        gate.set()
-        self._wait_finished(job)
-        snap = job.snapshot(full=True)
-        self.assertEqual('stopped', snap['status'])
-        self.assertEqual((1, 0, 1, 1), (snap['made'], snap['failed'], snap['skipped'], snap['done']))
-        self.assertEqual('1', snap['result']['made'][0]['advert_id'])
-        self.assertIsNone(self.jobs.active())
-        self.assertIs(job, self.jobs.get(job.id))
+    def test_stop_reaches_the_runner_from_another_process(self):
+        import threading
 
-    def test_service_refusal_inside_the_thread_becomes_a_job_error(self):
-        def runner(db, plan, **kwargs):
-            raise service.AdsError('ИИ сейчас недоступен: vertex 429', code='ai_unavailable')
+        import time
 
-        job = self.jobs.start(None, self.plan, runner=runner)
-        self._wait_finished(job)
-        snap = job.snapshot()
-        self.assertEqual(('error', 'ai_unavailable'), (snap['status'], snap['code']))
+        self.gate = threading.Event()
+        job = self._start(1, 2, 3)
+        deadline = time.time() + 5
+        while not self.calls and time.time() < deadline:   # ИИ уже пишет первое
+            time.sleep(0.01)
+        with self.jobs._live_lock:
+            self.jobs._live.clear()       # стоп пришёл туда, где ведущего нет
+        stopped = self.jobs.request_stop(self.db, job['id'])
+        self.assertTrue(stopped['stop_requested'])
+        self.gate.set()
+        snap = self._wait(job['id'])
+        self.assertEqual(('stopped', 1, 2), (snap['status'], snap['made'], snap['skipped']))
+        self.assertEqual([{'cabinet': 'cr', 'advert_id': '2'}, {'cabinet': 'cr', 'advert_id': '3'}],
+                         snap['result']['skipped'])
+
+    def test_dead_runner_is_resumed_from_the_advert_where_it_stopped(self):
+        # Процесс умер после первого объявления (выкладка перезапустила под):
+        # строка «идёт», пульса нет. Обход забирает её и продолжает со второго.
+        self.store.create_gen_job(None, [{'cabinet': 'cr', 'advert_id': str(n)} for n in (1, 2, 3)],
+                                  owner='мёртвый/aaaa', actor_name='Тест')
+        row = self.store.rows[1]
+        row.update(position=1, made=[{'cabinet': 'cr', 'advert_id': '1', 'title': 'т',
+                                      'description': 'о', 'draft_id': 1}],
+                   beat_at=row['beat_at'] - 60)
+        resumed = self.jobs.sweep(self.db, force=True, generate_fn=self._ai, pause=0.05)
+        self.assertEqual([1], resumed)
+        snap = self._wait(1)
+        self.assertEqual(('done', 3, 2), (snap['status'], snap['made'], row['attempts']))
+        self.assertEqual([('cr', '2'), ('cr', '3')], self.drafts)
+        self.assertTrue(snap['resumed'])
+        # Бросивший прогон поток, очнувшись, ничего не допишет.
+        self.assertIsNone(self.store.record_gen_job_item(None, 1, 'мёртвый/aaaa', 3,
+                                                         made=[{'advert_id': 'x'}]))
+
+    def test_live_runner_is_not_taken_over(self):
+        import threading
+        import time
+
+        self.gate = threading.Event()
+        job = self._start(1, 2)
+        time.sleep(self.jobs.ORPHAN_SECONDS + 0.2)    # дольше порога, но пульс идёт
+        self.assertEqual([], self.jobs.sweep(self.db, force=True))
+        self.assertEqual(1, self.store.rows[job['id']]['attempts'])
+        self.gate.set()
+        self.assertEqual('done', self._wait(job['id'])['status'])
+
+    def test_restarts_have_a_limit(self):
+        self.store.create_gen_job(None, [{'cabinet': 'cr', 'advert_id': '1'},
+                                         {'cabinet': 'cr', 'advert_id': '2'}], owner='мёртвый/bbbb')
+        row = self.store.rows[1]
+        row.update(attempts=self.jobs.MAX_ATTEMPTS, beat_at=row['beat_at'] - 60)
+        self.assertEqual([], self.jobs.sweep(self.db, force=True))
+        snap = self.jobs.get(self.db, 1, full=True)
+        self.assertEqual(('error', 'too_many_restarts', 2),
+                         (snap['status'], snap['code'], snap['skipped']))
+        self.assertIn('написанное сохранено', snap['error'])
+        self.assertEqual([], self.calls)
+
+    def test_stop_of_a_dead_job_closes_it_at_once(self):
+        self.store.create_gen_job(None, [{'cabinet': 'cr', 'advert_id': '1'}], owner='мёртвый/cccc')
+        row = self.store.rows[1]
+        row['beat_at'] -= 60
+        snap = self.jobs.request_stop(self.db, 1)
+        self.assertEqual(('stopped', 1), (snap['status'], snap['skipped']))
+        self.assertEqual([], self.calls)
+
+    def test_ai_outage_is_waited_out_once(self):
+        self.ai_down = 1
+        snap = self._wait(self._start(1, 2)['id'])
+        self.assertEqual(('done', 2, 0), (snap['status'], snap['made'], snap['failed']))
+        self.assertEqual(3, len(self.calls))          # повтор того же объявления
+
+    def test_ai_down_for_good_mid_batch_keeps_made_and_marks_the_rest(self):
+        original = self._ai
+
+        def flaky(system, user, **kwargs):
+            if self.calls:                             # после первого объявления — лёг
+                self.ai_down = 2
+            return original(system, user, **kwargs)
+
+        snap = self._wait(self._start(1, 2, 3, generate_fn=flaky)['id'])
+        self.assertEqual(('done', 1, 2), (snap['status'], snap['made'], snap['failed']))
+        self.assertIn('ИИ сейчас недоступен', snap['result']['failed'][0]['error'])
+        self.assertEqual(self.jobs.SKIPPED_AFTER_AI_TEXT, snap['result']['failed'][1]['error'])
+
+    def test_ai_down_before_any_text_is_a_job_error(self):
+        self.ai_down = 2
+        snap = self._wait(self._start(1, 2)['id'])
+        self.assertEqual(('error', 'ai_unavailable', 0), (snap['status'], snap['code'], snap['made']))
         self.assertIn('ИИ сейчас недоступен', snap['error'])
-        self.assertIsNone(self.jobs.active())
 
-    def test_unexpected_crash_does_not_leave_the_job_running_forever(self):
-        def runner(db, plan, **kwargs):
+    def test_unexpected_crash_closes_the_job_and_frees_the_section(self):
+        def boom(system, user, **kwargs):
             raise KeyError('boom')
 
-        job = self.jobs.start(None, self.plan, runner=runner)
-        self._wait_finished(job)
-        self.assertEqual('error', job.snapshot()['status'])
-        self.assertIsNone(self.jobs.active())
-        # Следующая пачка не заблокирована навсегда.
-        job2 = self.jobs.start(None, self.plan, runner=self._quick_runner)
-        self._wait_finished(job2)
-        self.assertEqual('done', job2.snapshot()['status'])
+        # Сбой внутри ИИ на одном объявлении — это отказ объявления, не прогона.
+        snap = self._wait(self._start(1, generate_fn=boom)['id'])
+        self.assertEqual(('done', 1), (snap['status'], snap['failed']))
+        # Сбой самого ведущего закрывает прогон ошибкой — раздел не заблокирован.
+        saved = self.queries.record_gen_job_item
+        self.queries.record_gen_job_item = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('db'))
+        try:
+            snap = self._wait(self._start(2)['id'])
+        finally:
+            self.queries.record_gen_job_item = saved
+        self.assertEqual(('error', 'error'), (snap['status'], snap['code']))
+        self.assertEqual('done', self._wait(self._start(3)['id'])['status'])
 
-    def test_finished_jobs_are_forgotten_after_an_hour(self):
-        job = self.jobs.start(None, self.plan, runner=self._quick_runner)
-        self._wait_finished(job)
-        self.assertIs(job, self.jobs.get(job.id))
-        job.finished_at -= self.jobs.KEEP_FINISHED_SECONDS + 1
-        job2 = self.jobs.start(None, self.plan, runner=self._quick_runner)
-        self._wait_finished(job2)
-        self.assertIsNone(self.jobs.get(job.id))
-        self.assertIs(job2, self.jobs.get(job2.id))
+    def test_unknown_or_foreign_ids_are_404_not_crash(self):
+        for job_id in ('abc123def456', '', None, '999'):
+            self.assertIsNone(self.jobs.get(self.db, job_id))
+            self.assertIsNone(self.jobs.request_stop(self.db, job_id))
 
 
 class BriefQueriesInvariantsTests(unittest.TestCase):
@@ -1214,6 +1545,21 @@ class FrontendWiringTests(unittest.TestCase):
         self.assertIn('status === 409', self.view)
         # Карточка одного объявления по-прежнему ходит синхронно.
         self.assertIn('/api/olx_ads/generate`', self.view)
+
+    def test_lost_poll_reattaches_to_the_running_job_and_explains_a_frozen_bar(self):
+        # 25.11.2026: опрос хода попадал в соседний процесс — 404 «Прогон не найден»
+        # посреди идущей пачки. Теперь 404 — повод сначала поискать идущий прогон.
+        poll = self.view.split('/api/olx_ads/generate/jobs/${jobId}', 1)[1]
+        poll = poll.split('setInterval(tick', 1)[0]
+        self.assertIn('error.response.status !== 404', poll)
+        self.assertIn('/api/olx_ads/generate/active', poll)
+        self.assertLess(poll.index('/api/olx_ads/generate/active'), poll.index("'lost'"))
+        # Тот же идущий прогон — опрос продолжается, а не замирает.
+        self.assertIn("active.status === 'running'", poll)
+        self.assertIn('setJob(active)', poll)
+        self.assertIn('data-ai-progress-note', self.view)
+        self.assertIn('job.beat_age > 25', self.view)
+        self.assertIn('Сервер перезапускается — прогон продолжится сам', self.view)
 
     def test_hidden_instruction_is_not_sent_silently(self):
         self.assertIn("if (showInstruction) setInstruction('')", self.view)

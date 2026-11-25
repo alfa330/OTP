@@ -55875,6 +55875,8 @@ try:
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
+        # Подхват прогонов ИИ, брошенных при перезапуске пода, — не в realtime.
+        run_sweeper=ROLE_RUNS_BACKGROUND,
     ))
     logging.info("Раздел «Объявления OLX»: Blueprint подключён на /api/olx_ads")
 except Exception:

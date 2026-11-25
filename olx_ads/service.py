@@ -501,6 +501,44 @@ def generate_drafts(db, targets, **kwargs):
     return run_generation(db, plan_generation(db, targets), **kwargs)
 
 
+def generate_one(db, advert, brief, *, instruction=None, actor_id=None,
+                 actor_name=None, generate_fn=None):
+    """Одно объявление: текст от ИИ и черновик в базе.
+
+    Возвращает ('made', запись) или ('failed', запись с причиной). `ai.AiUnavailable`
+    НЕ глотает: «ИИ лёг целиком» — решение о всей пачке, а не об объявлении, и
+    принимает его вызывающий. Синхронный путь (`run_generation`) останавливает
+    пачку сразу, фоновый прогон (`jobs.py`) сначала выжидает и пробует ещё раз.
+    """
+    if not brief:
+        # Не роняем пачку из-за одного кабинета без брифа: остальные
+        # объявления ИИ напишет, а этим честно скажем, чего не хватило.
+        return 'failed', dict(_ref(advert), error='у кабинета нет действующего брифа')
+    try:
+        result = ai.generate_for_advert(advert, brief=brief, instruction=instruction,
+                                        generate_fn=generate_fn)
+    except ai.AiUnavailable:
+        raise
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception('Объявления OLX: ИИ не справился с %s/%s',
+                      advert['cabinet_code'], advert['advert_id'])
+        return 'failed', dict(_ref(advert), error=str(exc)[:300])
+
+    if not result.get('title') or not result.get('description'):
+        return 'failed', dict(_ref(advert), error='модель вернула пустой текст')
+
+    with db._get_cursor() as cursor:
+        draft_id = queries.upsert_draft(
+            cursor, advert['cabinet_code'], advert['advert_id'],
+            result['title'], result['description'],
+            brief_id=brief.get('id'), model=result.get('model'),
+            origin='ai', actor_id=actor_id, actor_name=actor_name)
+
+    return 'made', dict(_ref(advert), draft_id=draft_id, title=result['title'],
+                        description=result['description'], model=result.get('model'),
+                        problems=result.get('problems'))
+
+
 def run_generation(db, plan, *, instruction=None, actor_id=None, actor_name=None,
                    generate_fn=None, progress=None, should_stop=None):
     """Пройти по плану и записать черновики. Ход и остановка — через колбэки.
@@ -510,6 +548,7 @@ def run_generation(db, plan, *, instruction=None, actor_id=None, actor_name=None
     перед каждым объявлением: остановка между объявлениями, а не посреди
     запроса к модели — уже написанное остаётся, недописанное уходит в `skipped`.
     Оба колбэка необязательны: синхронный вызов из карточки их не передаёт.
+    Фоновый прогон по пачке идёт своим циклом (`jobs.py`) через `generate_one`.
     """
     adverts, briefs = plan['adverts'], plan['briefs']
     total = len(adverts)
@@ -523,18 +562,12 @@ def run_generation(db, plan, *, instruction=None, actor_id=None, actor_name=None
         _report(progress, done=index, total=total, current=advert,
                 made=len(made), failed=len(failed))
         brief = briefs.get(advert['cabinet_code'])
-        if not brief:
-            # Не роняем пачку из-за одного кабинета без брифа: остальные
-            # объявления ИИ напишет, а этим честно скажем, чего не хватило.
-            failed.append({'cabinet': advert['cabinet_code'],
-                           'advert_id': advert['advert_id'],
-                           'error': 'у кабинета нет действующего брифа'})
-            continue
-        used[brief['id']] = brief.get('title')
+        if brief:
+            used[brief['id']] = brief.get('title')
         try:
-            result = ai.generate_for_advert(advert, brief=brief,
-                                            instruction=instruction,
-                                            generate_fn=generate_fn)
+            kind, entry = generate_one(db, advert, brief, instruction=instruction,
+                                       actor_id=actor_id, actor_name=actor_name,
+                                       generate_fn=generate_fn)
         except ai.AiUnavailable as exc:
             # ИИ лёг целиком — это не про объявление. Дальше по пачке не идём:
             # каждое следующее ждало бы отказа всех звеньев цепочки заново.
@@ -552,30 +585,7 @@ def run_generation(db, plan, *, instruction=None, actor_id=None, actor_name=None
                            'error': 'пропущено: ИИ перестал отвечать'}
                           for rest in adverts[index + 1:])
             break
-        except Exception as exc:                             # noqa: BLE001
-            log.exception('Объявления OLX: ИИ не справился с %s/%s',
-                          advert['cabinet_code'], advert['advert_id'])
-            failed.append({'cabinet': advert['cabinet_code'],
-                           'advert_id': advert['advert_id'], 'error': str(exc)[:300]})
-            continue
-
-        if not result.get('title') or not result.get('description'):
-            failed.append({'cabinet': advert['cabinet_code'],
-                           'advert_id': advert['advert_id'],
-                           'error': 'модель вернула пустой текст'})
-            continue
-
-        with db._get_cursor() as cursor:
-            draft_id = queries.upsert_draft(
-                cursor, advert['cabinet_code'], advert['advert_id'],
-                result['title'], result['description'],
-                brief_id=brief.get('id'), model=result.get('model'),
-                origin='ai', actor_id=actor_id, actor_name=actor_name)
-
-        made.append({'cabinet': advert['cabinet_code'],
-                     'advert_id': advert['advert_id'], 'draft_id': draft_id,
-                     'title': result['title'], 'description': result['description'],
-                     'model': result.get('model'), 'problems': result.get('problems')})
+        (made if kind == 'made' else failed).append(entry)
 
     _report(progress, done=len(made) + len(failed), total=total, current=None,
             made=len(made), failed=len(failed))

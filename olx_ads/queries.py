@@ -745,3 +745,206 @@ def revoke_publisher(cursor, user_id):
     cursor.execute("DELETE FROM olx_ads_publishers WHERE user_id = %s",
                    (int(user_id),))
     return cursor.rowcount or 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Фоновый прогон ИИ по пачке (olx_ads_gen_jobs) — устройство в jobs.py
+# ─────────────────────────────────────────────────────────────────────────────
+# Все записи ведущего идут с условием «owner = мой и прогон ещё идёт»: поток,
+# у которого прогон забрали (он молчал, его сочли мёртвым), ничего не допишет.
+# None от этих функций значит именно это — «прогон больше не твой».
+
+# Опрос хода раз в полторы секунды: тексты сделанного (до 55 КБ на пачку) ему не
+# нужны, только счёт. Итог целиком читает gen_job_result — один раз, в конце.
+_GEN_JOB_SUMMARY = """
+    SELECT id, status, total, position, current, note,
+           actor_id, actor_name, stop_requested, attempts, error, error_code,
+           jsonb_array_length(made)    AS made_count,
+           jsonb_array_length(failed)  AS failed_count,
+           jsonb_array_length(skipped) AS skipped_count,
+           EXTRACT(EPOCH FROM (COALESCE(finished_at, NOW()) - started_at))::float AS elapsed,
+           EXTRACT(EPOCH FROM (NOW() - beat_at))::float AS beat_age
+      FROM olx_ads_gen_jobs
+"""
+
+
+def _stop_flag(cursor):
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    value = list(row.values())[0] if isinstance(row, dict) else row[0]
+    return bool(value)
+
+
+def _jsonb(value):
+    return json.dumps(value, ensure_ascii=False)
+
+
+def create_gen_job(cursor, targets, *, owner, instruction=None, actor_id=None,
+                   actor_name=None):
+    """Поставить прогон. Второй идущий не даст поставить uniq_olx_ads_gen_job_running:
+    INSERT упадёт с unique_violation — это и есть «ИИ уже пишет пачку»."""
+    cursor.execute(
+        """
+        INSERT INTO olx_ads_gen_jobs (targets, total, owner, instruction,
+                                      actor_id, actor_name)
+        VALUES (%s::jsonb, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (_jsonb(list(targets)), len(targets), owner, instruction or None,
+         actor_id, actor_name))
+    return _scalar(cursor)
+
+
+def gen_job_summary(cursor, job_id):
+    cursor.execute(_GEN_JOB_SUMMARY + " WHERE id = %s", (int(job_id),))
+    return _one(cursor)
+
+
+def running_gen_job(cursor):
+    cursor.execute(_GEN_JOB_SUMMARY + " WHERE status = 'running' ORDER BY id LIMIT 1")
+    return _one(cursor)
+
+
+def gen_job_result(cursor, job_id):
+    cursor.execute("SELECT made, failed, skipped, briefs FROM olx_ads_gen_jobs "
+                   "WHERE id = %s", (int(job_id),))
+    return _one(cursor)
+
+
+def gen_job_work(cursor, job_id, owner):
+    """Что вести: пачка, место в ней, указание и автор. None — прогон не наш."""
+    cursor.execute(
+        """
+        SELECT targets, position, instruction, actor_id, actor_name,
+               jsonb_array_length(made) AS made_count
+          FROM olx_ads_gen_jobs
+         WHERE id = %s AND owner = %s AND status = 'running'
+        """, (int(job_id), owner))
+    return _one(cursor)
+
+
+def mark_gen_job_current(cursor, job_id, owner, current, note=None):
+    """Объявление пошло в работу. Возвращает «просили остановить»; None — не наш."""
+    cursor.execute(
+        """
+        UPDATE olx_ads_gen_jobs
+           SET current = %s::jsonb, note = %s, beat_at = NOW()
+         WHERE id = %s AND owner = %s AND status = 'running'
+        RETURNING stop_requested
+        """,
+        (_jsonb(current) if current else None, note, int(job_id), owner))
+    return _stop_flag(cursor)
+
+
+def set_gen_job_note(cursor, job_id, owner, note):
+    """Пояснение к ходу («ИИ не ответил — пробую снова…»). None — прогон не наш."""
+    cursor.execute(
+        """
+        UPDATE olx_ads_gen_jobs SET note = %s, beat_at = NOW()
+         WHERE id = %s AND owner = %s AND status = 'running'
+        RETURNING stop_requested
+        """, (note, int(job_id), owner))
+    return _stop_flag(cursor)
+
+
+def record_gen_job_item(cursor, job_id, owner, position, *, made=(), failed=(),
+                        briefs=None):
+    """Итог объявления: место в пачке сдвигается, запись дописывается в конец."""
+    cursor.execute(
+        """
+        UPDATE olx_ads_gen_jobs
+           SET position = %s,
+               made = made || %s::jsonb,
+               failed = failed || %s::jsonb,
+               briefs = briefs || %s::jsonb,
+               note = NULL,
+               beat_at = NOW()
+         WHERE id = %s AND owner = %s AND status = 'running'
+        RETURNING stop_requested
+        """,
+        (int(position), _jsonb(list(made)), _jsonb(list(failed)),
+         _jsonb(briefs or {}), int(job_id), owner))
+    return _stop_flag(cursor)
+
+
+def beat_gen_job(cursor, job_id, owner):
+    """Пульс ведущего. Возвращает «просили остановить»; None — прогон не наш."""
+    cursor.execute(
+        """
+        UPDATE olx_ads_gen_jobs SET beat_at = NOW()
+         WHERE id = %s AND owner = %s AND status = 'running'
+        RETURNING stop_requested
+        """, (int(job_id), owner))
+    return _stop_flag(cursor)
+
+
+def finish_gen_job(cursor, job_id, owner, status, *, skipped=(), failed=(),
+                   error=None, error_code=None):
+    cursor.execute(
+        """
+        UPDATE olx_ads_gen_jobs
+           SET status = %s,
+               skipped = skipped || %s::jsonb,
+               failed = failed || %s::jsonb,
+               error = %s, error_code = %s,
+               current = NULL, note = NULL, finished_at = NOW()
+         WHERE id = %s AND owner = %s AND status = 'running'
+        """,
+        (status, _jsonb(list(skipped)), _jsonb(list(failed)), error, error_code,
+         int(job_id), owner))
+    return cursor.rowcount or 0
+
+
+def request_gen_job_stop(cursor, job_id):
+    cursor.execute(
+        "UPDATE olx_ads_gen_jobs SET stop_requested = TRUE "
+        " WHERE id = %s AND status = 'running'", (int(job_id),))
+    return cursor.rowcount or 0
+
+
+def orphan_gen_jobs(cursor, silence_seconds):
+    """Идущие прогоны, ведущий которых молчит дольше `silence_seconds`."""
+    cursor.execute(
+        """
+        SELECT id, attempts, stop_requested, targets, position
+          FROM olx_ads_gen_jobs
+         WHERE status = 'running'
+           AND beat_at < NOW() - make_interval(secs => %s)
+         ORDER BY id
+        """, (float(silence_seconds),))
+    return _all(cursor)
+
+
+def claim_gen_job(cursor, job_id, owner, silence_seconds, note=None):
+    """Забрать брошенный прогон себе. Возвращает номер попытки; None — его уже забрал
+    другой процесс или ведущий ожил (условие на молчание — в том же UPDATE)."""
+    cursor.execute(
+        """
+        UPDATE olx_ads_gen_jobs
+           SET owner = %s, attempts = attempts + 1, beat_at = NOW(), note = %s
+         WHERE id = %s AND status = 'running'
+           AND beat_at < NOW() - make_interval(secs => %s)
+        RETURNING attempts
+        """, (owner, note, int(job_id), float(silence_seconds)))
+    value = _scalar(cursor)
+    return int(value) if value is not None else None
+
+
+def close_orphan_gen_job(cursor, job_id, silence_seconds, status, *, skipped=(),
+                         error=None, error_code=None):
+    """Закрыть брошенный прогон, не продолжая: остановку уже просили или перезапусков
+    было слишком много. Только пока ведущий по-прежнему молчит."""
+    cursor.execute(
+        """
+        UPDATE olx_ads_gen_jobs
+           SET status = %s,
+               skipped = skipped || %s::jsonb,
+               error = %s, error_code = %s,
+               current = NULL, note = NULL, finished_at = NOW()
+         WHERE id = %s AND status = 'running'
+           AND beat_at < NOW() - make_interval(secs => %s)
+        """,
+        (status, _jsonb(list(skipped)), error, error_code, int(job_id),
+         float(silence_seconds)))
+    return cursor.rowcount or 0

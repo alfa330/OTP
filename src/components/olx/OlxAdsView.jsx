@@ -450,8 +450,8 @@ const AdvertsPanel = ({
        списка перечитывание не обновит), сказать словами, перечитать список. */
     const finishJob = (snapshot) => {
         if (snapshot.status === 'lost') {
-            /* Сервер перезапустился и прогон потерял: сказано тостом выше,
-               остаётся перечитать список — написанное до перезапуска в базе. */
+            /* Прогона с этим номером в базе нет и идущего тоже: сказано тостом
+               выше, остаётся перечитать список — написанное лежит в черновиках. */
             onChanged();
             return;
         }
@@ -508,6 +508,7 @@ const AdvertsPanel = ({
     useEffect(() => {
         if (!jobId || !jobRunning) return undefined;
         let cancelled = false;
+        let recovering = false;
         const tick = () => {
             axios.get(`${apiBaseUrl}/api/olx_ads/generate/jobs/${jobId}`, { headers: headers() })
                 .then((response) => {
@@ -524,14 +525,32 @@ const AdvertsPanel = ({
                     setJob(next);
                 })
                 .catch((error) => {
-                    /* Сеть моргнула — следующий тик повторит. 404 — сервер
-                       перезапустился и прогон потерял; написанное в базе цело. */
-                    if (cancelled || !error.response) return;
-                    if (error.response.status === 404) {
-                        setJob(null);
-                        toast(error.response.data?.error || 'Прогон прерван — обновите список', 'error');
-                        finishRef.current({ status: 'lost', result: {} });
-                    }
+                    /* Сеть моргнула — следующий тик повторит. 404 — номера нет там,
+                       куда попал опрос (экран открыт со времён, когда прогоны жили в
+                       памяти процесса, или ответил под старой версии посреди
+                       выкладки): сначала ищем идущий прогон и подключаемся к нему —
+                       тот же прогон опрос просто продолжает, другой подхватывает.
+                       Сказать «не найден» можно, только если идущего нет вовсе. */
+                    if (cancelled || !error.response || error.response.status !== 404) return;
+                    if (recovering) return;
+                    recovering = true;
+                    axios.get(`${apiBaseUrl}/api/olx_ads/generate/active`, { headers: headers() })
+                        .then(
+                            (response) => ({ active: response.data?.job || null }),
+                            (failure) => (failure.response ? { active: null } : { retry: true }),
+                        )
+                        .then(({ active, retry }) => {
+                            recovering = false;
+                            if (cancelled || retry) return;
+                            if (active && active.status === 'running') {
+                                setJob(active);
+                                return;
+                            }
+                            cancelled = true;
+                            setJob(null);
+                            toast(error.response.data?.error || 'Прогон прерван — обновите список', 'error');
+                            finishRef.current({ status: 'lost', result: {} });
+                        });
                 });
         };
         tick();
@@ -784,6 +803,13 @@ const AdvertsPanel = ({
                             style={{ width: `${job.total ? Math.round((job.done / job.total) * 100) : 0}%` }}
                         />
                     </div>
+                    {/* Почему полоса стоит: ведущий молчит (перезапуск пода — прогон
+                        подхватит другой процесс), ИИ не ответил и ждёт повтора. */}
+                    {(job.beat_age > 25 || job.note) && (
+                        <div data-ai-progress-note className="text-[12.5px] text-slate-500">
+                            {job.beat_age > 25 ? 'Сервер перезапускается — прогон продолжится сам' : job.note}
+                        </div>
+                    )}
                 </div>
             )}
 
