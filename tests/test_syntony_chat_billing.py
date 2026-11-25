@@ -206,7 +206,10 @@ def _chat2desk_tables(db):
             (102, '2026-11-17', '2026-11-17 11:00:00', 'Ноль такси', 555, None, None, None),
             # 20.11 — остаток Chat2Desk переехавшего номера: в биллинг не идёт.
             (103, '2026-11-20', '2026-11-20 12:00:00', 'Ноль такси 2', 555, 2, 30, 30.0),
-            # 20.11 — номер, который не переехал (канал 10908, решение 24.11.2026): идёт.
+            # 19.11 — номер 10908 ещё в Chat2Desk (решение 24.11.2026): идёт.
+            (105, '2026-11-19', '2026-11-19 13:00:00', 'Ноль такси', 10908, 2, 90, 45.0),
+            # 20.11 — тот же 10908, но его уже принимает Syntony: каждое сообщение водителя
+            # приходит в обе системы, и это был бы тот же чат второй раз (решение 25.11.2026).
             (104, '2026-11-20', '2026-11-20 13:00:00', 'Ноль такси', 10908, 2, 200, None),
         ]
         for request_id, day, start, park, channel_id, operator_id, reaction, inner in rows:
@@ -226,16 +229,22 @@ def test_billing_reads_chat2desk_before_and_syntony_after_the_switch(db):
     assert days['2026-11-17'] == {
         'chats': 2, 'answered': 1, 'no_reply': 1, 'answered_sl': 1, 'first_reply_seconds': 60,
         'first_replied': 1, 'sl_base': 2, 'inner_reply_seconds': 90, 'inner_replied': 1}
-    # 20.11 — Syntony и номер, который ещё в Chat2Desk (104); остаток переехавшего (103) — нет.
+    # 19.11 — после перехода, но номер 10908 ещё в Chat2Desk (105): идёт.
+    assert days['2026-11-19'] == {
+        'chats': 1, 'answered': 1, 'no_reply': 0, 'answered_sl': 1, 'first_reply_seconds': 90,
+        'first_replied': 1, 'sl_base': 1, 'inner_reply_seconds': 45, 'inner_replied': 1}
+    # 20.11 — только Syntony: 10908 (104) уже приходит и туда, остаток переехавшего (103) — тоже нет.
     assert days['2026-11-20'] == {
-        'chats': 3, 'answered': 3, 'no_reply': 0, 'answered_sl': 1, 'first_reply_seconds': 860,
-        'first_replied': 3, 'sl_base': 3, 'inner_reply_seconds': 180, 'inner_replied': 1}
+        'chats': 2, 'answered': 2, 'no_reply': 0, 'answered_sl': 1, 'first_reply_seconds': 660,
+        'first_replied': 2, 'sl_base': 2, 'inner_reply_seconds': 180, 'inner_replied': 1}
     assert [item['park'] for item in report['parks']] == ['Ноль такси']
 
-    people = billing_chat.get_chat_billing_operators(db, DAY, DAY, sl_seconds=120)
+    # Разрез по людям — обе половины: Бековой засчитаны 105 (Chat2Desk, 19.11) и c1 (Syntony).
+    people = billing_chat.get_chat_billing_operators(db, DAY - timedelta(days=1), DAY,
+                                                     sl_seconds=120)
     assert {item['operator']: (item['chats'], item['first_reply_seconds'], item['outgoing_messages'])
             for item in people['operators']} == {
-        'Бекова Динара': (2, 320, 4), 'Ахметова Айгерим': (1, 540, 1)}
+        'Бекова Динара': (2, 210, 4), 'Ахметова Айгерим': (1, 540, 1)}
 
     details = billing_chat.get_chat_billing_details(db, date(2026, 11, 17), DAY, sl_seconds=120)
     assert details['pagination']['total'] == 5
@@ -247,9 +256,13 @@ def test_billing_reads_chat2desk_before_and_syntony_after_the_switch(db):
                                                   snapshot_id=details['snapshot_id'] - 1)
     assert again['pagination']['total'] == 4
 
-    grouping = billing_chat.get_chat_billing_grouping(db, DAY, DAY, sl_seconds=120)
-    hours = {item['hour']: item for item in grouping['days'][0]['hours']}
-    assert (hours[14]['chats'], hours[14]['answered'], hours[13]['chats']) == (2, 2, 1)
+    grouping = billing_chat.get_chat_billing_grouping(db, DAY - timedelta(days=1), DAY,
+                                                      sl_seconds=120)
+    hours = {(day['date'], item['hour']): item for day in grouping['days'] for item in day['hours']}
+    assert (hours[('2026-11-20', 14)]['chats'], hours[('2026-11-20', 14)]['answered'],
+            hours[('2026-11-19', 13)]['chats']) == (2, 2, 1)
+    # 104 (10908 за 20.11, 13:00) в часы не попадает.
+    assert hours[('2026-11-20', 13)]['chats'] == 0
     # Окно времени суток режет по началу чата у обеих половин.
     morning = billing_chat.get_chat_billing_report(db, date(2026, 11, 17), DAY,
                                                    minute_from=0, minute_to=10 * 60 + 30)
@@ -258,7 +271,8 @@ def test_billing_reads_chat2desk_before_and_syntony_after_the_switch(db):
     with db._get_cursor() as cur:
         base = billing_chat._chat_billing_plan_base_tx(cur, date(2026, 11, 27), date(2026, 11, 27), 0, 1439)
         fact = billing_chat._chat_billing_fact_staff_tx(cur, DAY, DAY)
-    assert base == {'2026-11-27': 3}
+    # План 27.11 — факт 20.11: два чата Syntony, без второй копии 10908 (иначе завышался и план).
+    assert base == {'2026-11-27': 2}
     assert {(row[1], row[2]) for row in fact} >= {(14, 1), (14, 2)}
 
 
@@ -270,8 +284,8 @@ def test_test_number_added_later_leaves_billing(db):
     from test_numbers import keys as test_keys
     with db._get_cursor() as cur:
         cur.execute('INSERT INTO test_phone_numbers VALUES (%s)', (test_keys.phone_key('77010000002'),))
-    report = billing_chat.get_chat_billing_report(db, DAY, DAY)
-    assert report['totals']['chats'] == 2              # c1 Syntony и 104 Chat2Desk
+    report = billing_chat.get_chat_billing_report(db, DAY - timedelta(days=1), DAY)
+    assert report['totals']['chats'] == 2              # 105 Chat2Desk за 19.11 и c1 Syntony
 
 
 def test_no_kept_numbers_means_syntony_only_after_the_switch(db):

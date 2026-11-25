@@ -33,8 +33,10 @@
 «теряется», оно висит открытым, пока клиент не получит ответ. Поэтому ни множителя доли
 принятых, ни вычета потерь в этой модели нет и быть не должно.
 """
+import logging
 import math
 import os
+import re
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1951,10 +1953,19 @@ def get_chat_overview(db, week_start_value: Any = None,
 CHAT_BILLING_SYNTONY_FROM_DEFAULT = date(2026, 11, 18)
 CHAT_BILLING_SYNTONY_FROM_ENV = "CHAT_BILLING_SYNTONY_FROM"
 # Номера, которые после перехода остались в Chat2Desk, — их обращения идут в биллинг и после
-# 18.11 (решение владельца 24.11.2026): «Ноль такси» WABA через Gupshup (канал Chat2Desk 10908)
-# на 23.11 не переехал — ~100 обращений в день, отвечают чатники СЗоВ. Переедет — убрать отсюда
-# (или CHAT_BILLING_C2D_KEEP_CHANNEL_IDS в окружении: id каналов через запятую, пусто — ни одного).
-CHAT_BILLING_C2D_KEEP_CHANNEL_IDS_DEFAULT = (10908,)
+# 18.11 (решение владельца 24.11.2026), но только ПОКА номер не принимает Syntony: дальше то же
+# сообщение водителя приходит в обе системы, и Chat2Desk дал бы тот же чат второй раз.
+# «Ноль такси» WABA через Gupshup (канал Chat2Desk 10908) — тот же номер, что «Ноль такси» Syntony
+# (b40df588, PARK_BY_CHANNEL в syntony_chats/billing.py). Замер 25.11.2026: 18–19.11 номер в
+# Syntony только подключался — в его чатах дня 19 из 106 и 38 из 100 обращений 10908; с 20.11 —
+# все (123/124, 112/112, 60/60, 113/114), а с вечера 23.11 чатники отвечают уже в Syntony, и
+# Chat2Desk показывал «без ответа» тем, кому ответили. Поэтому 10908 — по 19.11 включительно
+# (решение владельца 25.11.2026).
+# В окружении — CHAT_BILLING_C2D_KEEP_CHANNEL_IDS через запятую: «id» — без конца, «id:ГГГГ-ММ-ДД» —
+# по этот день включительно; пусто — ни одного.
+CHAT_BILLING_C2D_KEEP_CHANNELS_DEFAULT: Tuple[Tuple[int, Optional[date]], ...] = (
+    (10908, date(2026, 11, 19)),
+)
 CHAT_BILLING_C2D_KEEP_CHANNEL_IDS_ENV = "CHAT_BILLING_C2D_KEEP_CHANNEL_IDS"
 
 
@@ -1968,18 +1979,32 @@ def chat_billing_syntony_from(environ=None) -> date:
         return CHAT_BILLING_SYNTONY_FROM_DEFAULT
 
 
-def chat_billing_c2d_keep_channel_ids(environ=None) -> Tuple[int, ...]:
-    """Каналы Chat2Desk, которые и после перехода на Syntony идут в биллинг."""
+def chat_billing_c2d_keep_channels(environ=None) -> Tuple[Tuple[int, Optional[date]], ...]:
+    """Каналы Chat2Desk, которые и после перехода на Syntony идут в биллинг:
+    (id канала, по какой день включительно; None — без конца).
+
+    Неразборчивую дату не читаем как «без конца»: так канал считался бы дважды, как только
+    его номер примет Syntony. Такой канал не берётся вовсе, а в журнал уходит предупреждение."""
     environ = os.environ if environ is None else environ
     raw = environ.get(CHAT_BILLING_C2D_KEEP_CHANNEL_IDS_ENV)
     if raw is None:
-        return CHAT_BILLING_C2D_KEEP_CHANNEL_IDS_DEFAULT
-    ids = []
-    for part in str(raw).replace(";", ",").replace(" ", ",").split(","):
-        part = part.strip()
-        if part.isdigit():
-            ids.append(int(part))
-    return tuple(ids)
+        return CHAT_BILLING_C2D_KEEP_CHANNELS_DEFAULT
+    kept = []
+    text = re.sub(r"\s*:\s*", ":", str(raw))
+    for part in text.replace(";", ",").replace(" ", ",").split(","):
+        channel, _, until = part.strip().partition(":")
+        if not channel.isdigit():
+            continue
+        last_day = None
+        if until:
+            try:
+                last_day = date.fromisoformat(until)
+            except ValueError:
+                logging.warning("Биллинг чата: %s — не разобрать дату у канала %s, канал не берём",
+                                CHAT_BILLING_C2D_KEEP_CHANNEL_IDS_ENV, channel)
+                continue
+        kept.append((int(channel), last_day))
+    return tuple(kept)
 
 
 CHAT_BILLING_MAX_RANGE_DAYS = 31
@@ -2089,21 +2114,36 @@ def _chat_billing_source(day_from: date, day_to: date, minute_from: int, minute_
     """FROM-выражение «выборка биллинга r» за период → (sql, параметры).
 
     До syntony_from — обращения Chat2Desk, с него — чаты дня Syntony (people=True — разрез
-    по сотрудникам) и обращения тех номеров Chat2Desk, что ещё не переехали
-    (chat_billing_c2d_keep_channel_ids). Половина вне периода в запрос не попадает вовсе.
+    по сотрудникам) и обращения тех номеров Chat2Desk, что ещё не переехали, по их последний
+    день (chat_billing_c2d_keep_channels). Половина вне периода в запрос не попадает вовсе.
     """
     cutover = syntony_from or chat_billing_syntony_from()
-    kept_ids = list(chat_billing_c2d_keep_channel_ids())
+    # Канал, чей срок кончился до перехода, после него ничего не добавляет.
+    kept_channels = [(channel_id, last_day) for channel_id, last_day in chat_billing_c2d_keep_channels()
+                     if last_day is None or last_day >= cutover]
     parts: List[str] = []
     params: List[Any] = []
-    c2d_to = day_to if kept_ids else min(day_to, cutover - timedelta(days=1))
+    c2d_to = min(day_to, cutover - timedelta(days=1))
+    if kept_channels:
+        if any(last_day is None for _channel_id, last_day in kept_channels):
+            c2d_to = day_to
+        else:
+            c2d_to = max(c2d_to, min(day_to, max(last_day for _channel_id, last_day in kept_channels)))
     if day_from <= c2d_to:
         window, window_params = _chat_billing_minute_window("c.request_start", minute_from, minute_to)
         kept = ""
         kept_params: List[Any] = []
-        if day_to >= cutover and kept_ids:
-            kept = " AND (c.day < %s OR c.channel_id = ANY(%s))"
-            kept_params = [cutover, kept_ids]
+        if c2d_to >= cutover:
+            clauses = []
+            for channel_id, last_day in kept_channels:
+                if last_day is None:
+                    clauses.append("c.channel_id = %s")
+                    kept_params.append(channel_id)
+                else:
+                    clauses.append("(c.channel_id = %s AND c.day <= %s)")
+                    kept_params += [channel_id, last_day]
+            kept = " AND (c.day < %s OR " + " OR ".join(clauses) + ")"
+            kept_params = [cutover] + kept_params
         parts.append(_CHAT_BILLING_C2D_SELECT.format(not_test=_NOT_TEST_SQL_C, window=window,
                                                      kept=kept))
         params += [CHAT_REQUEST_TYPE, day_from, c2d_to] + window_params + kept_params
