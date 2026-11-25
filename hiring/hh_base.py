@@ -175,7 +175,9 @@ def search_task(profile, now, *, manual=False):
         'area': str(profile.get('area_id') or DEFAULT_AREA),
         'search_period': str(FIRST_PERIOD_DAYS if first else NEXT_PERIOD_DAYS),
         'order_by': 'relevance' if first else 'publication_time',
-        'pos': 'full_text', 'logic': 'normal', 'exp_period': 'all_time',
+        # Только в названии резюме — желаемой должности (проба 25.11.2026: по всему тексту резюме на «оператор колл-центра»
+        # приходили аналитики и дизайнеры — фраза в описании опыта; по названию 400 из 400 — операторы).
+        'pos': 'position', 'logic': 'normal', 'exp_period': 'all_time',
         'relocation': 'living_or_relocation', 'currency_code': 'KZT', 'ored_clusters': 'true',
     }
     stop_before = None

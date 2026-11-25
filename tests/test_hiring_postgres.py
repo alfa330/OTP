@@ -3599,6 +3599,7 @@ def test_hh_base_search_settings_and_first_search(base):
     assert (tasks[0]['params']['area'], tasks[0]['params']['search_period'], tasks[0]['params']['order_by']) == (
         '160', '30', 'relevance')
     assert tasks[0]['pages'] == 5 and tasks[0]['stop_before'] is None
+    assert tasks[0]['params']['pos'] == 'position'                # ищем в названии резюме, не по всему тексту
     assert base_tasks(base)['tasks'] == []                       # отданное задание второй раз не уходит
     view = service.hh_base_overview(ctx_of(base, REC1))
     assert [v['hh_vacancy_id'] for v in view['vacancies']] == [HH_OPERATOR] and view['vacancies'][0]['portrait'] is None
