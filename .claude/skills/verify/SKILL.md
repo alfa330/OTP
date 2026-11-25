@@ -79,4 +79,6 @@ python -m http.server 5077 --bind 127.0.0.1   # CORS уже пускает local
 
 Живые API (CRM yataxi, Oktell, Binotel…) читать можно — они read-only на чтении.
 Ломаные ответы удобно проверять заглушкой на `http.server`, подменив `CRM_API_URL`
-(и подобные) в окружении: `get_config()` читает env раньше `.env.codex.local`.
+(и подобные) в окружении: `get_config()` читает env раньше `.env.codex.local`. С 25.11.2026 открытого
+`.env.codex.local` нет — секреты в окружение кладёт обёртка `python scripts/otp_secrets.py run -- …`
+(значения вырезаются из вывода; важные ключи — `--critical ИМЯ`, с паролем владельца).

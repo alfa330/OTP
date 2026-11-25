@@ -26,8 +26,13 @@ BASE = 'https://api.icorehub.kz'
 
 
 def env(name):
-    text = open(os.path.join(ROOT, '.env.codex.local'),
-                encoding='utf-8', errors='replace').read()
+    # Секреты — из окружения (python scripts/otp_secrets.py run -- …), старый .env — если ещё лежит.
+    if os.environ.get(name):
+        return os.environ[name]
+    path = os.path.join(ROOT, '.env.codex.local')
+    if not os.path.exists(path):
+        return None
+    text = open(path, encoding='utf-8', errors='replace').read()
     match = re.search(r'^%s\s*=\s*(.+)$' % name, text, re.M)
     return match.group(1).strip().strip('"\'') if match else None
 

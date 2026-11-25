@@ -204,10 +204,18 @@ def main():
     if args.no_save:
         print('--no-save: вход нигде не записан.')
         return
+    value = env_value(email, client_id, client_secret, refresh_token)
     env_path = Path(args.env_file)
-    current = env_path.read_text(encoding='utf-8') if env_path.exists() else ''
-    env_path.write_text(upsert_env_line(current, sync.OAUTH_ENV, env_value(email, client_id, client_secret,
-                                                                           refresh_token)), encoding='utf-8')
+    if not env_path.exists():
+        # С 25.11.2026 локальные секреты — в зашифрованном хранилище, открытого .env нет.
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import otp_secrets
+        otp_secrets.Vault().put(sync.OAUTH_ENV, value)
+        print('Записано: %s в хранилище секретов (scripts/otp_secrets.py). На прод — то же значение '
+              'в переменную окружения %s.' % (sync.OAUTH_ENV, sync.OAUTH_ENV))
+        return
+    current = env_path.read_text(encoding='utf-8')
+    env_path.write_text(upsert_env_line(current, sync.OAUTH_ENV, value), encoding='utf-8')
     print('Записано: %s в %s. На прод — то же значение в переменную Render %s.'
           % (sync.OAUTH_ENV, env_path.name, sync.OAUTH_ENV))
 

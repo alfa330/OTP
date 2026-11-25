@@ -11,9 +11,17 @@ description: Работа с бэклогом, канбаном и отчёта�
 
 ## Как подключаться
 
-Через прод-API скриптом `scripts/task_board.py`. Логин/пароль берутся из
-`.env.codex.local` (`ADMIN_LOGIN`/`ADMIN_PASSWORD`), транспорт — bearer.
-Запускать из `C:/python/OTP-1`, для читаемого вывода Cyrillic — `python -X utf8`.
+Через прод-API скриптом `scripts/task_board.py`. Логин/пароль — `ADMIN_LOGIN`/`ADMIN_PASSWORD`
+(Шерзад — `SHERZAD_*`), транспорт — bearer. С 25.11.2026 открытого `.env.codex.local` нет: секреты
+лежат в зашифрованном хранилище, и каждую команду ниже запускать через обёртку — она кладёт ключи
+в окружение и вырезает их из вывода:
+
+```bash
+python scripts/otp_secrets.py run -- python -X utf8 scripts/task_board.py board
+```
+
+Запускать из `C:/python/OTP-1`, для читаемого вывода Cyrillic — `python -X utf8`. Без обёртки скрипт
+ответит «Нет логина/пароля».
 
 ```bash
 python -X utf8 scripts/task_board.py board            # канбан по колонкам

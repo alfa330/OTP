@@ -26,6 +26,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -259,23 +260,17 @@ class NoSecretsInRepoTests(unittest.TestCase):
             'дампы кабинетов')
 
     def test_no_env_values_in_tracked_files(self):
-        """Прямое сравнение с .env.codex.local — ловит форматы, которых мы не знали."""
-        env_path = os.path.join(ROOT, ".env.codex.local")
-        if not os.path.exists(env_path):
-            self.skipTest(".env.codex.local рядом нет — проверка только для машины разработчика")
+        """Прямое сравнение с локальными секретами — ловит форматы, которых мы не знали.
 
-        secrets = {}
-        with io.open(env_path, encoding="utf-8-sig") as handle:
-            for line in handle:
-                match = re.match(r"^([A-Za-z0-9_]+)=(.*)$", line)
-                if not match:
-                    continue
-                name, value = match.group(1), match.group(2).strip().strip('"').strip("'")
-                if _is_secret_env(name, value):
-                    secrets[name] = value
+        Секреты — из .env.codex.local, а после переезда (25.11.2026) — из хранилища
+        scripts/otp_secrets.py: обычные ключи расшифровываются сами (учётка Windows), важные —
+        только если их уже передали в окружение через `otp_secrets.py run --critical …`."""
+        secrets = _local_secret_values()
+        if secrets is None:
+            self.skipTest("ни .env.codex.local, ни хранилища секретов — проверка только для машины разработчика")
 
-        self.assertTrue(secrets, "в .env.codex.local не нашлось ни одного секрета — "
-                                 "проверка бессмысленна, посмотрите разбор файла")
+        self.assertTrue(secrets, "в локальных секретах не нашлось ни одного — "
+                                 "проверка бессмысленна, посмотрите разбор")
         offenders = []
         for name in _tracked_files():
             text = _read(name)
@@ -286,8 +281,76 @@ class NoSecretsInRepoTests(unittest.TestCase):
                 if index != -1:
                     offenders.append("%s:%d — значение %s" % (name, _line_of(text, index), var))
         self.assertEqual([], offenders,
-                         "Боевое значение из .env.codex.local лежит в файле под "
+                         "Боевое значение из локальных секретов лежит в файле под "
                          "контролем Git:\n" + "\n".join(offenders))
+
+
+_KEY_BODY_LINE_RE = re.compile(r"^[A-Za-z0-9+/=]{40,}$")
+# Только сами секретные поля: у сервис-аккаунта Google есть ещё token_uri — публичный адрес.
+_JSON_SECRET_FIELD_RE = re.compile(r"^(private_key|private_key_id|client_secret|refresh_token|access_token|"
+                                   r"token|password|secret|api_key)$", re.I)
+
+
+def _secret_parts(value):
+    """Куски секретного материала многострочного значения: строки тела ключа и секретные поля JSON."""
+    texts = [value]
+    try:
+        data = json.loads(value)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        texts = [str(v) for k, v in data.items()
+                 if _JSON_SECRET_FIELD_RE.match(k) and isinstance(v, str) and not v.startswith("http")]
+    parts = []
+    for text in texts:
+        lines = [x.strip() for x in text.splitlines()]
+        parts += [x for x in lines if _KEY_BODY_LINE_RE.match(x)]
+        if isinstance(data, dict) and len(lines) == 1 and len(text) >= 16:
+            parts.append(text)          # однострочное секретное поле JSON (private_key_id, client_secret)
+    return parts
+
+
+def _local_secret_values():
+    """{имя: значение} локальных секретов или None, если их на этой машине нет."""
+    env_path = os.path.join(ROOT, ".env.codex.local")
+    secrets = {}
+    if os.path.exists(env_path):
+        with io.open(env_path, encoding="utf-8-sig") as handle:
+            for line in handle:
+                match = re.match(r"^([A-Za-z0-9_]+)=(.*)$", line)
+                if not match:
+                    continue
+                name, value = match.group(1), match.group(2).strip().strip('"').strip("'")
+                if _is_secret_env(name, value):
+                    secrets[name] = value
+        return secrets
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    try:
+        import otp_secrets
+        vault = otp_secrets.Vault()
+        if not vault.file.exists():
+            return None
+        for name, entry in vault.entries().items():
+            if entry.get("kind", "env") != "env":
+                continue
+            if entry["tier"] == "critical":
+                value = os.environ.get(name)
+            else:
+                value = vault.value(name)
+            if not value:
+                continue
+            if _is_secret_env(name, value):
+                secrets[name] = value
+            # Многострочные (ключ SSH, JSON сервис-аккаунта): в файл скорее попадёт кусок, чем целое.
+            # Сверяем только секретный материал — тело ключа и секретные поля JSON, а не строки вроде
+            # "type": "service_account", которые есть в любой фикстуре.
+            for i, part in enumerate(_secret_parts(value)):
+                secrets.setdefault("%s (часть %d)" % (name, i + 1), part)
+    except Exception:  # noqa: BLE001 — хранилище не открылось: проверку не валим, а пропускаем
+        return None
+    finally:
+        sys.path.pop(0)
+    return secrets
 
 
 if __name__ == "__main__":
