@@ -103,7 +103,13 @@ def get_gcs_client():
 
 # Global connection pool. Keep a warm floor so the first browser burst does not
 # pay for creating PostgreSQL connections one by one on the request path.
-MIN_CONN = _env_int('POSTGRES_POOL_MIN_CONN', 16, minimum=1)
+# Пол 16 — для одного процесса на всё (OTP_ROLE=all, как на Render). В Yandex Cloud процессов
+# несколько (api ×2, realtime ×2, worker), а лимит пользователя базы (80) у них общий: 5 × 16 = 80
+# впритык, и при выкладке 25.11.2026 в 12:43 новые поды не получили ни одного соединения — воркер
+# упал в CrashLoopBackOff («server closed the connection unexpectedly»). Раздельным ролям пол — 4,
+# дальше пул растёт до MAX_CONN по нагрузке, как раньше.
+_DEFAULT_MIN_CONN = 16 if (os.getenv('OTP_ROLE') or 'all').strip().lower() == 'all' else 4
+MIN_CONN = _env_int('POSTGRES_POOL_MIN_CONN', _DEFAULT_MIN_CONN, minimum=1)
 MAX_CONN = max(MIN_CONN, _env_int('POSTGRES_POOL_MAX_CONN', 40, minimum=MIN_CONN))
 POOL_ACQUIRE_TIMEOUT_SECONDS = _env_float('POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS', 30, minimum=1)
 POOL_WAIT_WARN_SECONDS = _env_float('POSTGRES_POOL_WAIT_WARN_SECONDS', 2, minimum=0)
