@@ -15,7 +15,18 @@ import {
     hhMoney, hhPeriod, hhResumeSummary, hhSpan,
     HH_KEYWORDS_MAX, hhAddKeywords, hhBaseExperience, hhBaseLine, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseTone,
     hhSearchBody, HH_RESUME_PARAM, hhResumeFromSearch, hhResumeLink, hhBaseName, hhBaseSubline, hhBaseFunnelState,
+    boardCardDay,
 } from '../src/components/hiring/hiringMeta.js';
+
+test('board card date: received for the pool, the day of taking for cards in work', () => {
+    const card = { received_at: '2026-11-20T09:15:00', taken_at: '2026-11-26T11:46:00' };
+    assert.equal(boardCardDay({ ...card, stage: 'responses' }), '20.11 09:15');
+    assert.equal(boardCardDay({ ...card, stage: 'contacts' }), '20.11 09:15');
+    assert.equal(boardCardDay({ ...card, stage: 'in_work' }), '26.11 11:46');
+    assert.equal(boardCardDay({ ...card, stage: 'refused' }), '26.11 11:46');
+    assert.equal(boardCardDay({ received_at: '2026-11-20T09:15:00', stage: 'in_work' }), '20.11 09:15');   // взятия не было
+    assert.equal(boardCardDay(null), '');
+});
 
 test('hh.kz resume in the card: money, spans, periods and a one-line summary', () => {
     // Владелец 23.11.2026: «все резюме и письмо человека который обратился отобразились сразу в карточке».

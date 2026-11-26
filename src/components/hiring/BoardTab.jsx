@@ -5,7 +5,7 @@ import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
 import { quickPeriods } from '../ui/periodRange';
 import {
-    ARCHIVE_STAGE, DATED_STAGES, POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, boardQuery, canReschedule, codeOf,
+    ARCHIVE_STAGE, DATED_STAGES, POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, boardCardDay, boardQuery, canReschedule, codeOf,
     columnCollapsed, dayKey, dayLabel, daysSince, errorOf, groupCards, groupKey, initials, isPastDay, openDaysFrom, openICorePhoneCall,
     shortTime, sourceTone, todayIso, toggleInList, visitTime, withExpanded, withExpandedDay,
 } from './hiringMeta';
@@ -30,8 +30,9 @@ import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loadin
  * браузере; карточки сервер присылает только раскрытым, у длинной — «Показать ещё».
  *
  * Период — общий для всех колонок, в панели рядом с «Фильтрами» (владелец 24.11.2026: «сделать пикер периода общим на
- * все столбцы и переместить наверх к фильтрам»; до этого он был только в шапке «Откликов»): по дате отклика — доска
- * показывает, где сейчас кандидаты, откликнувшиеся за этот период.
+ * все столбцы и переместить наверх к фильтрам»; до этого он был только в шапке «Откликов»): «Контакты» и «Отклики» — по
+ * дню отклика, взятые в работу — по дню взятия (владелец 26.11.2026: «день принятия в работу корректно засчитывался»).
+ * На карточке взятого — тоже день взятия, а не поступления.
  *
  * «Приглашен в офис» и «Приглашен на обучение» поделены по дням (владелец 24.11.2026: «разбивку по датам приглашения
  * начиная от сегодня… как в откликах раскрыть и посмотреть людей, которые приглашены к этому дню»; «прошлые дни должны
@@ -159,7 +160,8 @@ const CardTile = ({
                 ) : (
                     <span className="truncate">
                         {visit ? `визит ${visit}` : card.next_contact_at && !card.is_closed ? `контакт ${shortTime(card.next_contact_at)}`
-                            : idleDays !== null && idleDays >= 7 ? `без касаний ${idleDays} дн` : card.candidate_no ? shortTime(card.received_at) : ''}
+                            : idleDays !== null && idleDays >= 7 ? `без касаний ${idleDays} дн`
+                                : card.candidate_no ? boardCardDay(card) : ''}
                     </span>
                 )}
             </div>
@@ -410,7 +412,7 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
     const [dragging, setDragging] = useState(null);
     const [collapsed, setCollapsed] = useState(() => readList(COLLAPSED_KEY));
     const [openedArchive, setOpenedArchive] = useState(() => readList(ARCHIVE_OPEN_KEY));
-    // Период — на все колонки (по дате отклика). «Отклики»: раскрытые группы источников (по умолчанию свёрнуты все —
+    // Период — на все колонки (пул — по дню отклика, взятые — по дню взятия). «Отклики»: раскрытые группы источников (по умолчанию свёрнуты все —
     // решение владельца 20.11.2026) и группы, где нажали «Показать ещё».
     const [period, setPeriod] = useState({ from: '', to: '' });
     const [openGroups, setOpenGroups] = useState(() => readList(OPEN_GROUPS_KEY).map(String));
@@ -566,7 +568,8 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
                     )}
                 </label>
                 <FiltersToggle open={filtersOpen} count={activeFilters} onToggle={() => setFiltersOpen((v) => !v)} />
-                {/* Период — на все колонки, по дате отклика (владелец 24.11.2026). Календарь — общий сайта, в портале. */}
+                {/* Период — на все колонки (владелец 24.11.2026): пул — по дню отклика, взятые — по дню взятия в работу
+                    (26.11.2026). Календарь — общий сайта, в портале. */}
                 <IosDateRangePicker portal from={period.from} to={period.to} max={todayIso()} presets={PERIOD_PRESETS} views={PERIOD_VIEWS}
                                     triggerClassName={periodTrigger(Boolean(period.from || period.to))}
                                     onChange={({ from, to }) => setPeriod({ from: from || '', to: to || '' })} />

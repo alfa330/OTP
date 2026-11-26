@@ -516,6 +516,8 @@ def test_board_responses_groups_and_period_through_routes(client):
            for n, (code, day) in enumerate((('whatsapp', 10), ('target', 12), ('target', 18), ('hh', 19)), start=1)]
     old = response('8 705 400 00 05', 'hh', datetime(2026, 11, 1, 12, 0))
     assert client.post('/api/hiring/cards/%s/take' % old, headers=rec).status_code == 200
+    with client.world['db']._get_cursor() as cur:       # взяли в работу 2.11 — у взятых период режет по дню взятия
+        cur.execute("UPDATE hiring_cards SET taken_at = %s WHERE id = %s", (datetime(2026, 11, 2, 9, 0), old))
 
     def board(**query):
         columns = client.get('/api/hiring/board', query_string=query, headers=rec).get_json()['columns']
@@ -549,8 +551,8 @@ def test_board_responses_groups_and_period_through_routes(client):
     assert remote_responses['cards'] and all(c['phone'] is None and c['phone_hidden'] for c in remote_responses['cards'])
     assert all(set(g) == {'source_id', 'name', 'color', 'total', 'card_ids'} for g in remote_responses['groups'])
 
-    # Период — общий на все колонки (владелец 24.11.2026), по дате отклика, «по» — включительно: 12.11–18.11 — два
-    # отклика «Таргета», а «В работе» (отклик 1.11) пусто.
+    # Период — общий на все колонки (владелец 24.11.2026), «по» — включительно; пул — по дню отклика, взятые — по дню взятия
+    # (26.11.2026): 12.11–18.11 — два отклика «Таргета», а «В работе» (взят 2.11) пусто.
     cut = board(**{'from': '2026-11-12', 'to': '2026-11-18'})
     assert cut['responses']['total'] == 2 and [(g['name'], g['total']) for g in cut['responses']['groups']] == [('Таргет', 2)]
     assert cut['in_work']['total'] == 0 and cut['in_work']['cards'] == []

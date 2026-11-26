@@ -1564,18 +1564,26 @@ def _filters(filters):
         else:
             where.append("(c.full_name ILIKE %s OR c.city ILIKE %s OR COALESCE(c.vacancy_text, '') ILIKE %s)")
             params.extend(['%' + text + '%', '%' + text + '%', '%' + text + '%'])
+    # Период: «Контакты» и «Отклики» — по дню поступления, взятые в работу — по дню взятия (владелец 26.11.2026: «когда
+    # кандидата берут в работу то дата обработки почему то ставится днем создания карточки а что бы у рекрутеров
+    # получался правильный отчет надо что бы день принятия в работу корректно засчитывался»). Без даты взятия (карточку
+    # внесли сразу на этап) — по дню поступления.
     if filters.get('from'):
-        where.append("c.received_at >= %s")
+        where.append(_PERIOD_DAY + " >= %s")
         params.append(filters['from'])
     if filters.get('to'):
-        where.append("c.received_at < %s")
+        where.append(_PERIOD_DAY + " < %s")
         params.append(filters['to'])
     return where, params
 
 
+_PERIOD_DAY = ("(CASE WHEN c.stage IN ('contacts', 'responses') THEN c.received_at "
+               "ELSE COALESCE(c.taken_at, c.received_at) END)")
+
+
 def _board_where(caps, user_id, filters):
-    """Условие доски и его параметры: круг человека (scope_clause) и отборы. Период (from / to, по дате отклика) режет все
-    колонки (владелец 24.11.2026: «сделать пикер периода общим на все столбцы»)."""
+    """Условие доски и его параметры: круг человека (scope_clause) и отборы. Период (from / to) режет все колонки (владелец
+    24.11.2026: «сделать пикер периода общим на все столбцы»): пул — по дню отклика, взятые — по дню взятия в работу."""
     scope_sql, scope_params = scope_clause(caps, user_id)
     where, params = _filters(filters)
     return " AND ".join([scope_sql] + where), scope_params + params

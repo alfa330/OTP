@@ -445,6 +445,12 @@ export const shortTime = (iso) => {
     return p.hasTime ? `${date} ${p.hour}:${p.minute}` : date;
 };
 
+/** Дата на карточке доски: в «Контактах» и «Откликах» — когда поступила, у взятых — когда взяли в работу (владелец
+ *  26.11.2026: «дата обработки почему то ставится днем создания карточки»). Тот же день режет период доски. */
+export const boardCardDay = (card) => shortTime(
+    POOL_STAGES.includes(card?.stage) ? card?.received_at : (card?.taken_at || card?.received_at),
+);
+
 /** «30 октября, 14:00». */
 export const longTime = (iso) => {
     const p = parts(iso);
