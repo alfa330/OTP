@@ -19,7 +19,7 @@ from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from io import BytesIO, StringIO
-from aiogram import Bot, Dispatcher, executor, types
+from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
@@ -198,6 +198,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 from common import log_secrets
 
 log_secrets.install()
+from common import bot_polling  # noqa: E402
 
 
 def _env_bool(name, default=False):
@@ -61702,7 +61703,9 @@ if __name__ == '__main__':
     
     # Запускаем бота. on_startup нужен, чтобы запомнить цикл бота (из него потом уходит
     # отбивка табло, которую инициирует поток Flask) и залить меню команд.
-    executor.start_polling(dp, skip_updates=True, on_startup=_on_bot_startup)
+    # Недоступный на старте Telegram процесс не роняет (common/bot_polling.py): без этого
+    # 26.11.2026 вместе с ботом по кругу падал весь worker — планировщик, синки и сторожа.
+    bot_polling.start_polling(dp, skip_updates=True, on_startup=_on_bot_startup)
 
 
 

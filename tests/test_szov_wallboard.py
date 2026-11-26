@@ -1955,7 +1955,9 @@ class SzovBroadcastWiringTests(unittest.TestCase):
     def test_bot_loop_is_captured_for_flask_triggered_sends(self):
         """Из потока Flask нельзя слать через чужой цикл — ссылку берём на старте бота."""
         # on_startup сейчас делает две вещи (цикл + меню), но цикл обязан запоминаться.
-        self.assertIn("executor.start_polling(dp, skip_updates=True, on_startup=_on_bot_startup)", self.api)
+        # Запуск — через common/bot_polling.py: недоступный Telegram не роняет worker (26.11.2026).
+        self.assertIn("bot_polling.start_polling(dp, skip_updates=True, on_startup=_on_bot_startup)", self.api)
+        self.assertNotIn("executor.start_polling(", self.api)
         self.assertIn("await _capture_bot_loop(_dispatcher)", self.api)
         self.assertIn("async def _capture_bot_loop", self.api)
         self.assertIn("asyncio.run_coroutine_threadsafe(send(int(chat_id)), loop)", self.api)
