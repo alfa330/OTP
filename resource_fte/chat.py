@@ -2163,6 +2163,41 @@ def _chat_billing_source(day_from: date, day_to: date, minute_from: int, minute_
             params)
 
 
+def chat_billing_operator_day_totals(cursor, day_from: date, day_to: date, *,
+                                     syntony_from: Optional[date] = None
+                                     ) -> Dict[Tuple[date, int], Dict[str, Any]]:
+    """{(день, id сотрудника): {'chats', 'first_sum', 'first_n'}} — как вкладка «Чатники».
+
+    Та же выборка, что у разреза по сотрудникам (_chat_billing_source, people=True): с
+    syntony_from — диалоги Syntony (чат засчитан каждому, кто отвечал в эти сутки; первый
+    ответ — ответившему первым) и обращения номеров, что ещё в Chat2Desk; раньше — Chat2Desk.
+    Отсюда «Учёт часов» берёт чаты и время ответа чатников СЗоВ (SZOV-11,
+    syntony_chats/employees.py), поэтому цифры у сотрудника и в биллинге — одни.
+    """
+    source, params = _chat_billing_source(day_from, day_to, 0, 1439, people=True,
+                                          syntony_from=syntony_from)
+    cursor.execute(
+        f"""
+        SELECT r.day, r.operator_id,
+               COUNT(*) FILTER (WHERE r.counted)::int,
+               COALESCE(SUM(r.first_reply), 0)::float,
+               COUNT(r.first_reply)::int
+        FROM {source}
+        WHERE r.operator_id IS NOT NULL
+        GROUP BY 1, 2
+        """,
+        params,
+    )
+    totals: Dict[Tuple[date, int], Dict[str, Any]] = {}
+    for day_value, operator_id, chats, first_sum, first_n in cursor.fetchall():
+        totals[(day_value, int(operator_id))] = {
+            "chats": max(0, int(chats or 0)),
+            "first_sum": float(first_sum or 0.0),
+            "first_n": max(0, int(first_n or 0)),
+        }
+    return totals
+
+
 def _chat_billing_blank(metrics: Tuple[str, ...]) -> Dict[str, int]:
     return {key: 0 for key in metrics}
 

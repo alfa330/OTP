@@ -34,8 +34,10 @@ class ImportAliasTests(unittest.TestCase):
         for node in TREE.body:
             if isinstance(node, ast.ImportFrom) and node.module == 'syntony_chats':
                 aliases.update(alias.asname or alias.name for alias in node.names)
-        # Биллинг чата по Syntony (24.11.2026) — свой модуль рядом с табло.
-        self.assertEqual(aliases, {'syntony_chats_szov', 'syntony_chats_billing'})
+        # Биллинг чата по Syntony (24.11.2026) — свой модуль рядом с табло; показатели чатников
+        # в «Учёте часов» (SZOV-11, 25.11.2026) — тоже.
+        self.assertEqual(aliases, {'syntony_chats_szov', 'syntony_chats_billing',
+                                   'syntony_chats_employees'})
         defined = set()
         for node in TREE.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -93,8 +95,42 @@ class BillingWiringTests(unittest.TestCase):
         job = _function('syntony_chat_billing_refresh_job')
         self.assertIn('syntony_chats_szov.data_enabled()', job)
         self.assertIn('syntony_chats_billing.refresh(', job)
-        self.assertIn('first_day=chat_billing_syntony_from()', job)
+        self.assertIn('first_day = chat_billing_syntony_from()', job)
+        self.assertIn('syntony_chats_billing.refresh(db, ctx, first_day=first_day', job)
         self.assertIn("id='syntony_chat_billing_refresh'", SOURCE)
+
+    def test_employee_metrics_follow_the_billing_run(self):
+        # SZOV-11: «Учёт часов» чатников — тем же прогоном, тем же справочником и днём перехода;
+        # упавший биллинг показатели не держит (они читают уже собранные сутки).
+        job = _function('syntony_chat_billing_refresh_job')
+        self.assertIn('syntony_chats_employees.refresh(', job)
+        self.assertIn('db, ctx, first_day=first_day', job.split('syntony_chats_employees.refresh(')[1])
+        self.assertLess(job.index('syntony_chats_billing.refresh('),
+                        job.index('syntony_chats_employees.refresh('))
+        billing_failure = job.split('logging.exception("Биллинг чата по Syntony: прогон упал")')[1]
+        self.assertIn('results = None', billing_failure.split('\n')[1])
+
+    def test_chat2desk_nightly_syncs_leave_syntony_columns_alone(self):
+        # С перехода чаты и время ответа чатникам пишет Syntony, статусы покрытых суток — тоже:
+        # ночные синки Chat2Desk их не трогают, остальное (оценки, переводы, заявки) — как было.
+        metrics_sync = _function('sync_chat2desk_daily_metrics')
+        self.assertIn('syntony_chats_employees.split_c2d_daily_metrics(', metrics_sync)
+        self.assertIn('if syntony_on and day_obj >= syntony_cutover:', metrics_sync)
+        # Справочник не собрался — не пишем эти две колонки никому (иначе Chat2Desk лёг бы поверх
+        # Syntony навсегда); откат на Chat2Desk снимает отметки Syntony.
+        self.assertIn('syntony_chats_employees.c2d_metric_owners(syntony_roster, metrics)', metrics_sync)
+        self.assertIn('syntony_chats_employees.forget_marks(', metrics_sync)
+        self.assertIn('if (not syntony_on and day_obj >= syntony_cutover', metrics_sync)
+        self.assertIn('db.save_c2d_requests(', metrics_sync)
+        statuses_sync = _function('sync_chat2desk_operator_statuses')
+        # Не все чатники покрытых суток, а только те, чьи сутки пишет Syntony (по людям).
+        self.assertIn('syntony_chats_employees.status_people(', statuses_sync)
+        self.assertIn("parsed.get('events'), syntony_people[day_obj])", statuses_sync)
+        self.assertIn("parsed.get('segments'), syntony_people[day_obj])", statuses_sync)
+        self.assertNotIn("parsed['chat_metrics'] = syntony_chats_employees", statuses_sync)
+        roster = _function('_syntony_chat_manager_ids')
+        self.assertIn('syntony_chats_szov.data_enabled()', roster)
+        self.assertIn('syntony_chats_employees.roster_ids(_szov_syntony_context())', roster)
 
 
 class ChatBroadcastSyntonyTests(unittest.TestCase):

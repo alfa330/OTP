@@ -327,29 +327,57 @@ def build_day(db, ctx, day, *, now):
     return {'day': day.isoformat(), 'chats': len(chats), 'complete': complete, 'staff_source': source}
 
 
-def days_to_build(journal, *, first_day, now):
+def days_to_build(journal, *, first_day, now, restaff=()):
     """Какие сутки собирать сейчас: сегодня всегда; вчера и раньше — пока не собраны целиком
-    (не дальше 29 дней: переписка старше удалена), прошлые — не больше 3 за прогон, свежие сначала."""
+    (не дальше 29 дней: переписка старше удалена), прошлые — не больше 3 за прогон, свежие сначала.
+
+    restaff — собранные целиком сутки, где сотрудники по часам посчитаны по ответам, а статусы
+    Syntony их теперь покрывают (метод отдал историю задним числом): их сотрудники пересчитываются
+    по статусам — в той же очереди прошлых суток.
+    """
     today = now.astimezone(szov.LOCAL_TZ).date()
     floor = max(first_day, today - timedelta(days=REBUILD_MAX_AGE_DAYS))
+    restaff = set(restaff or ())
     pending = []
     day = today - timedelta(days=1)
     while day >= floor:
-        if not (journal.get(day) or {}).get('complete'):
+        entry = journal.get(day) or {}
+        if not entry.get('complete') or day in restaff:
             pending.append(day)
         day -= timedelta(days=1)
     return ([today] if today >= first_day else []) + pending[:BACKFILL_DAYS_PER_RUN]
+
+
+def restaff_days(journal, state, *, now, keep_days=None):
+    """Собранные целиком прошлые сутки со «сотрудниками по ответам», которые статусы Syntony
+    теперь покрывают целиком. Не старше срока хранения переписки (sync.keep_days): сутки
+    пересобираются по ней целиком, а старше — её уже нет."""
+    today = now.astimezone(szov.LOCAL_TZ).date()
+    keep = sync.keep_days() if keep_days is None else keep_days
+    oldest = today - timedelta(days=max(1, min(REBUILD_MAX_AGE_DAYS, int(keep) - 1)))
+    out = set()
+    for day, entry in journal.items():
+        if day >= today or day < oldest or not entry.get('complete') \
+                or entry.get('staff_source') != STAFF_FROM_REPLIES:
+            continue
+        start, end = szov.local_day_bounds(day)
+        if szov.statuses_cover(state, start, end):
+            out.add(day)
+    return out
 
 
 def refresh(db, ctx, *, first_day, now=None):
     """Прогон: собрать нужные сутки → [итог по суткам]. Ошибка одних суток другие не держит."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     with db._get_cursor() as cursor:
-        cursor.execute('SELECT day, complete, error FROM syntony_chat_billing_days WHERE day >= %s',
-                       (first_day,))
-        journal = {row[0]: {'complete': row[1], 'error': row[2]} for row in cursor.fetchall()}
+        cursor.execute('SELECT day, complete, error, staff_source FROM syntony_chat_billing_days'
+                       ' WHERE day >= %s', (first_day,))
+        journal = {row[0]: {'complete': row[1], 'error': row[2], 'staff_source': row[3]}
+                   for row in cursor.fetchall()}
+        status_state = statuses.state(cursor)
+    restaff = restaff_days(journal, status_state, now=now)
     results = []
-    for day in days_to_build(journal, first_day=first_day, now=now):
+    for day in days_to_build(journal, first_day=first_day, now=now, restaff=restaff):
         try:
             results.append(build_day(db, ctx, day, now=now))
         except Exception as exc:  # noqa: BLE001

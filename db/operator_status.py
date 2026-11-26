@@ -1122,7 +1122,7 @@ class OperatorStatusMixin:
         return result
 
     def save_operator_status_import(self, events, segments, imported_by=None, summary=None,
-                                    keep_live_events=False):
+                                    keep_live_events=False, clear_operator_days=None):
         """
         Сохранить импорт статусов операторов:
         - сырые события переключений (operator_status_events)
@@ -1136,6 +1136,11 @@ class OperatorStatusMixin:
         на обзвоне в телефоне, и «replace» по дню стирал бы его телефонные статусы при
         каждой выгрузке. Заменяются только прежние события выгрузки; сегменты дня
         пересобираются из обоих источников (_overlay_live_status_sessions).
+
+        clear_operator_days — [(id оператора, дата)], которые заменяются, даже если новых
+        событий и отрезков у них нет: источник за эти сутки сказал «человека не было».
+        Так статусы Syntony снимают со дня чатника прежние статусы Chat2Desk (SZOV-11):
+        без этого у того, кто в Syntony не выходил, остались бы часы по Chat2Desk.
         """
         if not isinstance(events, list):
             raise ValueError("events must be a list")
@@ -1218,7 +1223,11 @@ class OperatorStatusMixin:
                 'status_key': status_key,
                 'state_note': state_note,
                 'event_kind': event_kind,
-                'imported_by': imported_by_id
+                'imported_by': imported_by_id,
+                # Своя отметка события сильнее признака импорта: Syntony (SZOV-11) кладёт к
+                # готовым интервалам обычное событие «не в сети» в конце суток — опору, от
+                # которой пересборка соседних суток строит их начало и хвост этих суток.
+                'is_authoritative': item.get('is_authoritative'),
             })
             affected_operator_ids.add(operator_id)
             _extend_range(event_ranges_map, operator_id, event_date_obj)
@@ -1304,6 +1313,24 @@ class OperatorStatusMixin:
             })
             affected_operator_ids.add(operator_id)
             _extend_range(segment_ranges_map, operator_id, status_date_obj)
+
+        # Сутки, которые источник объявил пустыми, удаляются тем же путём, что и сутки с
+        # новыми событиями: их события выгрузки и отрезки уходят, часы пересчитываются.
+        for item in (clear_operator_days or []):
+            try:
+                clear_operator_id = int(item[0])
+                clear_day = item[1]
+            except Exception:
+                continue
+            if isinstance(clear_day, datetime):
+                clear_day = clear_day.date()
+            elif not isinstance(clear_day, date):
+                try:
+                    clear_day = datetime.strptime(str(clear_day).strip(), '%Y-%m-%d').date()
+                except Exception:
+                    continue
+            affected_operator_ids.add(clear_operator_id)
+            _extend_range(event_ranges_map, clear_operator_id, clear_day)
 
         event_ranges = sorted(
             [(int(op_id), bounds[0], bounds[1]) for op_id, bounds in event_ranges_map.items()],
@@ -1454,7 +1481,9 @@ class OperatorStatusMixin:
                     row_values = []
                     for col in event_insert_columns:
                         if col == 'is_authoritative':
-                            row_values.append(bool(authoritative_segments))
+                            own_flag = item.get('is_authoritative')
+                            row_values.append(bool(authoritative_segments) if own_flag is None
+                                              else bool(own_flag))
                         else:
                             row_values.append(item.get(col))
                     event_values.append(tuple(row_values))

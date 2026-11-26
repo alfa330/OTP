@@ -233,6 +233,21 @@ _STATEMENTS = [
         error         TEXT
     )
     """,
+
+    # Показатели чатников СЗоВ в «Учёте часов» (SZOV-11, employees.py). Что за сутки уже
+    # записано сотруднику из Syntony: строка «Учёта часов» переписывается, только когда
+    # поменялись сами данные, — иначе ручная правка СВ откатывалась бы каждым прогоном.
+    """
+    CREATE TABLE IF NOT EXISTS syntony_employee_metric_marks (
+        day          DATE NOT NULL,
+        operator_id  INTEGER NOT NULL,
+        chats        INTEGER NOT NULL,
+        first_sum    DOUBLE PRECISION NOT NULL,
+        first_n      INTEGER NOT NULL,
+        written_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (day, operator_id)
+    )
+    """,
 ]
 
 

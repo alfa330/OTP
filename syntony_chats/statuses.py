@@ -27,8 +27,10 @@ Syntony может начинаться с выкладки метода, и ч�
 часам для графика табло и факта сотрудников биллинга.
 """
 
+import os
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, datetime, time as dtime, timedelta
+from zoneinfo import ZoneInfo
 
 from psycopg2.extras import Json
 
@@ -59,9 +61,15 @@ SLICE = timedelta(days=1)
 SLICES_PER_RUN = 8                        # первый забор (неделя назад) — за один прогон
 PAUSE_SECONDS = 1.1
 OVERLAP = timedelta(minutes=5)
-# Первый забор: неделя назад — хватает, чтобы собрать часы на линии биллинга с 18.11, если
-# Syntony хранит историю статусов; меньше, если не хранит, — тогда что отдаст.
+# Первый забор: неделя назад, а если день перехода на Syntony раньше — с него (SZOV-11: часы
+# чатников в «Учёте часов» — с 18.11, биллинг — тоже), но не старше MAX_AGE. Syntony хранит
+# историю статусов — она вся и придёт; не хранит — что отдаст.
 FIRST_LOOKBACK = timedelta(days=7)
+# День перехода — тот же переключатель, что у биллинга и «Учёта часов»
+# (resource_fte.chat.chat_billing_syntony_from): CHAT_BILLING_SYNTONY_FROM, ГГГГ-ММ-ДД.
+FIRST_FROM_ENV = 'CHAT_BILLING_SYNTONY_FROM'
+FIRST_FROM_DEFAULT = date(2026, 11, 18)
+_LOCAL_TZ = ZoneInfo('Asia/Almaty')
 MAX_AGE = timedelta(days=30)              # from старше 31 дня не принимает
 # Открытый интервал старше недели — забытый, а не текущий: перечитывать с него не будем.
 OPEN_LOOKBACK = timedelta(days=7)
@@ -236,6 +244,24 @@ def load_last_seen(cursor, since):
 
 # ── Забор ─────────────────────────────────────────────────────────────────────────────────
 
+def first_from(environ=None):
+    """С какой полуночи Алматы читать статусы при самом первом заборе: за сутки до дня перехода.
+    Сутки раньше — ради ночных смен: интервал, начатый вечером накануне перехода, приходит срезом
+    своего начала, а без него у первых суток не было бы начала ночи."""
+    environ = os.environ if environ is None else environ
+    raw = str(environ.get(FIRST_FROM_ENV) or '').strip()
+    try:
+        day = date.fromisoformat(raw) if raw else FIRST_FROM_DEFAULT
+    except ValueError:
+        day = FIRST_FROM_DEFAULT
+    return datetime.combine(day - timedelta(days=1), dtime(0, 0), tzinfo=_LOCAL_TZ)
+
+
+def first_start(now, day_start, environ=None):
+    """Начало первого забора: неделя назад или день перехода — что раньше, но не старше MAX_AGE."""
+    return max(min(day_start(now) - FIRST_LOOKBACK, first_from(environ)), now - MAX_AGE)
+
+
 def pull(db, config, *, now, marks, sleep, call, items_of, utcnow, day_start, session=None):
     """Шаг сторожа: интервалы с отметки → (записано, страниц, закрыто отсутствующих).
 
@@ -245,7 +271,7 @@ def pull(db, config, *, now, marks, sleep, call, items_of, utcnow, day_start, se
     mark = marks.get(MARK_STATUSES)
     with db._get_cursor() as cursor:
         open_since = oldest_open(cursor, now - OPEN_LOOKBACK)
-    start = (mark - OVERLAP) if mark is not None else (day_start(now) - FIRST_LOOKBACK)
+    start = (mark - OVERLAP) if mark is not None else first_start(now, day_start)
     if open_since is not None:
         start = min(start, open_since)
     start = max(start, now - MAX_AGE)

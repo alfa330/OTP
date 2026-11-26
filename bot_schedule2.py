@@ -46,6 +46,9 @@ from syntony_leads import client as syntony_leads_client
 # таблиц, которые пишут вебхук и сторож API истории. Без побочных действий на импорте.
 from syntony_chats import szov as syntony_chats_szov
 from syntony_chats import billing as syntony_chats_billing
+# Показатели чатников СЗоВ в «Учёте часов» по Syntony (SZOV-11, 25.11.2026): чаты, время
+# ответа и статусы с 18.11 вместо Chat2Desk. Без побочных действий на импорте.
+from syntony_chats import employees as syntony_chats_employees
 # Автоотчёт по проведённым тренингам (задача #261): чистая логика периода,
 # выборки и книги Excel. Импорт обычный, а не ленивый, как у остальных
 # модулей пакета: этот ничего не знает ни про базу, ни про схему раздела —
@@ -27952,6 +27955,14 @@ def sync_chat2desk_daily_metrics(day=None, date_from=None, date_to=None, trigger
         operator_lookup = _status_import_build_operator_lookup(prefer_chat_managers=True)
         operator_token_index = _chat_report_build_operator_token_index()
         target_days = _chat2desk_sync_target_days(day, date_from=date_from, date_to=date_to)
+        # С перехода на Syntony (SZOV-11) чаты и время ответа чатникам СЗоВ пишет Syntony —
+        # здесь у них остаются только прочие колонки (оценки); заявки c2d_requests — как были.
+        # Справочник не собрался — эти две колонки не пишутся никому (c2d_metric_owners): иначе
+        # цифры Chat2Desk легли бы поверх Syntony навсегда. Данные Syntony выключены (откат) —
+        # Chat2Desk пишет всё, как раньше, а отметки Syntony этих суток снимаются.
+        syntony_cutover = chat_billing_syntony_from()
+        syntony_on = syntony_chats_szov.data_enabled()
+        syntony_roster = _syntony_chat_manager_ids() if syntony_on else None
 
         for day_obj in target_days:
             day_str = day_obj.strftime('%Y-%m-%d')
@@ -27966,12 +27977,30 @@ def sync_chat2desk_daily_metrics(day=None, date_from=None, date_to=None, trigger
                 metrics = report.get('metrics') or []
                 update_fields = report.get('update_fields') or []
                 save_summary = {'batch_id': None, 'processed': 0}
-                if metrics and update_fields:
-                    save_summary = db.save_chat_manager_daily_metrics(
-                        metrics=metrics,
+                batches = [(metrics, update_fields)] if metrics and update_fields else []
+                if syntony_on and day_obj >= syntony_cutover:
+                    batches = syntony_chats_employees.split_c2d_daily_metrics(
+                        metrics, update_fields,
+                        syntony_chats_employees.c2d_metric_owners(syntony_roster, metrics))
+                for batch_metrics, batch_fields in batches:
+                    batch_summary = db.save_chat_manager_daily_metrics(
+                        metrics=batch_metrics,
                         imported_by=imported_by,
-                        update_fields=update_fields
-                    )
+                        update_fields=batch_fields
+                    ) or {}
+                    save_summary = {
+                        'batch_id': save_summary.get('batch_id') or batch_summary.get('batch_id'),
+                        'processed': (int(save_summary.get('processed') or 0)
+                                      + int(batch_summary.get('processed') or 0)),
+                    }
+                    if (not syntony_on and day_obj >= syntony_cutover
+                            and set(batch_fields) & syntony_chats_employees.C2D_REPLACED_FIELDS):
+                        try:
+                            syntony_chats_employees.forget_marks(
+                                db, day_obj, [item.get('operator_id') for item in batch_metrics])
+                        except Exception:
+                            logging.exception("Chat2Desk daily metrics: отметки Syntony за %s не сняты",
+                                              day_str)
                 low_rating_summary = {'processed': 0}
                 low_ratings = report.get('low_ratings') or []
                 if low_ratings:
@@ -28058,6 +28087,18 @@ def sync_chat2desk_operator_statuses(day=None, date_from=None, date_to=None, tri
     try:
         operator_lookup = _status_import_build_operator_lookup(prefer_chat_managers=True)
         target_days = _chat2desk_sync_target_days(day, date_from=date_from, date_to=date_to)
+        # Сутки, которые статусы Syntony покрывают целиком, чатнику СЗоВ с интервалами Syntony
+        # пишет Syntony (SZOV-11, syntony_chats/employees.py): его строки из выгрузки Chat2Desk
+        # уходят. Сутки без статусов Syntony и люди без интервалов Syntony — по Chat2Desk, как
+        # было (решение владельца 25.11.2026).
+        syntony_people = {}
+        if syntony_chats_szov.data_enabled():
+            try:
+                syntony_people = syntony_chats_employees.status_people(
+                    db, _szov_syntony_context(), target_days, first_day=chat_billing_syntony_from())
+            except Exception:
+                logging.exception("Chat2Desk operator statuses: статусы Syntony не прочитались")
+                syntony_people = {}
 
         for day_obj in target_days:
             day_str = day_obj.strftime('%Y-%m-%d')
@@ -28078,6 +28119,16 @@ def sync_chat2desk_operator_statuses(day=None, date_from=None, date_to=None, tri
                     operator_lookup,
                     preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
                 )
+                # Переводы чатов (chat_metrics) остаются за Chat2Desk: в Syntony их нет, и
+                # SZOV-11 их не меняет. Уходят только статусы чатников за покрытые сутки.
+                syntony_skipped_events = 0
+                if syntony_people.get(day_obj):
+                    events_before = len(parsed.get('events') or [])
+                    parsed['events'] = syntony_chats_employees.drop_roster_rows(
+                        parsed.get('events'), syntony_people[day_obj])
+                    parsed['segments'] = syntony_chats_employees.drop_roster_rows(
+                        parsed.get('segments'), syntony_people[day_obj])
+                    syntony_skipped_events = events_before - len(parsed['events'])
                 save_summary = {
                     'batch_id': None,
                     'source_rows': int(parsed.get('source_rows') or 0),
@@ -28163,14 +28214,16 @@ def sync_chat2desk_operator_statuses(day=None, date_from=None, date_to=None, tri
                     'date_to': (save_summary or {}).get('date_to'),
                     'invalid_rows_preview': parsed.get('invalid_rows_preview') or [],
                     'chat_metrics': chat_metrics_summary,
+                    'syntony_skipped_events': int(syntony_skipped_events),
                 })
                 logging.info(
-                    "Chat2Desk operator statuses sync %s: rows=%s matched=%s segments=%s invalid=%s",
+                    "Chat2Desk operator statuses sync %s: rows=%s matched=%s segments=%s invalid=%s syntony_skipped=%s",
                     day_str,
                     int(parsed.get('source_rows') or 0),
                     int((save_summary or {}).get('matched_events') or 0),
                     int((save_summary or {}).get('segments_saved') or 0),
-                    int(parsed.get('invalid_rows_count') or 0)
+                    int(parsed.get('invalid_rows_count') or 0),
+                    int(syntony_skipped_events)
                 )
             except Exception as exc:
                 logging.exception("Chat2Desk operator statuses sync failed for %s", day_str)
@@ -34784,6 +34837,19 @@ def _szov_syntony_context():
         is_test_sql=test_keys.sql_is_test)
 
 
+def _syntony_chat_manager_ids():
+    """Чатники СЗоВ, которым с перехода чаты, время ответа и статусы в «Учёт часов» пишет
+    Syntony (SZOV-11) → set id; None — данные Syntony выключены или справочник не собрался:
+    тогда ночные синки Chat2Desk пишут всё, как раньше."""
+    if not syntony_chats_szov.data_enabled():
+        return None
+    try:
+        return syntony_chats_employees.roster_ids(_szov_syntony_context()) or None
+    except Exception:
+        logging.exception("Справочник чатников СЗоВ для Syntony не собрался")
+        return None
+
+
 def _szov_chat_syntony_export_day(day_str):
     """Прошедшие сутки выгрузки по Syntony → (часы, итоги, ошибка); None — источник не Syntony."""
     if not _szov_chat_source_is_syntony():
@@ -34801,19 +34867,38 @@ def syntony_chat_billing_refresh_job(now=None):
     c2d_requests, а из этих строк: переписка Syntony живёт 30 дней, биллинг — сколько нужно.
     Раз в 10 минут пересобираются сегодняшние сутки и несобранные прошлые (не больше трёх за
     прогон). Собирается и при откате табло на Chat2Desk: сутки биллинга с 18.11 — всегда Syntony.
+
+    Следом — показатели чатников в «Учёте часов» (SZOV-11, syntony_chats/employees.py): чаты
+    и время ответа из только что собранных суток, статусы Syntony — в отрезки статусов
+    закрытых суток. Тот же справочник чатников и тот же день перехода.
     """
     if not syntony_chats_szov.data_enabled():
         return None
+    first_day = chat_billing_syntony_from()
     try:
-        results = syntony_chats_billing.refresh(
-            db, _szov_syntony_context(), first_day=chat_billing_syntony_from(), now=now)
+        ctx = _szov_syntony_context()
+    except Exception:
+        logging.exception("Биллинг чата по Syntony: справочник чатников не собрался")
+        return None
+    try:
+        results = syntony_chats_billing.refresh(db, ctx, first_day=first_day, now=now)
     except Exception:
         logging.exception("Биллинг чата по Syntony: прогон упал")
-        return None
-    failed = [item for item in results if item.get('error')]
-    if failed:
-        logging.warning("Биллинг чата по Syntony: не собрались сутки %s",
-                        ', '.join('%s (%s)' % (item['day'], item['error']) for item in failed))
+        results = None
+    if results:
+        failed = [item for item in results if item.get('error')]
+        if failed:
+            logging.warning("Биллинг чата по Syntony: не собрались сутки %s",
+                            ', '.join('%s (%s)' % (item['day'], item['error']) for item in failed))
+    hours_summary = syntony_chats_employees.refresh(
+        db, ctx, first_day=first_day, now=(now or datetime.now(timezone.utc)))
+    if hours_summary.get('metrics') or hours_summary.get('statuses'):
+        logging.info("Учёт часов по Syntony: чаты %s; статусы %s",
+                     ', '.join('%s: %s' % (item['day'], item['written'])
+                               for item in hours_summary.get('metrics') or []) or '—',
+                     ', '.join('%s: %s/%s' % (item['day'], item.get('replaced', 0),
+                                              item.get('cleared', 0))
+                               for item in hours_summary.get('statuses') or []) or '—')
     return results
 
 
