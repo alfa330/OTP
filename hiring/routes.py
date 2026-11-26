@@ -1109,6 +1109,12 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
     def hiring_hh_base_check(row_id, ctx):
         return jsonify(_json(service.hh_base_check(ctx, row_id)))
 
+    # Номер с hh вручную (владелец 26.11.2026: «в хед хантере указан один номер а в карточки передается другой номер»):
+    # {"phone": "+7…"} — у «берут» заводит карточку с ним, у взятого с номером из урезанного показа hh — заменяет номер.
+    @hiring_route('/hh/base/resume/<int:row_id>/phone', methods=('POST',))
+    def hiring_hh_base_phone(row_id, ctx):
+        return jsonify(_json(service.hh_base_set_phone(ctx, row_id, _body())))
+
     @hiring_route('/hh/base/resume/<int:row_id>/status', methods=('POST',))
     def hiring_hh_base_status(row_id, ctx):
         return jsonify(_json(service.hh_base_status(ctx, row_id, str(_body().get('status') or ''))))

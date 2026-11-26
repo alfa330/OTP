@@ -924,7 +924,9 @@ class HiringService:
             for other in taking[1:]:
                 queries.hh_resume_status(cursor, other['id'], 'new', now, note=None)
             return 'resume'
-        if contacts:
+        # Номер не казахстанский — только когда hh показал его целиком; урезанный показ (мост с hh/1.5.1 — phones_hidden) и
+        # закрытые контакты — «ещё не открыты»: рекрутер откроет их на hh и вставит номер сам.
+        if contacts and contacts.get('phone_raw'):
             note = 'На hh у кандидата нет казахстанского телефона — свяжитесь с ним через hh'
         else:
             note = 'Контакты на hh ещё не открыты'
@@ -1015,7 +1017,10 @@ class HiringService:
             'status_at': row.get('status_at'), 'card_id': row.get('card_id'), 'take_outcome': row.get('take_outcome'),
             'contacts_note': row.get('contacts_note'), 'has_full': row.get('resume') is not None,
             'resume_at': row.get('resume_at'), 'found_at': row.get('found_at'),
-            'known': known or None,
+            # Телефон карточки наружу не уходит (в «Новых» видны и чужие карточки) — только признак: номер собран мостом
+            # hh/1.4.1–1.5.0 из урезанного показа hh, рекрутер заменяет его номером с hh.
+            'known': {key: value for key, value in known.items() if key != 'phone'} if known else None,
+            'card_phone_suspect': bool(known and known.get('how') == 'base' and hh_base.phone_suspect(known.get('phone'))),
         }
         if full:
             item['resume'] = row.get('resume') or hh_base.snippet_resume(snippet)
@@ -1108,10 +1113,11 @@ class HiringService:
             if others:
                 raise HiringError('HIRING_ALREADY_TAKEN', 'Кандидата уже берёт %s' % (others[0].get('status_by_name') or 'другой рекрутер'), 409)
             queries.hh_resume_status(cursor, row['id'], 'taking', now, by=ctx['user_id'], by_name=ctx['name'])
-            # Контакты доступны без списания — мост прочитает их сразу. Закрытые рекрутер открывает на hh сам: сразу
-            # смотреть незачем (лишний просмотр резюме на hh) — первая проверка через hh_base.CONTACTS_FIRST_CHECK или
-            # раньше, когда рекрутер вернётся во вкладку iCORE (окно само попросит «Проверить»).
-            free = row.get('access') in ('free', 'opened')
+            # Контакты уже открыты в кабинете моста — мост прочитает их сразу. Остальные, и «без списания» тоже, рекрутер
+            # открывает на hh сам: пока не открыты, hh показывает урезанный номер «+7 776 622-» (проба 26.11) — сразу
+            # смотреть незачем; первая проверка через hh_base.CONTACTS_FIRST_CHECK или раньше, когда рекрутер вернётся во
+            # вкладку iCORE. Открытый под своей учёткой hh номер мост не видит — рекрутер вставит его сам (hh_base_set_phone).
+            free = row.get('access') == 'opened'
             queries.hh_task_add(cursor, 'resume', 'contacts', now, priority=hh_base.PRIORITY['contacts'],
                                 resume_hash=row['resume_hash'], by=ctx['user_id'],
                                 not_before=now if free else now + hh_base.CONTACTS_FIRST_CHECK)
@@ -1139,6 +1145,51 @@ class HiringService:
             row = queries.hh_resume_get(cursor, row['id'])
         self._hh_kick()
         return self._hh_base_item(row, None, full=True, refreshing=True)
+
+    def hh_base_set_phone(self, ctx, row_id, payload):
+        """Номер с hh вручную (владелец 26.11.2026: «в хед хантере указан один номер а в карточки передается другой
+        номер»). Мост видит номер, только если контакты открыты в его кабинете hh; открытый рекрутером под своей учёткой —
+        нет (там урезанный показ «+7 776 622-»). Поэтому рекрутер вставляет номер с hh сам: у «берут» — карточка «В
+        работе» заводится с ним; у взятого, чей номер собран мостом hh/1.4.1–1.5.0 из урезанного показа, — номер в
+        карточке заменяется (с записью в ленте)."""
+        if not access.can_take(ctx):
+            raise _forbidden('Брать кандидатов в работу могут рекрутеры')
+        phone = rules.normalize_phone((payload or {}).get('phone'))
+        if not phone:
+            raise HiringError('HIRING_BAD_PHONE', 'Номер — казахстанский: +7 и 10 цифр, как на hh')
+        now = self._now()
+        with self._cursor() as cursor:
+            row = queries.hh_resume_get(cursor, row_id, lock=True)
+            if not row:
+                raise HiringError('HIRING_NOT_FOUND', 'Резюме не найдено', 404)
+            if row.get('status_by') != ctx['user_id'] and not access.can_manage(ctx):
+                raise _forbidden('Кандидата берёт %s' % (row.get('status_by_name') or 'другой рекрутер'))
+            if row['status'] == 'taking':
+                contacts = {'full_name': row.get('full_name') or '', 'phone': phone, 'email': None}
+                self._hh_base_card(cursor, row, contacts, now)
+                task = queries.hh_task_open(cursor, 'resume', resume_hash=row['resume_hash'])
+                if task and task['reason'] == 'contacts':
+                    queries.hh_task_finish(cursor, task['id'], now, 'manual')
+            elif row['status'] == 'taken' and row.get('card_id') and row.get('take_outcome') == 'created':
+                card = queries.get_card(cursor, row['card_id'], lock=True)
+                if not card:
+                    raise HiringError('HIRING_NOT_FOUND', 'Карточки нет', 404)
+                if card['phone'] != phone:
+                    other = queries.open_card_by_phone(cursor, phone)
+                    if other and other['id'] != card['id']:
+                        raise HiringError('HIRING_PHONE_TAKEN', 'Этот номер уже в карточке №%s' % (
+                            other.get('candidate_no') or other['id']), 409)
+                    queries.card_set_phone(cursor, card['id'], phone, now)
+                    queries.add_touch(cursor, card['id'], rules.TOUCH_SYSTEM, 'hh_base_phone',
+                                      'Телефон исправлен по hh: был %s, стал %s' % (rules.pretty_phone(card['phone']),
+                                                                                     rules.pretty_phone(phone)),
+                                      ctx['user_id'], ctx['name'], now, meta={'before': card['phone'], 'after': phone})
+                queries.hh_resume_note(cursor, row['id'], None)
+            else:
+                raise HiringError('HIRING_BAD_STATUS', 'Номер вставляется, когда кандидата берут в работу', 409)
+            row = queries.hh_resume_get(cursor, row['id'])
+            known = self._hh_known(cursor, [row]).get(row['resume_hash'])
+        return self._hh_base_item(row, known, full=True)
 
     def hh_base_status(self, ctx, row_id, status):
         """«Не подходит» (rejected), вернуть в список (new) или отменить «Взять в работу» (тоже new)."""

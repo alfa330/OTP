@@ -253,6 +253,33 @@ const TAG_TONES = {
     slate: 'bg-slate-100 text-slate-600',
 };
 
+/* Номер с hh вручную: у «берут» — заводит карточку, у взятого с неверным номером — заменяет его. Поле и кнопка — сеткой
+   (оболочка телефона ставит flex-ряды столбиком). */
+const PhoneFromHh = ({ api, toast, item, action, onSaved }) => {
+    const [value, setValue] = useState('');
+    const [saving, setSaving] = useState(false);
+    const save = (event) => {
+        event.preventDefault();
+        if (!value.trim() || saving) return;
+        setSaving(true);
+        api.post(`/hh/base/resume/${item.id}/phone`, { phone: value })
+            .then(({ data }) => {
+                setValue('');
+                onSaved(data);
+                toast(item.status === 'taken' ? 'Номер в карточке исправлен' : 'Карточка «В работе» заведена', 'success');
+            })
+            .catch((error) => toast(errorOf(error, 'Номер не сохранился'), 'error'))
+            .finally(() => setSaving(false));
+    };
+    return (
+        <form onSubmit={save} className="grid items-center gap-2" style={{ gridTemplateColumns: 'minmax(0, 1fr) auto' }}>
+            <input className={iosInput} inputMode="tel" autoComplete="off" placeholder="+7 7__ ___ __ __" value={value}
+                   aria-label="Номер с hh" onChange={(event) => setValue(event.target.value)} />
+            <button type="submit" className={iosBtnPrimary} disabled={saving || !value.trim()}>{action}</button>
+        </form>
+    );
+};
+
 /* Строка «подпись — значение», как в выдаче hh: подпись серым слева, на телефоне — над значением. */
 const FactRow = ({ label, children }) => (
     <div className="grid gap-x-6 gap-y-0.5 border-t border-slate-100 py-3 sm:grid-cols-[150px_minmax(0,1fr)]">
@@ -272,7 +299,9 @@ const ResumeCard = ({ api, item, meId, caps, busy, onOpen, onTake, onReject }) =
     const inFunnel = Boolean(item.known && !item.known.is_closed);
     // Точка состояния — только когда есть что сказать (берут, взят, уже в воронке, не подошёл): у нового «ищет работу» и
     // «контакты без списания» уже стоят метками выше.
-    const state = item.status !== 'new' || inFunnel ? hhBaseState(item, meId) : null;
+    const state = item.card_phone_suspect
+        ? { tone: 'red', text: 'Номер в карточке неверный — откройте и вставьте номер с hh' }
+        : (item.status !== 'new' || inFunnel ? hhBaseState(item, meId) : null);
     const canTake = item.status === 'new' && caps.take && !inFunnel;
     const experience = item.experience_text === 'без опыта' ? 'Без опыта' : item.experience_text;
     const canReject = hhBaseCanReject(item, meId, caps.manage);
@@ -458,7 +487,7 @@ const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCar
             .then(({ data, needsHh }) => {
                 setItem(data);
                 onChanged();
-                toast(needsHh ? 'Откройте контакты на hh — карточка появится сама' : 'Берём контакты с hh…', 'success');
+                toast(needsHh ? 'Откройте номер на hh и вставьте его сюда' : 'Берём контакты с hh…', 'success');
             })
             .catch((error) => {
                 toast(errorOf(error, 'Не получилось взять в работу'), 'error');
@@ -538,9 +567,32 @@ const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCar
                             )}
                         </div>
                     </div>
-                    {mineTaking && (
-                        <Notice tone="slate" title={item.contacts_note === 'Контакты на hh ещё не открыты' ? 'Контакты на hh ещё не открыты' : 'Ждём контакты'}>
-                            Нажмите на hh «Открыть контакты» — спишется 1 контакт. ФИО и телефон перейдут в карточку сами.
+                    {/* Номер с hh (владелец 26.11.2026: «в хед хантере указан один номер а в карточки передается другой»):
+                        открытый рекрутером под своей учёткой hh номер мост не видит — рекрутер вставляет его сам. */}
+                    {(mineTaking || (item.status === 'taking' && caps.manage)) && (
+                        <Notice tone="slate" title="Откройте номер на hh и вставьте его сюда">
+                            <div className="space-y-2.5">
+                                <div>
+                                    {item.access === 'free'
+                                        ? 'На hh нажмите «Показать телефон» — контакт не спишется.'
+                                        : 'На hh нажмите «Открыть контакты» — спишется 1 контакт.'}
+                                    {' '}Карточка «В работе» заведётся с этим номером.
+                                </div>
+                                <PhoneFromHh api={api} toast={toast} item={item} action="Создать карточку"
+                                             onSaved={(data) => { setItem(data); onChanged(); }} />
+                            </div>
+                        </Notice>
+                    )}
+                    {item.status === 'taken' && item.card_phone_suspect && (Number(item.status_by) === Number(meId) || caps.manage) && (
+                        <Notice tone="red" title="Номер в карточке неверный">
+                            <div className="space-y-2.5">
+                                <div>
+                                    Его собрала из урезанного показа hh ошибка 26 ноября. Скопируйте номер с hh — он заменит
+                                    неверный в карточке №{item.known?.candidate_no || item.card_id}.
+                                </div>
+                                <PhoneFromHh api={api} toast={toast} item={item} action="Исправить номер"
+                                             onSaved={(data) => { setItem(data); onChanged(); }} />
+                            </div>
                         </Notice>
                     )}
                     {item.contacts_note && !(mineTaking && item.contacts_note === 'Контакты на hh ещё не открыты') && (
@@ -789,7 +841,7 @@ const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged, openI
         setCardBusy(item.id);
         takeResume(api, item)
             .then(({ needsHh }) => {
-                toast(needsHh ? 'Откройте контакты на hh — карточка появится сама' : 'Берём контакты с hh…', 'success');
+                toast(needsHh ? 'Откройте номер на hh и вставьте его в окне резюме' : 'Берём контакты с hh…', 'success');
                 onOpenId(item.id);
             })
             .catch((error) => toast(errorOf(error, 'Не получилось взять в работу'), 'error'))

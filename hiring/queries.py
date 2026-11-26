@@ -562,6 +562,11 @@ def update_card(cursor, card_id, **fields):
     return _update('hiring_cards', card_id, fields, allowed=allowed, cursor=cursor)
 
 
+def card_set_phone(cursor, card_id, phone, now):
+    """Телефон карточки — только исправлением номера из «Базы hh» (ключ дублей; в обычной правке карточки его нет)."""
+    cursor.execute("UPDATE hiring_cards SET phone = %s, updated_at = %s WHERE id = %s", (phone, now, int(card_id)))
+
+
 def claim_card(cursor, card_id, recruiter_id, now):
     """«Взять в работу»: один UPDATE с условием «ещё не закреплена» — двое одновременно не
     возьмут (ТЗ 7.1). Возвращает карточку или None (уже в работе / не в пуле)."""
@@ -1469,15 +1474,17 @@ def hh_known_cards(cursor, hashes):
               FROM hiring_hh_resumes r WHERE r.resume_hash = ANY(%s) AND r.card_id IS NOT NULL
         )
         SELECT DISTINCT ON (k.resume_hash) k.resume_hash, k.how, c.id, c.candidate_no, c.full_name, c.stage, c.is_closed,
-               c.recruiter_id, u.name, c.substage
+               c.recruiter_id, u.name, c.substage, c.phone
           FROM known k
           JOIN hiring_cards c ON c.id = k.card_id
           LEFT JOIN users u ON u.id = c.recruiter_id
          ORDER BY k.resume_hash, c.is_closed, k.at DESC NULLS LAST
     """, (hashes, hashes))
     # Этап и подстатус карточки — во «Взятых» карточка «Базы hh» показывает, где кандидат в воронке (владелец 26.11.2026).
+    # Телефон — только серверу (признак номера, собранного из урезанного показа hh), наружу не уходит.
     return {row[0]: {'how': row[1], 'card_id': row[2], 'candidate_no': row[3], 'full_name': row[4], 'stage': row[5],
-                     'is_closed': row[6], 'recruiter_id': row[7], 'recruiter_name': row[8], 'substage': row[9]}
+                     'is_closed': row[6], 'recruiter_id': row[7], 'recruiter_name': row[8], 'substage': row[9],
+                     'phone': row[10]}
             for row in cursor.fetchall()}
 
 

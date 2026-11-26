@@ -446,7 +446,7 @@ test('hh base search: card lines, score colour, who needs hh for contacts, state
     assert.deepEqual([90, 70, 69, 50, 49, null, undefined].map(hhBaseTone), ['green', 'green', 'amber', 'amber', 'red', 'slate', 'slate']);
     assert.equal(hhBaseNeedsHh({ access: 'closed' }), true);
     assert.equal(hhBaseNeedsHh({ access: null }), true);
-    assert.equal(hhBaseNeedsHh({ access: 'free' }), false);
+    assert.equal(hhBaseNeedsHh({ access: 'free' }), true);       // «без списания» — тоже: номер на hh урезан до «Показать»
     assert.equal(hhBaseNeedsHh({ access: 'opened' }), false);
     assert.deepEqual(hhBaseState({ status: 'taking', status_by: 10, status_by_name: 'Айсулу' }, 10), { tone: 'blue', text: 'Ждём контакты с hh' });
     assert.deepEqual(hhBaseState({ status: 'taking', status_by: 11, status_by_name: 'Айсулу' }, 10), { tone: 'blue', text: 'Берёт Айсулу' });

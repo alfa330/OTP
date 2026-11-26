@@ -3666,7 +3666,7 @@ def test_hh_base_taken_show_funnel_stage_newest_taken_first(base):
     """«Взятые» (владелец 26.11.2026): «Новые» — по времени взятия в работу, последний взятый сверху (а не по номеру
     строки); у карточки — этап воронки и подстатус кандидата."""
     enable_search(base)
-    search_and_find(base, [base_found(1, access='free'), base_found(2, access='free')])
+    search_and_find(base, [base_found(1, access='opened'), base_found(2, access='opened')])
     service = base['service']
     ids = {row['hash']: row['id'] for row in base_rows(base)}
     for minute, n in ((1, 2), (2, 1)):                       # сначала взяли второе резюме, потом первое
@@ -3693,7 +3693,7 @@ def test_hh_base_taken_by_another_disappears_and_reject_while_taking(base):
     исчезала» — «берут» и «взятых» рекрутер видит только своих (и в счётчиках), руководитель — всех; «Не подходит» — и у
     того, кого берёшь сам: ожидание контактов снимается."""
     enable_search(base)
-    search_and_find(base, [base_found(1), base_found(2), base_found(3, access='free')])
+    search_and_find(base, [base_found(1), base_found(2), base_found(3, access='opened')])
     service = base['service']
     ids = {row['hash']: row['id'] for row in base_rows(base)}
 
@@ -3709,7 +3709,7 @@ def test_hh_base_taken_by_another_disappears_and_reject_while_taking(base):
     assert listed(REC2) == [base_hash(2), base_hash(3)]                              # у второго — исчез
     assert listed(LEAD_GRANT) == [base_hash(1), base_hash(2), base_hash(3)]
     assert (counts(REC1)['taking'], counts(REC2)['taking'], counts(LEAD_GRANT)['taking']) == (1, 0, 1)
-    # Взятого (контакты без списания — карточка сразу) второй не видит и во «Взятых».
+    # Взятого (контакты уже открыты в кабинете моста — карточка сразу) второй не видит и во «Взятых».
     service.hh_base_take(ctx_of(base, REC2), ids[base_hash(3)])
     task = next(t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume' and t['hash'] == base_hash(3))
     base_tasks(base, [{'id': task['id'], 'ok': True, 'resume': {'title': 'Оператор'}, 'access': 'free',
@@ -3761,6 +3761,55 @@ def test_hh_base_photos_from_search_and_resume_page(base):
     base_tasks(base, [{'id': task['id'], 'ok': True, 'reason': 'view', 'resume': {'title': 'Оператор'}, 'access': 'closed',
                        'photo': photo}])
     assert service.hh_base_get(ctx_of(base, REC1), row_id)['photo'] is True
+
+
+def test_hh_base_phone_from_hh_by_hand(base):
+    """Владелец 26.11.2026: «в хед хантере указан один номер а в карточки передается другой номер». Открытый рекрутером
+    под своей учёткой hh номер мост не видит (урезанный показ — phones_hidden): заметка «ещё не открыты», а не «нет
+    казахстанского»; рекрутер вставляет номер сам — карточка «В работе» с ним. У взятого раньше с номером, собранным из
+    урезанного показа, — номер в карточке заменяется, с записью в ленте; чужой номер открытой карточки — нельзя."""
+    enable_search(base)
+    search_and_find(base, [base_found(1, access='free'), base_found(2, access='free')])
+    service = base['service']
+    ids = {row['hash']: row['id'] for row in base_rows(base)}
+    service.hh_base_take(ctx_of(base, REC1), ids[base_hash(1)])
+    # «Без списания» — тоже не сразу: номер на hh урезан, пока не нажали «Показать телефон».
+    assert [t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume'] == []
+    base['clock'].now = BASE_NOW + timedelta(seconds=21)
+    task = next(t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume')
+    base_tasks(base, [{'id': task['id'], 'ok': True, 'reason': 'contacts', 'resume': {'title': 'Оператор'}, 'access': 'free',
+                       'contacts': {'last_name': 'Иванова', 'first_name': 'Анна', 'phones': [], 'phones_hidden': True}}],
+               take=False)
+    item = service.hh_base_get(ctx_of(base, REC1), ids[base_hash(1)])
+    assert (item['status'], item['contacts_note'], item['name']) == ('taking', 'Контакты на hh ещё не открыты', 'Иванова Анна')
+    with pytest.raises(HiringError) as caught:
+        service.hh_base_set_phone(ctx_of(base, REC1), ids[base_hash(1)], {'phone': '123'})
+    assert caught.value.code == 'HIRING_BAD_PHONE'
+    with pytest.raises(HiringError) as caught:
+        service.hh_base_set_phone(ctx_of(base, REC2), ids[base_hash(1)], {'phone': '+7 707 123 45 61'})
+    assert caught.value.status == 403
+    item = service.hh_base_set_phone(ctx_of(base, REC1), ids[base_hash(1)], {'phone': '8 (707) 123-45-61'})
+    assert (item['status'], item['take_outcome']) == ('taken', 'created')
+    with base['db']._get_cursor() as cur:
+        card = queries.get_card(cur, item['card_id'])
+        assert (card['phone'], card['full_name'], card['stage'], card['recruiter_id']) == (
+            '+77071234561', 'Иванова Анна', 'in_work', REC1)
+        assert queries.hh_task_open(cur, 'resume', resume_hash=base_hash(1)) is None
+    # Взятый 26.11 с номером из урезанного показа «+7 776 622-» → «+7 776 7776622»: в «Базе hh» — признак, номер с hh
+    # заменяет его в карточке.
+    service.hh_base_take(ctx_of(base, REC1), ids[base_hash(2)])
+    glued = service.hh_base_set_phone(ctx_of(base, REC1), ids[base_hash(2)], {'phone': '+7 776 777 66 22'})
+    assert glued['card_phone_suspect'] is True and 'phone' not in glued['known']
+    with pytest.raises(HiringError) as caught:
+        service.hh_base_set_phone(ctx_of(base, REC1), ids[base_hash(2)], {'phone': '+77071234561'})
+    assert caught.value.code == 'HIRING_PHONE_TAKEN' and caught.value.status == 409
+    fixed = service.hh_base_set_phone(ctx_of(base, REC1), ids[base_hash(2)], {'phone': '+7 776 622 33 44'})
+    assert fixed['card_phone_suspect'] is False
+    with base['db']._get_cursor() as cur:
+        card = queries.get_card(cur, fixed['card_id'])
+        assert card['phone'] == '+77766223344'
+        touches = [t for t in queries.card_touches(cur, card['id']) if t['result'] == 'hh_base_phone']
+        assert len(touches) == 1 and 'был +7 776 777 66 22, стал +7 776 622 33 44' in touches[0]['body']
 
 
 def test_hh_base_take_locks_every_row_of_the_resume(base):

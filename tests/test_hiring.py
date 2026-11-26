@@ -1093,6 +1093,15 @@ class HhBaseTests(unittest.TestCase):
                           'phone_raw': '+998 90 1'})
         self.assertIsNone(hh_base.clean_contacts({'first_name': 'Анна', 'phones': ['+998 90 123 45 67']})['phone'])
 
+    def test_phone_glued_from_masked_hh_is_recognised(self):
+        """Номер, собранный мостом hh/1.4.1–1.5.0 из урезанного показа «+7 776 622-» («+7 776 7776622»): после кода
+        оператора — «7» и тот же код. Настоящие номера — нет."""
+        from hiring import hh_base
+        for glued in ('+77767776622', '+7 701 770-11-23', '87077707123'):
+            self.assertTrue(hh_base.phone_suspect(glued), glued)
+        for real in ('+77011234567', '+77767766622', '+77077012345', None, '', '+7701'):
+            self.assertFalse(hh_base.phone_suspect(real), real)
+
     def test_photo_is_checked_by_its_bytes(self):
         """Фото от моста — base64; тип — по самим байтам (JPEG, PNG, WebP), слово моста не в счёт; больше 200 КБ, пусто,
         не base64 или не картинка — None."""

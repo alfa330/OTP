@@ -356,9 +356,9 @@ export const hhBaseLastJob = (item) => {
 /** Цвет балла ИИ: от 70 — зелёный, 50–69 — жёлтый, ниже — красный, без балла — серый. */
 export const hhBaseTone = (score) => (score == null ? 'slate' : score >= 70 ? 'green' : score >= 50 ? 'amber' : 'red');
 
-/** Нужен ли рекрутеру заход на hh, чтобы открыть контакты: закрытые — да (спишется контакт); доступные без списания и
- *  уже открытые мост прочитает сам. */
-export const hhBaseNeedsHh = (item) => item?.access !== 'free' && item?.access !== 'opened';
+/** Нужен ли рекрутеру заход на hh, чтобы открыть номер: да, кроме уже открытых в кабинете моста. «Без списания» —
+ *  тоже: пока на hh не нажали «Показать телефон», там урезанный номер «+7 776 622-» (проба 26.11.2026). */
+export const hhBaseNeedsHh = (item) => item?.access !== 'opened';
 
 const HH_STAGE_DOTS = { red: 'red', green: 'green', gray: 'slate', amber: 'amber' };
 
