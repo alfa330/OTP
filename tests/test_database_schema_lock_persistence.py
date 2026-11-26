@@ -70,8 +70,9 @@ class _TrackedConnection:
         self.commits = 0
         self.rollbacks = 0
 
-    def cursor(self):
-        return _PrefixCursor(self.real.cursor(), self.statements)
+    def cursor(self, **kwargs):
+        # _init_db просит курсор миграции (cursor_factory, db/schema_guard.py) — отдаём настоящий.
+        return _PrefixCursor(self.real.cursor(**kwargs), self.statements)
 
     def commit(self):
         self.commits += 1

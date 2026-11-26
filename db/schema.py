@@ -88,7 +88,14 @@ class SchemaMixin:
             raise last_error
 
     def _init_db(self):
-        with self._get_cursor() as cursor:
+        from db import schema_guard
+
+        # Курсор миграции: ALTER … IF [NOT] EXISTS и CREATE INDEX IF NOT EXISTS, которым на
+        # готовой схеме нечего менять, сначала сверяются с каталогом и таблицу не блокируют
+        # (db/schema_guard.py). До 26.11.2026 каждый старт пода держал до коммита
+        # AccessExclusiveLock на 182 таблицах, в том числе users и user_sessions, — и ловил
+        # дедлоки с проверкой входа на каждом запросе.
+        with self._get_cursor(cursor_factory=schema_guard.schema_cursor_factory()) as cursor:
             # Даже ALTER ... IF NOT EXISTS запрашивает AccessExclusiveLock. Если импорт
             # держит читающую транзакцию, ожидающий ALTER ставит за собой авторизацию
             # пользователей и заполняет пул. Ограничение действует только в этой транзакции;
@@ -223,7 +230,11 @@ class SchemaMixin:
                 ADD COLUMN IF NOT EXISTS proxy_status VARCHAR(20)
                 CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
             """)
-            cursor.execute("""
+            # Пересборка CHECK'ов — только когда поменялся этот текст (отпечаток в COMMENT
+            # ограничений): DROP+ADD на каждом старте держал users эксклюзивно до конца
+            # миграции, а это дедлок с проверкой входа на каждом старте пода (26.11.2026).
+            schema_guard.replace_constraints(
+                cursor, 'users', ('users_employment_type_check', 'users_proxy_status_check'), """
                 ALTER TABLE users
                 DROP CONSTRAINT IF EXISTS users_employment_type_check,
                 DROP CONSTRAINT IF EXISTS users_proxy_status_check;
@@ -255,9 +266,10 @@ class SchemaMixin:
             # Расширение колонки — под условием, в отличие от соседних ALTER'ов:
             # у ALTER COLUMN ... TYPE нет формы IF NEEDED, а безусловный вызов
             # на каждом старте берёт ACCESS EXCLUSIVE и перестраивает индексы по
-            # колонке. Сам CHECK пересоздаём как есть — на 355 строках проверка
-            # стоит доли миллисекунды, и это тот же приём, что у CHECK'а
-            # employment_type ниже.
+            # колонке. Сам CHECK пересобирается, только когда поменялся его текст
+            # ниже (отпечаток в COMMENT): прежняя пересборка на каждом старте
+            # держала users эксклюзивно до конца миграции — 26.11.2026 это был
+            # дедлок с проверкой входа на каждом старте пода.
             cursor.execute("""
                 DO $$
                 BEGIN
@@ -269,6 +281,8 @@ class SchemaMixin:
                         ALTER TABLE users ALTER COLUMN role TYPE VARCHAR(32);
                     END IF;
                 END $$;
+            """)
+            schema_guard.replace_constraints(cursor, 'users', ('users_role_check',), """
                 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
                 ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN (
                     'super_admin', 'admin', 'sv', 'supervisor', 'trainer',
@@ -1066,7 +1080,9 @@ class SchemaMixin:
                 ALTER TABLE work_hours
                 ADD COLUMN IF NOT EXISTS rate DECIMAL(3,2);
             """)
-            cursor.execute("""
+            # Пересборка — только когда поменялся текст: «Учёт часов» читает work_hours
+            # постоянно, а DROP+ADD держал таблицу эксклюзивно до конца миграции.
+            schema_guard.replace_constraints(cursor, 'work_hours', ('work_hours_rate_check',), """
                 ALTER TABLE work_hours
                 DROP CONSTRAINT IF EXISTS work_hours_rate_check;
                 ALTER TABLE work_hours
@@ -2268,10 +2284,9 @@ class SchemaMixin:
                 END;
                 $$;
             """)
-            cursor.execute("""
-                DROP TRIGGER IF EXISTS trg_revoke_sessions_on_inactive_status ON users;
-            """)
-            cursor.execute("""
+            # DROP TRIGGER берёт users эксклюзивно — пересоздаём, только когда поменялся
+            # текст (schema_guard.replace_trigger), а не на каждом старте пода.
+            schema_guard.replace_trigger(cursor, 'users', 'trg_revoke_sessions_on_inactive_status', """
                 CREATE TRIGGER trg_revoke_sessions_on_inactive_status
                 AFTER UPDATE OF status ON users
                 FOR EACH ROW
@@ -2291,11 +2306,11 @@ class SchemaMixin:
                     UNIQUE(operator_id, shift_date, start_time, end_time)
                 );
             """)
-            cursor.execute("""
+            # Пересборка — только когда поменялся текст: смены читают на каждом экране
+            # графиков, а DROP+ADD держал work_shifts эксклюзивно до конца миграции.
+            schema_guard.replace_constraints(cursor, 'work_shifts', ('work_shifts_shift_type_check',), """
                 ALTER TABLE work_shifts
                 DROP CONSTRAINT IF EXISTS work_shifts_shift_type_check;
-            """)
-            cursor.execute("""
                 ALTER TABLE work_shifts
                 ADD CONSTRAINT work_shifts_shift_type_check
                 CHECK (shift_type IN ('regular', 'office_practice', 'phone_shift'));
@@ -4154,8 +4169,16 @@ class SchemaMixin:
                     DECLARE
                         single_key_pk text;
                     BEGIN
-                        ALTER TABLE szov_wallboard_snapshot
-                            DROP CONSTRAINT IF EXISTS szov_wallboard_snapshot_singleton;
+                        -- Только если ограничение ещё есть: DROP … IF EXISTS блокирует снимок
+                        -- табло эксклюзивно и тогда, когда снимать нечего (каждый старт пода).
+                        IF EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conrelid = 'szov_wallboard_snapshot'::regclass
+                              AND conname = 'szov_wallboard_snapshot_singleton'
+                        ) THEN
+                            ALTER TABLE szov_wallboard_snapshot
+                                DROP CONSTRAINT IF EXISTS szov_wallboard_snapshot_singleton;
+                        END IF;
                         SELECT con.conname INTO single_key_pk
                         FROM pg_constraint con
                         JOIN pg_index i ON i.indexrelid = con.conindid
@@ -4229,11 +4252,10 @@ class SchemaMixin:
                 ALTER TABLE szov_break_violations
                 ADD COLUMN IF NOT EXISTS direction VARCHAR(8) NOT NULL DEFAULT 'line';
             """)
-            cursor.execute("""
+            schema_guard.replace_constraints(
+                cursor, 'szov_break_violations', ('szov_break_violations_direction',), """
                 ALTER TABLE szov_break_violations
                 DROP CONSTRAINT IF EXISTS szov_break_violations_direction;
-            """)
-            cursor.execute("""
                 ALTER TABLE szov_break_violations
                 ADD CONSTRAINT szov_break_violations_direction
                 CHECK (direction IN ('line', 'chat', 'tez'));
@@ -4803,7 +4825,25 @@ class SchemaMixin:
             # Allow several operators to each claim a DISJOINT part of the same shift
             # (partial добор of the leftover). The primary key therefore includes
             # claimed_by; overlap between two operators' ranges is rejected in code.
-            cursor.execute("ALTER TABLE shift_auction_historical_claims DROP CONSTRAINT IF EXISTS shift_auction_historical_claims_pkey;")
+            # Снимаем ключ, только если он ещё старый: безусловный DROP на каждом старте
+            # пода заново строил первичный ключ (а с ним индекс) под эксклюзивной блокировкой.
+            cursor.execute("""
+                DO $$ BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint con
+                        WHERE con.conrelid = 'shift_auction_historical_claims'::regclass
+                          AND con.conname = 'shift_auction_historical_claims_pkey'
+                          AND ARRAY(
+                              SELECT a.attname::text
+                              FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+                              JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+                              ORDER BY k.ord
+                          ) IS DISTINCT FROM ARRAY['plan_id', 'source_schedule_shift_id', 'claimed_by']
+                    ) THEN
+                        ALTER TABLE shift_auction_historical_claims DROP CONSTRAINT IF EXISTS shift_auction_historical_claims_pkey;
+                    END IF;
+                END $$;
+            """)
             cursor.execute("""
                 DO $$ BEGIN
                     IF NOT EXISTS (
@@ -5297,11 +5337,7 @@ class SchemaMixin:
                 ALTER TABLE operator_profiles
                 ADD COLUMN IF NOT EXISTS proxy_status VARCHAR(20)
                 CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
-                ALTER TABLE operator_profiles
-                DROP CONSTRAINT IF EXISTS operator_profiles_proxy_status_check;
-                ALTER TABLE operator_profiles
-                ADD CONSTRAINT operator_profiles_proxy_status_check
-                    CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
+                -- CHECK proxy_status пересобирается ниже, после этой пачки (replace_constraints).
 
                 -- User HR profiles (кадровые данные)
                 CREATE TABLE IF NOT EXISTS user_hr_profiles (
@@ -5337,11 +5373,7 @@ class SchemaMixin:
                 ADD COLUMN IF NOT EXISTS city VARCHAR(255);
                 ALTER TABLE user_hr_profiles
                 ADD COLUMN IF NOT EXISTS job_title VARCHAR(255);
-                ALTER TABLE user_hr_profiles
-                DROP CONSTRAINT IF EXISTS user_hr_profiles_employment_type_check;
-                ALTER TABLE user_hr_profiles
-                ADD CONSTRAINT user_hr_profiles_employment_type_check
-                    CHECK (employment_type IN ('gph', 'of', 'smz') OR employment_type IS NULL);
+                -- CHECK employment_type пересобирается ниже, после этой пачки (replace_constraints).
 
                 -- Admin profiles
                 CREATE TABLE IF NOT EXISTS admin_profiles (
@@ -5432,11 +5464,7 @@ class SchemaMixin:
                 ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS has_proxy BOOLEAN NOT NULL DEFAULT FALSE;
                 ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS proxy_card_number VARCHAR(64);
                 ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS proxy_status VARCHAR(20);
-                ALTER TABLE user_hr_profiles
-                DROP CONSTRAINT IF EXISTS user_hr_profiles_proxy_status_check;
-                ALTER TABLE user_hr_profiles
-                ADD CONSTRAINT user_hr_profiles_proxy_status_check
-                    CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
+                -- CHECK proxy_status пересобирается ниже, после этой пачки (replace_constraints).
                 ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS has_driver_license BOOLEAN NOT NULL DEFAULT FALSE;
                 ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS internship_in_company BOOLEAN NOT NULL DEFAULT FALSE;
                 ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS front_office_training BOOLEAN NOT NULL DEFAULT FALSE;
@@ -5898,6 +5926,33 @@ class SchemaMixin:
                 SET department_id = (SELECT id FROM departments WHERE code = 'szov' LIMIT 1)
                 WHERE department_id IS NULL;
             """)
+            # CHECK'и профилей, вынесенные из пачки выше: пересборка — только когда поменялся
+            # текст. Профили читаются вместе с users в карточках и списках сотрудников, а
+            # DROP+ADD на каждом старте пода держал их эксклюзивно до конца миграции.
+            schema_guard.replace_constraints(
+                cursor, 'operator_profiles', ('operator_profiles_proxy_status_check',), """
+                ALTER TABLE operator_profiles
+                DROP CONSTRAINT IF EXISTS operator_profiles_proxy_status_check;
+                ALTER TABLE operator_profiles
+                ADD CONSTRAINT operator_profiles_proxy_status_check
+                    CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
+            """)
+            schema_guard.replace_constraints(
+                cursor, 'user_hr_profiles', ('user_hr_profiles_employment_type_check',), """
+                ALTER TABLE user_hr_profiles
+                DROP CONSTRAINT IF EXISTS user_hr_profiles_employment_type_check;
+                ALTER TABLE user_hr_profiles
+                ADD CONSTRAINT user_hr_profiles_employment_type_check
+                    CHECK (employment_type IN ('gph', 'of', 'smz') OR employment_type IS NULL);
+            """)
+            schema_guard.replace_constraints(
+                cursor, 'user_hr_profiles', ('user_hr_profiles_proxy_status_check',), """
+                ALTER TABLE user_hr_profiles
+                DROP CONSTRAINT IF EXISTS user_hr_profiles_proxy_status_check;
+                ALTER TABLE user_hr_profiles
+                ADD CONSTRAINT user_hr_profiles_proxy_status_check
+                    CHECK (proxy_status IN ('lost', 'returned_to_hr', 'not_received', 'on_hand') OR proxy_status IS NULL);
+            """)
             self._init_group_late_bot_schema_tx(cursor)
             self._init_amo_leads_schema_tx(cursor)
             self._init_chat_hourly_schema_tx(cursor)
@@ -5985,6 +6040,14 @@ class SchemaMixin:
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_bell_notify")
                 logging.error("bell notify triggers skipped: %s", exc, exc_info=True)
 
+            # Одна строка на старт: сколько DDL сверено с каталогом и сколько дошло до
+            # базы. На готовой схеме «применено 0» — значит, таблицы не блокировались.
+            if isinstance(cursor, schema_guard.GuardedSchemaCursor):
+                logging.info(
+                    "Схема: %s DDL сверены с каталогом без блокировки таблиц, применено %s",
+                    cursor.guarded_statements, cursor.applied_statements(),
+                )
+
     def _backfill_task_accepted_reads_tx(self, cursor):
         """Одноразово помечаем уже принятые задачи просмотренными.
 
@@ -6031,6 +6094,8 @@ class SchemaMixin:
         _events_viewer_scope на PL/pgSQL. Дешевле разбудить всех — каждый клиент
         перечитает свою сводку, и сервер сам отфильтрует по периметру.
         """
+        from db import schema_guard
+
         cursor.execute("""
             CREATE OR REPLACE FUNCTION bell_notify_change()
             RETURNS TRIGGER
@@ -6638,8 +6703,9 @@ class SchemaMixin:
                     "Триггер колокола %s пропущен: таблицы %s нет", trigger_name, table_name,
                 )
                 continue
-            cursor.execute(f"DROP TRIGGER IF EXISTS {trigger_name} ON {table_name};")
-            cursor.execute(f"""
+            # Пересоздаём, только когда поменялся текст триггера: DROP TRIGGER на каждом
+            # старте пода держал таблицу раздела эксклюзивно до конца миграции.
+            schema_guard.replace_trigger(cursor, table_name, trigger_name, f"""
                 CREATE TRIGGER {trigger_name}
                 {timing} ON {table_name}
                 FOR EACH ROW

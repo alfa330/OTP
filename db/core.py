@@ -1867,9 +1867,10 @@ class CoreMixin:
                 semaphore.release()
 
     @contextmanager
-    def _get_cursor(self):
+    def _get_cursor(self, cursor_factory=None):
         with self._get_connection() as conn:
-            cursor = conn.cursor()
+            # cursor_factory — только у миграции схемы (db/schema_guard.py); остальным прежний курсор.
+            cursor = conn.cursor(cursor_factory=cursor_factory) if cursor_factory else conn.cursor()
             try:
                 yield cursor
                 conn.commit()
