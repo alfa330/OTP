@@ -596,6 +596,12 @@ class HiringService:
             raise _forbidden('Базу резюме hh видят рекрутеры и руководитель рекрутинга')
 
     @staticmethod
+    def _hh_viewer(ctx):
+        """Чьи «берут» и «взятые» видны в списках: рекрутеру — только свои (владелец 26.11.2026: «если какую то карточку
+        в разделе взял в работу другой рекрутер у другого эта карточка исчезала»), руководителю — все (None)."""
+        return None if access.can_manage(ctx) else ctx['user_id']
+
+    @staticmethod
     def _hh_vacancy_key(value):
         key = str(value or '').strip()
         if not key.isdigit() or len(key) > 18:
@@ -622,7 +628,7 @@ class HiringService:
         with self._cursor() as cursor:
             catalog, bridge = self._hh_catalog(cursor)
             searches = {str(row['hh_vacancy_id']): row for row in queries.hh_search_list(cursor)}
-            counts = queries.hh_resume_counts(cursor)
+            counts = queries.hh_resume_counts(cursor, viewer_id=self._hh_viewer(ctx))
             running = {}
             for key in set(catalog) | set(searches):
                 task = queries.hh_task_open(cursor, 'search', hh_vacancy_id=key)
@@ -1018,7 +1024,8 @@ class HiringService:
         page = max(1, _int(page) or 1)
         size = 30
         with self._cursor() as cursor:
-            total, rows = queries.hh_resume_list(cursor, key, statuses, order, size, (page - 1) * size)
+            total, rows = queries.hh_resume_list(cursor, key, statuses, order, size, (page - 1) * size,
+                                                 viewer_id=self._hh_viewer(ctx))
             known = self._hh_known(cursor, rows)
         return {'total': total, 'page': page, 'pages': max(1, -(-total // size)),
                 'items': [self._hh_base_item(row, known.get(row['resume_hash'])) for row in rows]}

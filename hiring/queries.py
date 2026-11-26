@@ -1403,23 +1403,31 @@ _LIST_ORDER = {
 }
 
 
-def hh_resume_list(cursor, hh_vacancy_id, statuses, order, limit, offset):
+# Кого рекрутер видит в списках «Базы hh» (владелец 26.11.2026: «если какую то карточку в разделе взял в работу другой
+# рекрутер у другого эта карточка исчезала»): новых и отклонённых — всех, «берут» и «взятых» — только своих. viewer None —
+# руководитель рекрутинга: видит всех.
+_VIEWER_ROWS = "(%s::int IS NULL OR r.status NOT IN ('taking', 'taken') OR r.status_by = %s)"
+
+
+def hh_resume_list(cursor, hh_vacancy_id, statuses, order, limit, offset, viewer_id=None):
     """Список вкладки «База hh»: резюме вакансии в статусах, по баллу (или по свежести на hh). → (всего, строки)."""
-    params = [int(hh_vacancy_id), list(statuses)]
-    cursor.execute("SELECT COUNT(*) FROM hiring_hh_resumes r WHERE r.hh_vacancy_id = %s AND r.status = ANY(%s)", params)
+    params = [int(hh_vacancy_id), list(statuses), viewer_id, viewer_id]
+    where = "r.hh_vacancy_id = %s AND r.status = ANY(%s) AND " + _VIEWER_ROWS
+    cursor.execute("SELECT COUNT(*) FROM hiring_hh_resumes r WHERE " + where, params)
     total = int(cursor.fetchone()[0])
-    cursor.execute("SELECT %s FROM hiring_hh_resumes r WHERE r.hh_vacancy_id = %%s AND r.status = ANY(%%s) ORDER BY %s "
-                   "LIMIT %%s OFFSET %%s" % (_RESUME_COLUMNS, _LIST_ORDER.get(order, _LIST_ORDER['score'])),
+    cursor.execute("SELECT %s FROM hiring_hh_resumes r WHERE %s ORDER BY %s LIMIT %%s OFFSET %%s"
+                   % (_RESUME_COLUMNS, where, _LIST_ORDER.get(order, _LIST_ORDER['score'])),
                    params + [int(limit), int(offset)])
     return total, [_resume_row(row) for row in _all(cursor)]
 
 
-def hh_resume_counts(cursor):
-    """{id вакансии hh: {статус: сколько, strong: новых с баллом от 70}} — для переключателя вакансий."""
+def hh_resume_counts(cursor, viewer_id=None):
+    """{id вакансии hh: {статус: сколько, strong: новых с баллом от 70}} — для переключателя вакансий; у рекрутера
+    (viewer_id) «берут» и «взятые» — только свои."""
     cursor.execute("""
         SELECT hh_vacancy_id, status, COUNT(*), COUNT(*) FILTER (WHERE score >= 70)
-          FROM hiring_hh_resumes GROUP BY hh_vacancy_id, status
-    """)
+          FROM hiring_hh_resumes r WHERE """ + _VIEWER_ROWS + """ GROUP BY hh_vacancy_id, status
+    """, (viewer_id, viewer_id))
     out = {}
     for vacancy_id, status, count, strong in cursor.fetchall():
         entry = out.setdefault(str(vacancy_id), {'new': 0, 'taking': 0, 'taken': 0, 'rejected': 0, 'strong': 0})

@@ -3688,6 +3688,46 @@ def test_hh_base_taken_show_funnel_stage_newest_taken_first(base):
     assert (newest[1]['known']['stage'], newest[1]['known']['substage']) == ('in_work', None)
 
 
+def test_hh_base_taken_by_another_disappears_and_reject_while_taking(base):
+    """Владелец 26.11.2026: «если какую то карточку в разделе взял в работу другой рекрутер у другого эта карточка
+    исчезала» — «берут» и «взятых» рекрутер видит только своих (и в счётчиках), руководитель — всех; «Не подходит» — и у
+    того, кого берёшь сам: ожидание контактов снимается."""
+    enable_search(base)
+    search_and_find(base, [base_found(1), base_found(2), base_found(3, access='free')])
+    service = base['service']
+    ids = {row['hash']: row['id'] for row in base_rows(base)}
+
+    def listed(user, view='new'):
+        return sorted(row['hash'] for row in service.hh_base_list(ctx_of(base, user), HH_OPERATOR, view=view)['items'])
+
+    def counts(user):
+        overview = service.hh_base_overview(ctx_of(base, user))
+        return next(v['counts'] for v in overview['vacancies'] if v['hh_vacancy_id'] == HH_OPERATOR)
+
+    service.hh_base_take(ctx_of(base, REC1), ids[base_hash(1)])                      # закрытые — ждём контакты
+    assert listed(REC1) == [base_hash(1), base_hash(2), base_hash(3)]
+    assert listed(REC2) == [base_hash(2), base_hash(3)]                              # у второго — исчез
+    assert listed(LEAD_GRANT) == [base_hash(1), base_hash(2), base_hash(3)]
+    assert (counts(REC1)['taking'], counts(REC2)['taking'], counts(LEAD_GRANT)['taking']) == (1, 0, 1)
+    # Взятого (контакты без списания — карточка сразу) второй не видит и во «Взятых».
+    service.hh_base_take(ctx_of(base, REC2), ids[base_hash(3)])
+    task = next(t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume' and t['hash'] == base_hash(3))
+    base_tasks(base, [{'id': task['id'], 'ok': True, 'resume': {'title': 'Оператор'}, 'access': 'free',
+                       'contacts': {'last_name': 'Иванова', 'first_name': 'Анна', 'phones': ['7 707 123 45 63']}}], take=False)
+    assert listed(REC2, 'taken') == [base_hash(3)] and listed(REC1, 'taken') == []
+    assert listed(LEAD_GRANT, 'taken') == [base_hash(3)]
+    assert (counts(REC1)['taken'], counts(REC2)['taken'], counts(LEAD_GRANT)['taken']) == (0, 1, 1)
+    # «Не подходит» у своего «берут»: чужому нельзя, своему — можно, ожидание контактов закрыто.
+    with pytest.raises(HiringError) as caught:
+        service.hh_base_status(ctx_of(base, REC2), ids[base_hash(1)], 'rejected')
+    assert caught.value.status == 403
+    item = service.hh_base_status(ctx_of(base, REC1), ids[base_hash(1)], 'rejected')
+    assert item['status'] == 'rejected'
+    with base['db']._get_cursor() as cur:
+        assert queries.hh_task_open(cur, 'resume', resume_hash=base_hash(1)) is None
+    assert listed(REC2, 'rejected') == [base_hash(1)]                                 # «Не подошли» — общие
+
+
 def test_hh_base_take_locks_every_row_of_the_resume(base):
     """Один кандидат найден поиском двух вакансий: второй рекрутер, нажавший «Взять» в другой вакансии, получает
     «уже берёт» — строки резюме под замком разом."""
