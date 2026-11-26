@@ -31,11 +31,11 @@ import hmac
 import os
 import re
 import time
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import datetime, time as dtime, timedelta
 from urllib.parse import quote, urlencode
 
 from syntony_chats import billing as syntony_billing
-from syntony_chats import szov, sync
+from syntony_chats import szov, sync, thread
 
 from . import chat2desk
 
@@ -57,10 +57,11 @@ _MEDIA_KEY_SALT = b'driver_chats.media.v1'
 # ничего не принёс — то же правило, что у табло (szov._check_fresh).
 STALE_SECONDS = szov.STALE_SECONDS
 
-AI_LABEL = 'ИИ-агент'
-SYSTEM_CALL_TEXT = 'Звонок'
-DELETED_BY_DRIVER_TEXT = 'Водитель удалил сообщение'
-DELETED_TEXT = 'Сообщение удалено'
+# Форма сообщения ленты — общая с проверкой качества (syntony_chats/thread.py).
+AI_LABEL = thread.AI_LABEL
+SYSTEM_CALL_TEXT = thread.SYSTEM_CALL_TEXT
+DELETED_BY_DRIVER_TEXT = thread.DELETED_BY_DRIVER_TEXT
+DELETED_TEXT = thread.DELETED_TEXT
 
 # id Syntony — GUID строкой; в адрес ручки и в журнал пускаем только безопасный вид.
 _ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$')
@@ -93,15 +94,7 @@ def _digits(value):
     return re.sub(r'\D', '', str(value or ''))
 
 
-def _local_iso(moment):
-    """TIMESTAMPTZ → стенные часы Алматы без пояса — так же, как время ленты Chat2Desk."""
-    if moment is None:
-        return None
-    if isinstance(moment, str):
-        return moment
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(szov.LOCAL_TZ).replace(tzinfo=None).isoformat()
+_local_iso = thread.local_iso
 
 
 def window_range(window_from, window_to):
@@ -209,78 +202,10 @@ def channel_names(rows):
     return names
 
 
-def _attach_media(item, content_type, media, media_url):
-    """Вложение → поле ленты ChatThread: фото, видео, голос или файл с именем."""
-    if not isinstance(media, dict) or media_url is None:
-        return
-    link = media_url(item['id'])
-    if not link:
-        return
-    kind = str(content_type or '').lower()
-    mime = str(media.get('mimeType') or '').lower()
-    name = str(media.get('fileName') or '').strip() or None
-    if kind in ('image', 'sticker') or (kind == 'document' and mime.startswith('image/')):
-        item['photo'] = link
-    elif kind == 'video':
-        item['video'] = link
-    elif kind == 'audio':
-        item['audio'] = link
-    else:
-        # Документ — файлом с именем, а не безымянным «PDF»: по имени («техпаспорт.pdf»)
-        # оператор понимает, что прислал водитель.
-        item['attachments'] = [{'name': name or ('PDF' if mime == 'application/pdf' else 'Файл'),
-                                'link': link}]
-
-
-def message_from_row(row, media_url=None):
-    """Строка окна → сообщение в форме ленты ChatThread (как chat2desk.normalize_message).
-
-    Слева — только водитель. Ответ сотрудника — справа синим с его именем; ИИ-агент и всё
-    незнакомое — справа серым «автоответом» с подписью: незнакомый отправитель слева выдал бы
-    слова парка за слова водителя (та же ловушка, что у Chat2Desk с type: null). Автоматика
-    (строки звонков, напоминания) — строкой по центру. Не ушедшее (unsent) в ленту не идёт."""
-    (message_id, conversation_id, direction, sender_type, author_name, content_type, text,
-     media, created_at, delete_scope, status, channel_id) = row[:12]
-    scope = str(delete_scope or '').lower()
-    if scope == 'unsent':
-        return None
-    direction = str(direction or '').lower()
-    sender = str(sender_type or '').lower()
-    if sender == 'system':
-        kind = 'system'
-    elif direction == 'inbound' and sender in ('', 'contact'):
-        kind = 'from_client'
-    elif direction == 'outbound' and sender == 'human':
-        kind = 'to_client'
-    else:
-        kind = 'autoreply'
-    item = {
-        'id': message_id,
-        'type': kind,
-        'text': text or '',
-        'created': _local_iso(created_at),
-        'photo': None, 'video': None, 'audio': None, 'pdf': None,
-        'attachments': [],
-        'status': status,
-        'requestId': None,
-        'dialogId': conversation_id,
-        'channelId': channel_id,
-    }
-    if kind == 'to_client':
-        # Ответ с телефона и через API (waba_api) приходит без автора: лучше без подписи,
-        # чем чужим именем.
-        item['author'] = author_name or None
-    elif kind == 'autoreply':
-        item['label'] = AI_LABEL if sender == 'ai' else None
-    if scope == 'contact':
-        item['text'] = DELETED_BY_DRIVER_TEXT
-    elif scope == 'everyone':
-        item['text'] = DELETED_TEXT
-    else:
-        _attach_media(item, content_type, media, media_url)
-    if kind == 'system' and not item['text'] and str(content_type or '').lower() == 'call':
-        item['text'] = SYSTEM_CALL_TEXT
-    return item
+# Строка окна → сообщение ленты ChatThread: правило общее с проверкой качества (снимки чатов
+# «Журнала оценок» и «ИИ-оценки»), поэтому живёт в syntony_chats/thread.py.
+_attach_media = thread.attach_media
+message_from_row = thread.message_from_row
 
 
 # ─────────────────────────────────────────────────────────────────────────────

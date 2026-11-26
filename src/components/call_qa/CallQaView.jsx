@@ -1175,6 +1175,7 @@ export default function CallQaView(props) {
                                         onSave={saveReview} onRefine={refineAdjud}
                                         onSimilar={similarAdjud}
                                         canCorrectJournal={canCorrectJournal}
+                                        apiBaseUrl={apiBaseUrl}
                                         onInteractionChange={setReviewInteraction} />
                     )}
                     </div>

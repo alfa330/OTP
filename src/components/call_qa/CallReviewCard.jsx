@@ -9,6 +9,7 @@ import { prettyPhone } from '../cdr/touchMeta';
 import { buildRelativeArticleLink } from '../wiki/articleLink';
 import { APPLE_FONT, iosCard, IosBadge, IosHint, scoreTone } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
+import { withApiBase } from '../c2d_eval/syntonyMedia';
 import CriteriaReviewPanel from './CriteriaReviewPanel';
 import { CHAT_SUBJECTS } from './subjects';
 
@@ -31,12 +32,14 @@ const CHAT_SPEAKER_LABEL = {
 };
 const CHAT_PREFIX_RE = /^(Оператор|Клиент|Другой сотрудник|Рассылка)\b[^:]*:\s+/;
 
-function chatLinesToSnapshot(lines, operatorName) {
+function chatLinesToSnapshot(lines, operatorName, apiBaseUrl) {
     const messages = (lines || []).map((line, i) => {
         const isClient = line.speaker === 'client';
-        const label = CHAT_SPEAKER_LABEL[line.speaker] || 'Клиент';
-        const name = line.author ? String(line.author) : '';
-        const media = line.media || {};
+        // ИИ-агент Syntony (SZOV-9) — своя подпись вместо «Рассылки», без имени автора.
+        const label = line.bot_label || CHAT_SPEAKER_LABEL[line.speaker] || 'Клиент';
+        const name = line.author && !line.bot_label ? String(line.author) : '';
+        const media = line.media
+            ? { ...line.media, url: withApiBase(line.media.url, apiBaseUrl) } : {};
         // Новый бэкенд отдаёт чистое тело в line.body; для старых закэшированных
         // эпизодов срезаем префикс «кто:» из seg.
         const body = (line.body != null
@@ -44,10 +47,13 @@ function chatLinesToSnapshot(lines, operatorName) {
             : (line.seg || []).map((s) => s.t).join(' ').replace(CHAT_PREFIX_RE, '')).trim();
         return {
             id: line.message_id || `m${i}`,
-            type: (line.outgoing ?? (line.speaker !== 'client')) ? 'to_client' : 'from_client',
+            // Реплика ИИ-агента — серым «автоответом» со своей подписью, как в журнале.
+            type: line.bot_label ? 'autoreply'
+                : (line.outgoing ?? (line.speaker !== 'client')) ? 'to_client' : 'from_client',
+            label: line.bot_label || undefined,
             created: line.created || null,
             text: body,
-            author: isClient ? undefined : (name ? `${label} · ${name}` : label),
+            author: isClient || line.bot_label ? undefined : (name ? `${label} · ${name}` : label),
             photo: media.kind === 'image' ? media.url : undefined,
             audio: media.kind === 'audio' ? media.url : undefined,
             video: media.kind === 'video' ? media.url : undefined,
@@ -102,7 +108,7 @@ const TranscriptLine = memo(function TranscriptLine({ line, onSeek }) {
         <div className={`flex ${isLeft ? 'justify-start' : 'justify-end'}`}>
             <div className={`max-w-[88%] rounded-2xl px-3.5 py-2 text-[13.5px] leading-relaxed ${meta.cls}`}>
                 <div className={`mb-0.5 flex items-center justify-between gap-3 text-[10.5px] font-semibold uppercase tracking-wide ${meta.head}`}>
-                    <span>{meta.label}{line.author ? ` · ${line.author}` : ''}</span>
+                    <span>{line.bot_label || meta.label}{line.author && !line.bot_label ? ` · ${line.author}` : ''}</span>
                     {line.start_ms != null ? (
                         <button type="button" onClick={() => onSeek?.(line.start_ms)}
                             className="rounded px-1 py-0.5 font-medium tabular-nums text-slate-500 hover:bg-white/70 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
@@ -394,7 +400,7 @@ function ChatMeta({ call }) {
 }
 
 export default function CallReviewCard({ call, onSave, onSkip, onRefine, onSimilar, onInteractionChange,
-                                         canCorrectJournal = false }) {
+                                         canCorrectJournal = false, apiBaseUrl = '' }) {
     const audioRef = useRef(null);
 
     const seekAudio = useCallback((startMs) => {
@@ -420,8 +426,8 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onSimil
     );
     const chatSnapshot = useMemo(
         () => (isChatSubject(call?.subject_kind) && call?.transcript?.length
-            ? chatLinesToSnapshot(call.transcript, call.operator) : null),
-        [call],
+            ? chatLinesToSnapshot(call.transcript, call.operator, apiBaseUrl) : null),
+        [call, apiBaseUrl],
     );
     if (!call) return null;
 

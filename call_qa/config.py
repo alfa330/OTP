@@ -373,7 +373,7 @@ def zai_key():
 SUBJECT_CALL = "call"                    # calls — звонок, уже оценённый человеком
 SUBJECT_WZ_EPISODE = "wz_episode"        # wazzup_episodes — переписка Верификаторов ОП
 SUBJECT_IMPORTED_CALL = "imported_call"  # imported_calls — звонок из АТС БЕЗ оценки в журнале
-SUBJECT_C2D_SNAPSHOT = "c2d_snapshot"    # c2d_chat_snapshots (source='chat2desk') — переписка СЗоВ
+SUBJECT_C2D_SNAPSHOT = "c2d_snapshot"    # c2d_chat_snapshots (chat2desk / syntony) — переписка СЗоВ
 SUBJECT_CA_EPISODE = "ca_episode"        # chatapp_episodes — переписка Тез КЦ
 SUBJECT_KINDS = (SUBJECT_CALL, SUBJECT_WZ_EPISODE, SUBJECT_IMPORTED_CALL,
                  SUBJECT_C2D_SNAPSHOT, SUBJECT_CA_EPISODE)
@@ -462,6 +462,19 @@ CA_SOURCE_PROVIDER = "chatapp-episode"
 C2D_MIN_OPERATOR_MESSAGES = int(env("C2D_MIN_OPERATOR_MESSAGES",
                                     str(WZ_MIN_OPERATOR_MESSAGES)))
 C2D_SOURCE_PROVIDER = "chat2desk-snapshot"
+
+# --- Переписка Syntony (СЗоВ, с 20.11.2026, SZOV-9) ---
+# Номера СЗоВ переехали из Chat2Desk в Syntony. Субъект тот же — снимок переписки СЗоВ
+# (c2d_chat_snapshots, source='syntony', их замораживает syntony_chats/qa.py): журнал и
+# ИИ-оценка делят один снимок, как у Chat2Desk. Но единица здесь — ЭПИЗОД с автором у каждого
+# ответа, поэтому гейт честной оценки — доля ответов оператора, как у Wazzup; порог объёма —
+# тот же, что у Chat2Desk (одна шкала отдела).
+SYN_SNAPSHOT_SOURCE = "syntony"
+C2D_SNAPSHOT_SOURCES = ("chat2desk", SYN_SNAPSHOT_SOURCE)
+# Тот же порог читает «Случайный чат» журнала (syntony_chats.qa.min_operator_share): чат, где
+# никто не дал 90 % ответов, не берётся в проверку вовсе — ни человеком, ни ИИ.
+SYN_MIN_OPERATOR_SHARE = float(env("SYN_MIN_OPERATOR_SHARE", "0.9"))
+SYN_SOURCE_PROVIDER = "syntony-snapshot"
 CHAT_SOURCE_MODEL = "episode-transcript-v1"
 
 # --- Вложения чатов: изображения (Claude vision) и голосовые (Soniox) ---

@@ -49,6 +49,9 @@ from syntony_chats import billing as syntony_chats_billing
 # Показатели чатников СЗоВ в «Учёте часов» по Syntony (SZOV-11, 25.11.2026): чаты, время
 # ответа и статусы с 18.11 вместо Chat2Desk. Без побочных действий на импорте.
 from syntony_chats import employees as syntony_chats_employees
+# Проверка качества чатов СЗоВ по Syntony (SZOV-9, 26.11.2026): снимки закрытых эпизодов с
+# 20.11 для «Случайного чата» журнала и «ИИ-оценки». Без побочных действий на импорте.
+from syntony_chats import qa as syntony_chats_qa
 # Автоотчёт по проведённым тренингам (задача #261): чистая логика периода,
 # выборки и книги Excel. Импорт обычный, а не ленивый, как у остальных
 # модулей пакета: этот ничего не знает ни про базу, ни про схему раздела —
@@ -5778,6 +5781,11 @@ def api_ai_qa_call(call_id):
         # человека (панель «Моя оценка» в карточке) рядом с оценкой из журнала.
         payload = review_payload(call_id, refresh=refresh, subject_kind=subject,
                                  reviewer_id=requester_id)
+        if subject == _qa_config.SUBJECT_C2D_SNAPSHOT and payload.get("transcript"):
+            # Вложения чата Syntony (SZOV-9): в строках лежит метка файла — показу нужен
+            # подписанный адрес нашей ручки для этого человека (ссылка Syntony живёт 5 минут).
+            payload["transcript"] = syntony_chats_qa.sign_lines(
+                payload["transcript"], call_id, _syntony_qa_media_key(), requester_id)
         _ai_qa_attach_taxi_parks([payload])
         # Маршрут звонка — входящий/исходящий, номер клиента и наш номер — для шапки
         # карточки. После таксопарка: у СЗоВ строка соединения Oktell уже в кэше.
@@ -7007,6 +7015,12 @@ def _ai_qa_sample_c2d_candidates(day):
     «Ответов оператора» должно быть не меньше порога гейта — иначе скачивание
     заведомо впустую. Ниже запаса квоты — пусто: квоту делит синк статистики."""
     from call_qa import config as qa_config, subjects as qa_subjects
+    # С дня перехода чаты СЗоВ — Syntony (SZOV-9): их снимки уже лежат готовым пулом, а
+    # остатки Chat2Desk после 20.11 — в основном «Ноль такси», копия номера Syntony.
+    if syntony_chats_qa.enabled():
+        sample_day = syntony_chats_qa.as_date(day)
+        if sample_day is not None and sample_day >= syntony_chats_qa.start_day():
+            return []
     reserve = qa_config.AI_QA_DAILY_SAMPLE_C2D_QUOTA_RESERVE
     left = _ai_qa_sample_c2d_quota_left()
     if left < reserve:
@@ -8301,7 +8315,10 @@ def _ai_qa_journal_target(subject, journal_row, requester_id):
     snapshot_id = _ai_qa_chat_snapshot_id(subject, requester_id)
     if kind == call_qa_config.SUBJECT_C2D_SNAPSHOT:
         appeal = None
-        if subject.get('request_id'):
+        if subject.get('started_at') is not None:
+            # Эпизод Syntony (SZOV-9): заявки нет — дата обращения = начало эпизода, как у Wazzup.
+            appeal = _ai_qa_local_iso(subject.get('started_at'))
+        if not appeal and subject.get('request_id'):
             try:
                 request_row = db.get_c2d_request(subject['request_id']) or {}
                 appeal = _ai_qa_local_iso(request_row.get('request_start'))
@@ -9571,6 +9588,80 @@ def api_c2d_eval_options():
         return jsonify({"error": str(error)}), 500
 
 
+def _c2d_eval_int(data, key):
+    value = data.get(key)
+    if value in (None, ''):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _c2d_eval_pick_body(data, requester_id, scope_dept, date_from, date_to):
+    """Случайная заявка Chat2Desk за [date_from, date_to] → тело ответа «Случайного чата».
+
+    Общая для ручки Chat2Desk и для Syntony-ручки СЗоВ, которая отдаёт сюда дни до перехода
+    (SZOV-9). Ошибки API Chat2Desk — RuntimeError (ручка отвечает 502)."""
+    # Счётчики сообщений в request_stats и фактическая привязка сообщений к
+    # заявке в Chat2Desk иногда расходятся — заявка может оказаться без
+    # переписки. Такие кандидаты пропускаем и берём следующего случайного.
+    skipped_empty = []
+    candidates = 0
+    for _attempt in range(4):
+        row, candidates = db.pick_c2d_request(
+            date_from=date_from,
+            date_to=date_to,
+            operator_id=_c2d_eval_int(data, 'operator_id'),
+            channel_id=_c2d_eval_int(data, 'channel_id'),
+            transport=(data.get('transport') or '').strip() or None,
+            min_messages=_c2d_eval_int(data, 'min_messages'),
+            max_messages=_c2d_eval_int(data, 'max_messages'),
+            rating_filter=(data.get('rating_filter') or '').strip() or None,
+            department_id=scope_dept,
+            exclude=(data.get('exclude') or 'mine').strip(),
+            evaluator_id=requester_id,
+            exclude_request_ids=skipped_empty)
+        if not row:
+            return {
+                "status": "empty",
+                "message": ("По заданным фильтрам заявок не нашлось — ослабьте условия"
+                            if not skipped_empty else
+                            "Подходящие заявки нашлись, но у них нет переписки в Chat2Desk — попробуйте другие фильтры"),
+                "candidates": 0
+            }
+
+        snapshot = db.get_c2d_snapshot(request_id=row['request_id'])
+        if snapshot is not None and not snapshot.get('messages'):
+            snapshot = None  # пустой снапшот старой версии — перечитываем заново
+        if snapshot is None:
+            dialog_id, messages = _c2d_fetch_request_messages(
+                row['request_id'],
+                request_start=row.get('request_start'),
+                request_end=row.get('request_end'))
+            if not messages:
+                skipped_empty.append(int(row['request_id']))
+                logging.info("c2d eval pick: заявка %s без переписки, пропускаем", row['request_id'])
+                continue
+            snapshot_id = db.save_c2d_snapshot(
+                row['request_id'], dialog_id, messages,
+                request_row=row, created_by=requester_id)
+            snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
+        return {
+            "status": "success",
+            "request": row,
+            "snapshot": snapshot,
+            "candidates": candidates,
+            "skippedEmpty": len(skipped_empty),
+        }
+
+    return {
+        "status": "empty",
+        "message": "Несколько заявок подряд оказались без переписки — попробуйте ещё раз или измените фильтры",
+        "candidates": candidates
+    }
+
+
 @app.route('/api/c2d_eval/pick', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_c2d_eval_pick():
@@ -9580,81 +9671,181 @@ def api_c2d_eval_pick():
     if err:
         return err
     data = request.get_json(silent=True) or {}
-
-    def as_int(key):
-        value = data.get(key)
-        if value in (None, ''):
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
-
     try:
         scope_dept = _c2d_eval_scope_department(requester_id, _normalize_user_role(requester[3]))
-        # Счётчики сообщений в request_stats и фактическая привязка сообщений к
-        # заявке в Chat2Desk иногда расходятся — заявка может оказаться без
-        # переписки. Такие кандидаты пропускаем и берём следующего случайного.
-        skipped_empty = []
-        candidates = 0
-        for _attempt in range(4):
-            row, candidates = db.pick_c2d_request(
-                date_from=(data.get('date_from') or '').strip() or None,
-                date_to=(data.get('date_to') or '').strip() or None,
-                operator_id=as_int('operator_id'),
-                channel_id=as_int('channel_id'),
-                transport=(data.get('transport') or '').strip() or None,
-                min_messages=as_int('min_messages'),
-                max_messages=as_int('max_messages'),
-                rating_filter=(data.get('rating_filter') or '').strip() or None,
-                department_id=scope_dept,
-                exclude=(data.get('exclude') or 'mine').strip(),
-                evaluator_id=requester_id,
-                exclude_request_ids=skipped_empty)
-            if not row:
-                return jsonify({
-                    "status": "empty",
-                    "message": ("По заданным фильтрам заявок не нашлось — ослабьте условия"
-                                if not skipped_empty else
-                                "Подходящие заявки нашлись, но у них нет переписки в Chat2Desk — попробуйте другие фильтры"),
-                    "candidates": 0
-                }), 200
-
-            snapshot = db.get_c2d_snapshot(request_id=row['request_id'])
-            if snapshot is not None and not snapshot.get('messages'):
-                snapshot = None  # пустой снапшот старой версии — перечитываем заново
-            if snapshot is None:
-                dialog_id, messages = _c2d_fetch_request_messages(
-                    row['request_id'],
-                    request_start=row.get('request_start'),
-                    request_end=row.get('request_end'))
-                if not messages:
-                    skipped_empty.append(int(row['request_id']))
-                    logging.info("c2d eval pick: заявка %s без переписки, пропускаем", row['request_id'])
-                    continue
-                snapshot_id = db.save_c2d_snapshot(
-                    row['request_id'], dialog_id, messages,
-                    request_row=row, created_by=requester_id)
-                snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
-            return jsonify({
-                "status": "success",
-                "request": row,
-                "snapshot": snapshot,
-                "candidates": candidates,
-                "skippedEmpty": len(skipped_empty),
-            }), 200
-
-        return jsonify({
-            "status": "empty",
-            "message": "Несколько заявок подряд оказались без переписки — попробуйте ещё раз или измените фильтры",
-            "candidates": candidates
-        }), 200
+        return jsonify(_c2d_eval_pick_body(
+            data, requester_id, scope_dept,
+            (data.get('date_from') or '').strip() or None,
+            (data.get('date_to') or '').strip() or None)), 200
     except RuntimeError as error:
         logging.warning("c2d eval pick: %s", error)
         return jsonify({"error": str(error)}), 502
     except Exception as error:
         logging.exception("c2d eval pick failed")
         return jsonify({"error": str(error)}), 500
+
+
+# ── Syntony (чат-менеджеры СЗоВ, SZOV-9): «Случайный чат» с дня перехода ──────────────────
+# Номера СЗоВ переехали в Syntony 16–23.11.2026; решение владельца 26.11: чаты Syntony
+# оцениваются с 20.11 (syntony_chats/qa.py), раньше — Chat2Desk, как было. Кандидаты Syntony —
+# готовые снимки закрытых эпизодов (ежечасная заморозка), без запросов к API. Если период
+# захватывает обе стороны, чат берётся случайно из всех подходящих: источник выбирается с
+# вероятностью по числу кандидатов. Оценки клиента у чатов Syntony нет: фильтр «с оценкой» /
+# «низкая» оставляет только Chat2Desk.
+
+def _syntony_qa_media_key():
+    return syntony_chats_qa.media_key(JWT_SECRET)
+
+
+def _syntony_qa_snapshot_for(snapshot, requester_id):
+    """Снимок для показа: метки вложений Syntony → подписанные адреса для этого человека."""
+    return syntony_chats_qa.sign_snapshot(snapshot, _syntony_qa_media_key(), requester_id)
+
+
+@app.route('/api/syn_eval/pick', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_syn_eval_pick():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, requester, err = _c2d_eval_guard()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    date_from = (data.get('date_from') or '').strip() or None
+    date_to = (data.get('date_to') or '').strip() or None
+    try:
+        scope_dept = _c2d_eval_scope_department(requester_id, _normalize_user_role(requester[3]))
+        if syntony_chats_qa.enabled():
+            c2d_part, syn_part = syntony_chats_qa.split_period(
+                date_from, date_to, syntony_chats_qa.start_day())
+        else:
+            c2d_part, syn_part = (date_from, date_to), None
+        rating = (data.get('rating_filter') or '').strip().lower()
+        if rating in ('rated', 'low'):
+            syn_part = None
+
+        def iso(value):
+            return value.isoformat() if hasattr(value, 'isoformat') else value
+
+        syn_id, syn_count = None, 0
+        if syn_part is not None:
+            from test_numbers import keys as test_keys
+            with db._get_cursor() as cursor:
+                syn_id, syn_count = syntony_chats_qa.pick(
+                    cursor, date_from=iso(syn_part[0]), date_to=iso(syn_part[1]),
+                    operator_id=_c2d_eval_int(data, 'operator_id'),
+                    min_messages=_c2d_eval_int(data, 'min_messages'),
+                    max_messages=_c2d_eval_int(data, 'max_messages'),
+                    department_id=scope_dept,
+                    exclude=(data.get('exclude') or 'mine').strip(),
+                    evaluator_id=requester_id,
+                    is_test_sql=lambda expr: test_keys.sql_is_test(expr, digits=True))
+        c2d_count = 0
+        if c2d_part is not None:
+            _row, c2d_count = db.pick_c2d_request(
+                date_from=iso(c2d_part[0]), date_to=iso(c2d_part[1]),
+                operator_id=_c2d_eval_int(data, 'operator_id'),
+                min_messages=_c2d_eval_int(data, 'min_messages'),
+                max_messages=_c2d_eval_int(data, 'max_messages'),
+                rating_filter=rating or None, department_id=scope_dept,
+                exclude=(data.get('exclude') or 'mine').strip(), evaluator_id=requester_id)
+        total = syn_count + c2d_count
+        if not total:
+            return jsonify({
+                "status": "empty",
+                "message": ("По заданным фильтрам чатов не нашлось — ослабьте условия"
+                            if syn_part is not None or rating not in ('rated', 'low') else
+                            "Оценки клиента у чатов Syntony нет — уберите фильтр «Оценка клиента»"),
+                "candidates": 0
+            }), 200
+        if c2d_count and (syn_id is None or random.random() >= syn_count / total):
+            try:
+                body = _c2d_eval_pick_body(data, requester_id, scope_dept,
+                                           iso(c2d_part[0]), iso(c2d_part[1]))
+            except RuntimeError as error:
+                if syn_id is None:
+                    raise
+                logging.warning("syntony eval pick: Chat2Desk не ответил (%s) — берём чат Syntony",
+                                error)
+                body = None
+            # Заявки Chat2Desk подряд без переписки — берём чат Syntony, если он есть.
+            if body is not None and (body.get('status') == 'success' or syn_id is None):
+                if body.get('status') == 'success':
+                    body['candidates'] = total
+                return jsonify(body), 200
+        snapshot = db.get_c2d_snapshot(snapshot_id=syn_id)
+        if not snapshot:
+            return jsonify({"status": "empty", "message": "Чат не найден — попробуйте ещё раз",
+                            "candidates": total}), 200
+        return jsonify({
+            "status": "success",
+            "request": syntony_chats_qa.request_row(snapshot),
+            "snapshot": _syntony_qa_snapshot_for(snapshot, requester_id),
+            "candidates": total,
+        }), 200
+    except RuntimeError as error:
+        logging.warning("syntony eval pick: %s", error)
+        return jsonify({"error": str(error)}), 502
+    except Exception as error:
+        logging.exception("syntony eval pick failed")
+        return jsonify({"error": str(error)}), 500
+
+
+def _syntony_qa_media_refusal(message, code, status, retry_after=None):
+    response = jsonify({"error": message, "code": code})
+    response.status_code = status
+    response.headers['Cache-Control'] = 'no-store'
+    if retry_after:
+        response.headers['Retry-After'] = str(int(retry_after))
+    return response
+
+
+# Вложение снимка Syntony. БЕЗ require_api_key: его зовут <img>, <audio> и ссылка в новой
+# вкладке, а они не несут заголовок с токеном портала (сайт и API на разных адресах). Пропуск —
+# подпись в адресе: её выдаёт только показ снимка тому, кто его видит (журнал, «Мои оценки»,
+# карточка «ИИ-оценки»), она привязана к снимку, сообщению и человеку и живёт 2–3 часа. На
+# каждом открытии заново проверяем человека (работает) и сообщение (в этом снимке, с
+# вложением) — и только потом берём у Syntony ссылку на 5 минут и переадресуем на неё.
+@app.route('/api/syntony_qa/media/<int:snapshot_id>/<message_id>', methods=['GET'])
+def api_syntony_qa_media(snapshot_id, message_id):
+    user_id = syntony_chats_qa.check_media_link(
+        _syntony_qa_media_key(), snapshot_id, message_id, request.args)
+    if user_id is None:
+        return _syntony_qa_media_refusal("Ссылка на файл устарела — откройте чат заново",
+                                         'MEDIA_LINK_INVALID', 403)
+    try:
+        snapshot = db.get_c2d_snapshot(snapshot_id=snapshot_id)
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT status FROM users WHERE id = %s", (int(user_id),))
+            person = cursor.fetchone()
+    except Exception:  # noqa: BLE001
+        logging.exception('syntony qa: вложение — ошибка базы')
+        return _syntony_qa_media_refusal("Файл сейчас недоступен", 'MEDIA_ERROR', 500)
+    if not person or str(person[0] or 'working').strip().lower() in ('fired', 'dismissal'):
+        return _syntony_qa_media_refusal("Файл вам недоступен", 'MEDIA_FORBIDDEN', 403)
+    if not syntony_chats_qa.snapshot_has_media(snapshot, message_id):
+        return _syntony_qa_media_refusal("Файл не найден", 'MEDIA_NOT_FOUND', 404)
+    config = syntony_chats_qa.client.load_config()
+    if config is None:
+        return _syntony_qa_media_refusal("Syntony не подключена: на сервере нет ключа",
+                                         'SYNTONY_NOT_CONFIGURED', 503)
+    try:
+        url = syntony_chats_qa.file_url(message_id, config)
+    except syntony_chats_qa.client.SyntonyHistoryError as exc:
+        # В журнал — код и статус, без адреса: в нём бывает номер и подпись.
+        logging.warning('syntony qa: вложение — отказ %s', exc.code)
+        if exc.status in (409, 429, 503):
+            return _syntony_qa_media_refusal("Файл ещё загружается — откройте через минуту",
+                                             'MEDIA_NOT_READY', 503, exc.retry_after or 30)
+        if exc.status in (404, 410):
+            return _syntony_qa_media_refusal("Файл недоступен: у Syntony его больше нет",
+                                             'MEDIA_GONE', 410)
+        return _syntony_qa_media_refusal("Syntony не отдала файл", 'MEDIA_UPSTREAM', 502)
+    response = redirect(url, code=302)
+    # Ссылку Syntony хранить нельзя (живёт 5 минут), значит и переадресацию на неё — тоже.
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    return response
 
 
 def _c2d_snapshot_access_error(snapshot, requester_id, requester):
@@ -9689,7 +9880,8 @@ def api_c2d_eval_snapshot(snapshot_id):
         access_error = _c2d_snapshot_access_error(snapshot, requester_id, requester)
         if access_error:
             return access_error
-        return jsonify({"status": "success", "snapshot": snapshot}), 200
+        return jsonify({"status": "success",
+                        "snapshot": _syntony_qa_snapshot_for(snapshot, requester_id)}), 200
     except Exception as error:
         logging.exception("c2d eval snapshot failed")
         return jsonify({"error": str(error)}), 500
@@ -18455,6 +18647,10 @@ def get_directions():
         # Третий источник — ChatApp у ТП/ОП ТЭЗ: там кнопка висит на «линейном»
         # направлении, а критерии приходят от чатового (random_chat_criteria_direction_id).
         _chatapp_map = _chatapp_direction_map()
+        # Чаты СЗоВ с дня перехода — Syntony (SZOV-9): «Случайный чат» берёт до него
+        # Chat2Desk, с него — снимки Syntony; день перехода модалка показывает в подписи.
+        _syntony_qa = syntony_chats_qa.enabled()
+        _syntony_qa_since = syntony_chats_qa.start_day().isoformat() if _syntony_qa else None
         for _d in directions:
             _code = str(_d.get('department_code') or '').strip().lower()
             _model = str(_d.get('calculation_model_code') or '').strip().lower()
@@ -18472,8 +18668,10 @@ def get_directions():
             # Критерии обычно берутся у направления самого оператора; у ChatApp
             # (ТЭЗ) это не так — см. CHATAPP_CHAT_DIRECTION_MAP.
             _criteria_direction_id = None
+            _chat_source_since = None
             if _model == 'chat_manager' and _code == C2D_RANDOM_CHAT_DEPARTMENT_CODE:
-                _chat_source = 'chat2desk'
+                _chat_source = 'syntony' if _syntony_qa else 'chat2desk'
+                _chat_source_since = _syntony_qa_since
             elif (_code == WZ_RANDOM_CHAT_DEPARTMENT_CODE
                     and WZ_RANDOM_CHAT_DIRECTION_MARKER in str(_d.get('name') or '').lower()):
                 _chat_source = 'wazzup'
@@ -18482,6 +18680,7 @@ def get_directions():
                 _criteria_direction_id = _chatapp_map[_d['id']]
             _d['random_chat_eligible'] = _chat_source is not None
             _d['random_chat_source'] = _chat_source
+            _d['random_chat_source_since'] = _chat_source_since
             _d['random_chat_criteria_direction_id'] = _criteria_direction_id
         return jsonify({
             "status": "success",
@@ -34910,6 +35109,43 @@ async def run_syntony_chat_billing_refresh_async():
         return await loop.run_in_executor(executor_pool, syntony_chat_billing_refresh_job)
     except Exception:
         logging.exception("Биллинг чата по Syntony: прогон упал")
+
+
+def syntony_qa_freeze_job(now=None):
+    """Проверка качества чатов СЗоВ по Syntony (SZOV-9): закрытые эпизоды чатов с дня перехода
+    (20.11.2026) — в снимки для «Случайного чата» журнала и «ИИ-оценки» (syntony_chats/qa.py).
+
+    Переписка Syntony живёт в базе 30 дней, снимок — 180: без заморозки чаты 20.11 пропали бы
+    из проверки 20.12. Раз в час, чтобы ночная выборка ИИ-оценки (05:10) видела вчерашние чаты.
+    Справочник чатников — тот же, что у табло, биллинга и «Учёта часов»."""
+    if not syntony_chats_qa.enabled():
+        return None
+    try:
+        ctx = _szov_syntony_context()
+    except Exception:
+        logging.exception("Снимки чатов Syntony: справочник чатников не собрался")
+        return None
+    try:
+        totals = syntony_chats_qa.freeze(db, ctx, now=now)
+    except Exception:
+        logging.exception("Снимки чатов Syntony: прогон упал")
+        return None
+    if totals.get('written') or totals.get('unattributed'):
+        logging.info(
+            "Снимки чатов Syntony: записано %s (диалогов %s, без привязки к чатнику %s, "
+            "только ИИ %s, без ответа %s) по %s диалогам",
+            totals.get('written'), totals.get('dialogs'), totals.get('unattributed'),
+            totals.get('ai_only'), totals.get('unanswered'), totals.get('conversations'))
+    return totals
+
+
+async def run_syntony_qa_freeze_async():
+    loop = asyncio.get_event_loop()
+    try:
+        # Только база — общий пул; первый прогон (все чаты с 20.11) — секунды.
+        return await loop.run_in_executor(executor_pool, syntony_qa_freeze_job)
+    except Exception:
+        logging.exception("Снимки чатов Syntony: прогон упал")
 
 
 
@@ -61005,6 +61241,19 @@ if __name__ == '__main__':
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(minutes=4)
+    )
+
+    # Проверка качества чатов СЗоВ по Syntony (SZOV-9): закрытые эпизоды — в снимки журнала и
+    # «ИИ-оценки». Раз в час в :05 — до ночной выборки ИИ-оценки (05:10) и её добора (08:10);
+    # первый прогон через 6 минут после старта, после первого забора чатов сторожем.
+    scheduler.add_job(
+        run_syntony_qa_freeze_async,
+        CronTrigger(minute=5, timezone=ZoneInfo('Asia/Almaty')),
+        id='syntony_qa_freeze',
+        misfire_grace_time=1800,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(minutes=6)
     )
 
     # «Термокороба» — зеркало Google-таблицы: лист читается каждую минуту —

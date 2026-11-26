@@ -42,16 +42,16 @@ export const isChat = (subject) => (
     CHAT_SUBJECTS.includes(subject) || subject === SUBJECT_FAMILY_CHATS
 );
 
-/** Единица оценки словами — она разная, и в подписях это видно. */
+/** Единица оценки словами — она разная, и в подписях это видно. Переписка СЗоВ с
+ * 20.11.2026 — эпизоды Syntony (SZOV-9), у них заявок нет: и у снимка Chat2Desk, и у
+ * эпизода Syntony единица — чат. */
 export const subjectUnit = (subject) => {
-    if (subject === SUBJECT_C2D_SNAPSHOT) return 'заявка';
     if (isChat(subject)) return 'чат';
     return 'звонок';
 };
 
 export const subjectTitle = (subject, id) => (
-    subject === SUBJECT_C2D_SNAPSHOT ? `Заявка #${id}`
-        : isChat(subject) ? `Чат #${id}` : `Звонок #${id}`
+    isChat(subject) ? `Чат #${id}` : `Звонок #${id}`
 );
 
 /** Откуда взялся субъект — показываем там, где отделы могут смешаться. */
@@ -59,7 +59,7 @@ export const SOURCE_LABEL = {
     [SUBJECT_CALL]: 'Журнал оценок',
     [SUBJECT_IMPORTED_CALL]: 'Из АТС, без оценки в журнале',
     [SUBJECT_WZ_EPISODE]: 'Wazzup',
-    [SUBJECT_C2D_SNAPSHOT]: 'Chat2Desk',
+    [SUBJECT_C2D_SNAPSHOT]: 'Chat2Desk · Syntony',
     [SUBJECT_CA_EPISODE]: 'ChatApp',
 };
 

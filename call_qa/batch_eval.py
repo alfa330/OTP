@@ -293,7 +293,7 @@ def _select_c2d_snapshots(cur, family, lo, hi) -> list[dict]:
              FROM c2d_chat_snapshots t
              JOIN users u ON u.id = t.operator_id
              LEFT JOIN directions d ON d.id = u.direction_id
-            WHERE t.source = 'chat2desk' AND u.direction_id = ANY(%s)
+            WHERE t.source IN ('chat2desk', 'syntony') AND u.direction_id = ANY(%s)
               AND t.day >= %s::date AND t.day < %s::date
               AND """ + _C2D_OPERATOR_MESSAGES_SQL + """ >= %s
               AND NOT """ + _C2D_SPLIT_SQL + """

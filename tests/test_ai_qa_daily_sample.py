@@ -710,12 +710,35 @@ class AdapterTests(unittest.TestCase):
         body = body[:body.index("\ndef ")]
         self.assertNotIn("get_call_distribution_settings", body)
 
+    @staticmethod
+    def _syntony_qa(enabled):
+        """Переход чатов СЗоВ на Syntony (SZOV-9): с дня перехода Chat2Desk не качаем."""
+        from syntony_chats import qa as syntony_qa
+        return SimpleNamespace(enabled=lambda: enabled, as_date=syntony_qa.as_date,
+                               start_day=lambda: date(2026, 11, 20))
+
     def test_c2d_candidates_respect_the_quota_reserve(self):
         namespace = {"db": SimpleNamespace(), "OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE": "szov",
-                     "logging": mock.Mock(), "_ai_qa_sample_c2d_quota_left": lambda: 1000}
+                     "logging": mock.Mock(), "_ai_qa_sample_c2d_quota_left": lambda: 1000,
+                     "syntony_chats_qa": self._syntony_qa(False)}
         fn = _load_function(self.source, "_ai_qa_sample_c2d_candidates", namespace)
         with mock.patch.object(config, "AI_QA_DAILY_SAMPLE_C2D_QUOTA_RESERVE", 15000):
             self.assertEqual(fn(DAY), [])        # квоту делит синк статистики
+
+    def test_c2d_candidates_stop_at_syntony_transition_day(self):
+        quota = mock.Mock(return_value=1000)
+        namespace = {"db": SimpleNamespace(), "OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE": "szov",
+                     "logging": mock.Mock(), "_ai_qa_sample_c2d_quota_left": quota,
+                     "syntony_chats_qa": self._syntony_qa(True)}
+        fn = _load_function(self.source, "_ai_qa_sample_c2d_candidates", namespace)
+        # С 20.11 чаты СЗоВ — готовые снимки Syntony: к API Chat2Desk не обращаемся вовсе.
+        self.assertEqual(fn(date(2026, 11, 20)), [])
+        self.assertEqual(fn("2026-11-25"), [])
+        quota.assert_not_called()
+        # До перехода — прежний путь (здесь он упирается в запас квоты).
+        with mock.patch.object(config, "AI_QA_DAILY_SAMPLE_C2D_QUOTA_RESERVE", 15000):
+            self.assertEqual(fn(date(2026, 11, 19)), [])
+        quota.assert_called_once()
 
     def test_c2d_candidates_come_from_the_stats_table_without_snapshots(self):
         from contextlib import contextmanager
@@ -735,7 +758,8 @@ class AdapterTests(unittest.TestCase):
         fake_db = SimpleNamespace(_get_cursor=cursor, _C2D_REQUEST_COLUMNS="r.request_id",
                                   _c2d_request_row_dict=lambda r: {"request_id": r[0], "operator_id": r[15]})
         namespace = {"db": fake_db, "OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE": "szov",
-                     "logging": mock.Mock(), "_ai_qa_sample_c2d_quota_left": lambda: 90000}
+                     "logging": mock.Mock(), "_ai_qa_sample_c2d_quota_left": lambda: 90000,
+                     "syntony_chats_qa": self._syntony_qa(True)}
         fn = _load_function(self.source, "_ai_qa_sample_c2d_candidates", namespace)
         with mock.patch.object(subjects_mod, "chat_direction_family", return_value=[69, 3]):
             got = fn(DAY)

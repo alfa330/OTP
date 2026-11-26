@@ -160,11 +160,11 @@ test('«Без даты» — без кнопки «Сводка дня»: св�
   assert.ok(!html.includes('Сводка дня'));
 });
 
-test('«Чаты»: подбор заявки в общей шапке и единица «заявка»', () => {
+test('«Чаты» СЗоВ: с 20.11.2026 переписка — чаты Syntony, единица «чат», а не «заявка»', () => {
   const html = render(ChatQueue, { list: listState(), apiBaseUrl: 'http://stub', department: 'szov', onFind: noop });
-  assert.ok(html.includes('Оценить случайную заявку'));
-  assert.ok(html.includes('Найти заявку'));
-  assert.ok(html.includes('заявки') || html.includes('заявок'));
+  assert.ok(html.includes('Оценить случайный чат'));
+  assert.ok(html.includes('Найти чат'));
+  assert.ok(!html.includes('заявк'));
 });
 
 test('ключ ссылки разбирается строго', () => {

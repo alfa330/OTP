@@ -46,7 +46,7 @@ _SOURCES = {
                           LEFT JOIN directions d ON d.id = u.direction_id
                           LEFT JOIN departments dep
                             ON dep.id = COALESCE(d.department_id, u.department_id)
-                         WHERE s.id = ANY(%s) AND s.source = 'chat2desk'""",
+                         WHERE s.id = ANY(%s) AND s.source IN ('chat2desk', 'syntony')""",
 }
 
 _oktell_cache = OrderedDict()

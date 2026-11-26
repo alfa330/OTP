@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import './styles.css';
 import FaIcon from '../components/common/FaIcon';
+import { absolutizeSnapshotMedia } from '../components/c2d_eval/syntonyMedia';
 import { CALL_KIND_ANY, CALL_KIND_OPTIONS, callKindFlags } from './randomCallKind';
 import { criticalDeficiencyPenalty, journalTotalScore } from './journalScore';
 import {
@@ -3100,7 +3101,7 @@ const ChatThread = ({ snapshot, quotes = [], selectable = false, onAddQuote, hei
                             {daySep}
                             <div style={{ display: 'flex', justifyContent: (out || auto || note) ? 'flex-end' : 'flex-start' }}>
                                 <div data-mid={m.id} style={bubbleStyle}>
-                                    {auto && <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4 }}><FaIcon className="fas fa-robot" /> Автоответ</div>}
+                                    {auto && <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4 }}><FaIcon className="fas fa-robot" /> {m.label || 'Автоответ'}</div>}
                                     {note && <div style={{ fontSize: 10.5, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4, color: '#b45309' }}><FaIcon className="fas fa-lock" /> Внутренний комментарий{m.author ? ` · ${m.author}` : ''}</div>}
                                     {/* Автор исходящего: у эпизода Wazzup их может быть
                                         несколько, поэтому подпись у каждого сообщения своя. */}
@@ -3139,11 +3140,17 @@ const CHAT_SOURCE_META = {
     chat2desk: { endpoint: 'c2d_eval', label: 'Chat2Desk', retention: 'заявки хранятся 45 дней', hasRating: true },
     wazzup: { endpoint: 'wz_eval', label: 'WhatsApp (Wazzup)', retention: 'переписка хранится 45 дней', hasRating: false },
     chatapp: { endpoint: 'ca_eval', label: 'WhatsApp (ChatApp)', retention: 'переписка хранится 45 дней', hasRating: false },
+    // Чат-менеджеры СЗоВ с 20.11.2026 (SZOV-9): до дня перехода (sourceSince) — Chat2Desk, с
+    // него — Syntony; период делит ручка. Оценки клиента у Syntony нет — фильтр виден, только
+    // пока в периоде есть дни Chat2Desk.
+    syntony: { endpoint: 'syn_eval', label: 'Syntony', retention: '', hasRating: false },
 };
+
+const rcShortDay = (key) => (key ? `${key.slice(8, 10)}.${key.slice(5, 7)}` : '');
 
 /* Модалка «Случайный чат»: настройки выборки (период в пределах месяца, длина
  * чата, оценка клиента, без уже оценённых) -> POST /api/<endpoint>/pick. */
-const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onPicked, source = 'chat2desk' }) => {
+const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onPicked, source = 'chat2desk', sourceSince = null }) => {
     const sourceMeta = CHAT_SOURCE_META[source] || CHAT_SOURCE_META.chat2desk;
     const todayKey = rcToKey(new Date());
     const monthStartKey = rcMonthStartKey(selectedMonth);
@@ -3151,6 +3158,19 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
     const maxKey = monthEndKey < todayKey ? monthEndKey : todayKey;
     const initialRange = () => ({ start: monthStartKey, end: maxKey });
     const [range, setRange] = useState(initialRange);
+    // У Syntony день перехода: раньше него чаты — Chat2Desk (подпись, срок и оценка клиента —
+    // его), с него — Syntony. В подписи — только то, что попадает в выбранный период.
+    const since = source === 'syntony' && sourceSince ? sourceSince : null;
+    const hasChat2DeskDays = !!since && range.start < since;
+    const hasSyntonyDays = !since || range.end >= since;
+    // Где граница — говорит подпись периода (один раз); в шапке — только откуда чаты.
+    const sourceLabel = since && hasChat2DeskDays
+        ? (hasSyntonyDays ? 'Chat2Desk и Syntony' : CHAT_SOURCE_META.chat2desk.label)
+        : sourceMeta.label;
+    const hasRating = sourceMeta.hasRating || hasChat2DeskDays;
+    const periodNote = since && monthStartKey < since
+        ? `до ${rcShortDay(since)} — Chat2Desk, с ${rcShortDay(since)} — Syntony`
+        : sourceMeta.retention;
     const [minMsgs, setMinMsgs] = useState(4);
     const [maxMsgs, setMaxMsgs] = useState('');
     const [ratingFilter, setRatingFilter] = useState('');
@@ -3181,7 +3201,7 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
             };
             const maxNum = parseInt(maxMsgs, 10);
             if (Number.isFinite(maxNum) && maxNum > 0) body.max_messages = maxNum;
-            if (sourceMeta.hasRating && ratingFilter) body.rating_filter = ratingFilter;
+            if (hasRating && ratingFilter) body.rating_filter = ratingFilter;
             const r = await authFetch(`${API_BASE_URL}/api/${sourceMeta.endpoint}/pick`, {
                 method: 'POST',
                 headers: { 'X-User-Id': userId, 'Content-Type': 'application/json' },
@@ -3189,7 +3209,8 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
             });
             const d = await r.json().catch(() => ({}));
             if (r.ok && d.status === 'success' && d.snapshot) {
-                onPicked?.(d);
+                // Вложения Syntony приходят адресом нашей ручки — дописываем адрес API.
+                onPicked?.({ ...d, snapshot: absolutizeSnapshotMedia(d.snapshot, API_BASE_URL) });
                 onClose?.();
             } else if (d.status === 'empty') {
                 setError(d.message || 'По заданным фильтрам чатов не нашлось');
@@ -3211,13 +3232,13 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
                 <div className="modal-header">
                     <div>
                         <h2><FaIcon className="fas fa-shuffle" /> Случайный чат</h2>
-                        <div className="modal-header-sub">{operator?.name || '—'} · {sourceMeta.label}</div>
+                        <div className="modal-header-sub">{operator?.name || '—'} · {sourceLabel}</div>
                     </div>
                     <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
                 </div>
                 <div className="modal-body">
                     <label className="label" style={{ marginBottom: 6, display: 'block' }}>
-                        Период (в пределах месяца; {sourceMeta.retention})
+                        {periodNote ? `Период (в пределах месяца; ${periodNote})` : 'Период (в пределах месяца)'}
                     </label>
                     <RcRangeCalendar value={range} onChange={setRange} maxKey={maxKey} minKey={monthStartKey} />
 
@@ -3232,7 +3253,7 @@ const RandomChatModal = ({ isOpen, onClose, operator, userId, selectedMonth, onP
                         </div>
                     </div>
 
-                    {sourceMeta.hasRating && (
+                    {hasRating && (
                         <>
                             <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Оценка клиента</label>
                             <select className="select" value={ratingFilter} onChange={e => setRatingFilter(e.target.value)}>
@@ -3425,7 +3446,9 @@ const ChatEvaluationModal = ({ isOpen, onClose, operator, chatData, directions, 
                         <FaIcon className="fas fa-comments" style={{ flexShrink: 0 }} /> Оценка чата · {operator?.name || '—'}
                     </div>
                     <div style={{ fontSize: 11.5, color: 'var(--text-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {snapshot.source === 'wazzup' ? 'Эпизод WhatsApp' : `Заявка #${snapshot.request_id}`} · {request?.day || snapshot.day || ''}
+                        {snapshot.source === 'wazzup' ? 'Эпизод WhatsApp'
+                            : snapshot.source === 'syntony' ? `Чат Syntony${snapshot.channel_name ? ` · ${snapshot.channel_name}` : ''}`
+                                : `Заявка #${snapshot.request_id}`} · {request?.day || snapshot.day || ''}
                         {request?.rating_score != null ? ` · оценка клиента: ${request.rating_score}` : ''}
                         {' · '}{direction?.name || 'направление не найдено'}
                     </div>
@@ -3563,7 +3586,7 @@ const ChatViewModal = ({ isOpen, onClose, snapshotId, quotes, userId, title }) =
         authFetch(`${API_BASE_URL}/api/c2d_eval/snapshots/${snapshotId}`, { headers: { 'X-User-Id': userId } })
             .then(r => r.json().then(d => ({ ok: r.ok, d })))
             .then(({ ok, d }) => {
-                if (ok && d.status === 'success') setSnapshot(d.snapshot);
+                if (ok && d.status === 'success') setSnapshot(absolutizeSnapshotMedia(d.snapshot, API_BASE_URL));
                 else setError(d.error || 'Не удалось загрузить переписку');
             })
             .catch(() => setError('Сетевая ошибка'));
@@ -8423,6 +8446,7 @@ const App = ({ user, initialSelection }) => {
                 userId={userId}
                 selectedMonth={selectedMonth}
                 source={randomChatSource}
+                sourceSince={selectedOperatorDirectionMeta?.random_chat_source_since || null}
                 onPicked={(data) => setChatEvalData(data)}
             />
             <ChatEvaluationModal

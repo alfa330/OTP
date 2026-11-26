@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { MessageSquare, X, Eye, EyeOff } from 'lucide-react';
 import ChatThread, { ChatQuotesBar } from './ChatThread';
+import { absolutizeSnapshotMedia } from './syntonyMedia';
 
 /* Просмотр переписки оценённого чата Chat2Desk (снапшот) с подсветкой цитат СВ.
  * Используется в «Мои оценки» чат-менеджера: оценка живёт в журнале (calls),
@@ -20,7 +21,7 @@ export default function ChatSnapshotModal({ open, onClose, apiBaseUrl, withAcces
         setSnapshot(null); setError('');
         const headers = withAccessTokenHeader ? withAccessTokenHeader() : {};
         axios.get(`${apiBaseUrl}/api/c2d_eval/snapshots/${snapshotId}`, { headers })
-            .then((r) => setSnapshot(r.data.snapshot))
+            .then((r) => setSnapshot(absolutizeSnapshotMedia(r.data.snapshot, apiBaseUrl)))
             .catch((e) => setError(e.response?.data?.error || 'Не удалось загрузить переписку (возможно, удалена по ретеншну)'));
     }, [open, snapshotId, apiBaseUrl, withAccessTokenHeader]);
 

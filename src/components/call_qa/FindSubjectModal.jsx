@@ -8,7 +8,7 @@ import {
 import { iosCard, iosInput, iosBtnPrimary, iosBtnSecondary, iosGroupLabel, IosBadge, IosModal, scoreTone } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDateRangePicker, { isoDate } from '../ui/DateRangePicker';
-import { SUBJECT_IMPORTED_CALL, SUBJECT_C2D_SNAPSHOT, isChat, canPullCalls, subjectTitle } from './subjects';
+import { SUBJECT_IMPORTED_CALL, isChat, canPullCalls, subjectTitle } from './subjects';
 
 /* Точечный подбор: найти конкретный звонок или переписку по номеру телефона,
  * сотруднику и периоду — и открыть на оценку.
@@ -218,7 +218,7 @@ export default function FindSubjectModal({
         ...(period.to ? { date_to: period.to } : {}),
     }, 'Звонок найден в АТС');
 
-    const unit = chats ? (department === 'szov' ? 'заявку' : 'чат') : 'звонок';
+    const unit = chats ? 'чат' : 'звонок';
 
     return (
         /* Окно шире обычной формы: под полосой полей лежит список найденных

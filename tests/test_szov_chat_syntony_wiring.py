@@ -35,9 +35,10 @@ class ImportAliasTests(unittest.TestCase):
             if isinstance(node, ast.ImportFrom) and node.module == 'syntony_chats':
                 aliases.update(alias.asname or alias.name for alias in node.names)
         # Биллинг чата по Syntony (24.11.2026) — свой модуль рядом с табло; показатели чатников
-        # в «Учёте часов» (SZOV-11, 25.11.2026) — тоже.
+        # в «Учёте часов» (SZOV-11, 25.11.2026) — тоже; проверка качества чатов СЗоВ (SZOV-9,
+        # 26.11.2026) — тоже.
         self.assertEqual(aliases, {'syntony_chats_szov', 'syntony_chats_billing',
-                                   'syntony_chats_employees'})
+                                   'syntony_chats_employees', 'syntony_chats_qa'})
         defined = set()
         for node in TREE.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

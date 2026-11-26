@@ -248,6 +248,18 @@ _STATEMENTS = [
         PRIMARY KEY (day, operator_id)
     )
     """,
+
+    # Проверка качества СЗоВ (SZOV-9, qa.py): докуда диалог уже разобран на закрытые эпизоды —
+    # следующий прогон берёт только сообщения позже. Строка на диалог; забывается через 40 дней.
+    # Сами снимки чатов — в общей таблице снимков журнала (c2d_chat_snapshots), её индексы — в
+    # схеме журнала (db/schema.py), рядом с индексами снимков Wazzup и ChatApp.
+    """
+    CREATE TABLE IF NOT EXISTS syntony_qa_marks (
+        conversation_id  TEXT PRIMARY KEY,
+        closed_until     TIMESTAMPTZ NOT NULL,
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
 ]
 
 

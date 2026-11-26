@@ -1915,6 +1915,19 @@ class SchemaMixin:
                 ON c2d_chat_snapshots (wz_channel_id, wz_chat_id, episode_start)
                 WHERE source = 'chatapp';
             """)
+            # Эпизоды чатов Syntony (чат-менеджеры СЗоВ с 20.11.2026, SZOV-9): source='syntony',
+            # wz_channel_id = канал (номер СЗоВ), wz_chat_id = диалог. Их замораживает ежечасная
+            # задача (syntony_chats/qa.py) — сотни в сутки, поэтому пул дня («ИИ-оценка»,
+            # «Случайный чат») читается по индексу (source, day), а не обходом таблицы.
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_syn_snapshots_episode
+                ON c2d_chat_snapshots (wz_channel_id, wz_chat_id, episode_start)
+                WHERE source = 'syntony';
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_c2d_snapshots_source_day
+                ON c2d_chat_snapshots (source, day);
+            """)
             # Сырые вебхуки Chat2Desk (задача табло, 18.09.2026). Вендор не отдаёт
             # событий статусов операторов, но сообщения и закрытие обращений шлёт
             # сам — это снимает основной расход квоты: табло больше не выкачивает

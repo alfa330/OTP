@@ -105,7 +105,7 @@ _SCOPE_SQL = {
                                       FROM c2d_chat_snapshots s
                                       LEFT JOIN users u ON u.id = s.operator_id
                                       LEFT JOIN directions d ON d.id = u.direction_id
-                                     WHERE s.id = %s AND s.source = 'chat2desk'""",
+                                     WHERE s.id = %s AND s.source IN ('chat2desk', 'syntony')""",
     config.SUBJECT_CA_EPISODE: """SELECT COALESCE(d.canonical_id, d.id)
                                     FROM chatapp_episodes e
                                     LEFT JOIN users u ON u.id = e.operator_user_id
@@ -2576,7 +2576,7 @@ def _resolve_wz_episode_source(subject: dict, model: str, may_transcribe=None) -
         try:
             frozen = runtime_store.get_latest_transcript(
                 call_id=episode_id, subject_kind=subject_kind,
-                asr_provider=subjects_mod.chat_source_provider(subject_kind))
+                asr_provider=subjects_mod.chat_source_provider(subject_kind, subject.get("source")))
         except runtime_store.RuntimeSchemaUnavailable:
             frozen = None
         if not frozen:
@@ -2674,6 +2674,9 @@ def _chat_extra(subject: dict) -> dict:
         out["channel_name"] = subject.get("channel_name")
         day = subject.get("day")
         out["day"] = day.isoformat() if day is not None else None
+        if subject.get("source") == config.SYN_SNAPSHOT_SOURCE:
+            # Эпизод Syntony (SZOV-9): шапке карточки — откуда чат, заявки у него нет.
+            out["snapshot_source"] = config.SYN_SNAPSHOT_SOURCE
     return out
 
 
@@ -5775,7 +5778,7 @@ def _find_c2d_snapshots(cur, family, suffix, operator_id, date_from, date_to, li
                    ORDER BY hc.created_at DESC LIMIT 1
               ) hs ON TRUE
               {_find_ai_lateral(config.SUBJECT_C2D_SNAPSHOT, 'cs.id')}
-             WHERE cs.source = 'chat2desk' AND u.direction_id = ANY(%s)"""
+             WHERE cs.source IN ('chat2desk', 'syntony') AND u.direction_id = ANY(%s)"""
         + where + " ORDER BY cs.day DESC, cs.id DESC LIMIT %s",
         (family, *params, limit))
     return [{"subject": config.SUBJECT_C2D_SNAPSHOT, "id": r[0], "operator": r[1] or "—",
@@ -6004,7 +6007,7 @@ def _c2d_candidates(family):
                  FROM c2d_chat_snapshots t
                  JOIN users u ON u.id = t.operator_id
                  LEFT JOIN directions d ON d.id = u.direction_id
-                WHERE t.source = 'chat2desk' AND u.direction_id = ANY(%s)
+                WHERE t.source IN ('chat2desk', 'syntony') AND u.direction_id = ANY(%s)
                   AND """ + _C2D_OPERATOR_MESSAGES_SQL + """ >= %s
                   AND NOT """ + _C2D_SPLIT_SQL + """
                   AND NOT EXISTS (SELECT 1 FROM calls c
@@ -6126,7 +6129,15 @@ def _episode_eligibility_counts(cur, family, subject_kind) -> dict:
 # Проценты в LIKE удвоены (%%): строка склеивается в запрос, который исполняется
 # С параметрами, а psycopg2 в таком запросе считает одиночный % началом
 # подстановки. Оба потребителя — выборка кандидата и счётчики — параметры передают.
-_C2D_SPLIT_SQL = """EXISTS (
+#
+# Эпизод Syntony (SZOV-9) лежит в той же таблице, но устроен как эпизод Wazzup: автор есть у
+# каждого ответа, и «вели несколько человек» — это доля ответов оцениваемого ниже порога
+# (config.SYN_MIN_OPERATOR_SHARE), а объём — все ответы сотрудников. Оба числа посчитаны при
+# заморозке и лежат в request_payload — ленту JSON на каждой строке пула не разбираем.
+_C2D_SPLIT_SQL = """(CASE WHEN t.source = 'syntony'
+                        THEN COALESCE((t.request_payload->>'operator_share')::float, 0)
+                             < """ + repr(float(config.SYN_MIN_OPERATOR_SHARE)) + """ - 1e-9
+                        ELSE EXISTS (
                         SELECT 1
                           FROM jsonb_array_elements(t.messages) WITH ORDINALITY AS x(m, ord)
                          WHERE x.m->>'type' = 'system'
@@ -6136,20 +6147,25 @@ _C2D_SPLIT_SQL = """EXISTS (
                                  SELECT 1
                                    FROM jsonb_array_elements(t.messages)
                                         WITH ORDINALITY AS y(m2, ord2)
-                                  WHERE y.m2->>'type' = 'to_client' AND y.ord2 < x.ord))"""
+                                  WHERE y.m2->>'type' = 'to_client' AND y.ord2 < x.ord))
+                    END)"""
 
-_C2D_OPERATOR_MESSAGES_SQL = """(SELECT COUNT(*) FROM jsonb_array_elements(t.messages) m
-                                  WHERE m->>'type' = 'to_client')"""
+_C2D_OPERATOR_MESSAGES_SQL = """(CASE WHEN t.source = 'syntony'
+                                  THEN COALESCE((t.request_payload->>'human_outbound_count')::int, 0)
+                                  ELSE (SELECT COUNT(*) FROM jsonb_array_elements(t.messages) m
+                                         WHERE m->>'type' = 'to_client')
+                              END)"""
 
 
 def _c2d_eligibility_counts(cur, family) -> dict:
-    """Счётчики пригодности заявок Chat2Desk.
+    """Счётчики пригодности переписки СЗоВ: заявки Chat2Desk и эпизоды Syntony.
 
-    `multi_operator` здесь — заявки с ручной передачей чата после ответов
-    оператора: именно они, а не доля ответов, делают оценку одного человека
-    нечестной. Доли ответов у источника нет вовсе, поэтому
-    min_operator_share_pct не возвращаем — по его отсутствию фронт и понимает,
-    что эту мерку показывать не нужно.
+    `multi_operator` у заявки Chat2Desk — ручная передача чата после ответов
+    оператора (доли ответов у заявки нет), у эпизода Syntony (с 20.11.2026,
+    SZOV-9) — доля ответов оцениваемого ниже порога. С переходом на Syntony
+    переписка СЗоВ — чаты с автором у каждого ответа, поэтому порог доли
+    (min_operator_share_pct) отдаётся и здесь: экран объясняет им, какие чаты
+    можно оценить.
 
     «Можно оценить» обязано совпадать с ПУЛОМ, из которого берётся случайная
     заявка (_c2d_candidates), иначе сводка обещает больше, чем даёт кнопка. Пул
@@ -6175,7 +6191,7 @@ def _c2d_eligibility_counts(cur, family) -> dict:
                                  AND rc.call_id = t.id AND rc.model = %s) AS ai_done
                  FROM c2d_chat_snapshots t
                  LEFT JOIN users u ON u.id = t.operator_id
-                WHERE t.source = 'chat2desk'
+                WHERE t.source IN ('chat2desk', 'syntony')
                   AND (u.direction_id = ANY(%s) OR t.operator_id IS NULL)
                   AND """ + _C2D_NOT_TEST.format(alias='t') + """
              ) s""",
@@ -6183,6 +6199,7 @@ def _c2d_eligibility_counts(cur, family) -> dict:
          config.CLAUDE_MODEL, family))
     row = cur.fetchone() or (0, 0, 0, 0, 0)
     return {"min_operator_messages": config.C2D_MIN_OPERATOR_MESSAGES,
+            "min_operator_share_pct": round(config.SYN_MIN_OPERATOR_SHARE * 100),
             "dialogs": int(row[0] or 0), "unattributed": int(row[1] or 0),
             "multi_operator": int(row[2] or 0), "evaluable": int(row[3] or 0),
             "evaluated": int(row[4] or 0)}

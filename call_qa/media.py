@@ -347,10 +347,37 @@ def _store(item: dict, result: dict) -> None:
 
 # ── загрузка вложения ────────────────────────────────────────────────────────
 
+class MediaUnavailable(Exception):
+    """Файла у источника больше нет — повторять бессмысленно (как 404/410 у Wazzup)."""
+
+
+# Вложение чата Syntony (SZOV-9) лежит в снимке меткой, а не ссылкой: ссылка Syntony живёт
+# 5 минут, и хранить её нельзя. Метка — то же, что неизменяемая ссылка Wazzup: по ней ключуется
+# расшифровка (source_identity), а свежая ссылка берётся прямо перед скачиванием.
+_SYNTONY_MEDIA_SCHEME = "syntony-file:"
+
+
+def _resolve_media_url(url: str) -> str:
+    if not str(url or "").startswith(_SYNTONY_MEDIA_SCHEME):
+        return url
+    from syntony_chats import qa as syntony_qa
+    message_id = syntony_qa.parse_media_ref(url)
+    if not message_id:
+        raise ValueError("метка вложения Syntony без id сообщения")
+    try:
+        return syntony_qa.file_url(message_id)
+    except syntony_qa.client.SyntonyHistoryError as exc:
+        if exc.status in (404, 410):
+            raise MediaUnavailable(f"у Syntony файла больше нет (HTTP {exc.status})") from exc
+        raise
+
+
 def _download(url: str, *, limit: int | None = None) -> tuple[bytes, str]:
     """Скачивает вложение с ограничением размера. Ссылки Wazzup публичные
-    (store.wazzup24.com, без авторизации) — как их читает и браузер."""
+    (store.wazzup24.com, без авторизации) — как их читает и браузер; метку Syntony
+    меняем на свежую ссылку (_resolve_media_url)."""
     limit = config.MEDIA_MAX_BYTES if limit is None else limit
+    url = _resolve_media_url(url)
     with httpx.stream("GET", url, timeout=config.MEDIA_HTTP_TIMEOUT,
                       follow_redirects=True) as r:
         r.raise_for_status()
@@ -637,6 +664,8 @@ def _annotate_one(item: dict) -> dict:
         # 404/410 у Wazzup — файл удалён на их стороне: повторять бессмысленно.
         kind = "unavailable" if status in (403, 404, 410) else "failed"
         return {"status": kind, "error": f"HTTP {status}"}
+    except MediaUnavailable as exc:
+        return {"status": "unavailable", "error": str(exc)[:500]}
     except Exception as exc:
         return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:500]}
 
@@ -788,6 +817,10 @@ def batch_media_requests(items: list[dict]) -> tuple[list[dict], dict]:
             status = exc.response.status_code if exc.response is not None else 0
             item = dict(item, _error={"status": "unavailable" if status in (403, 404, 410)
                                       else "failed", "error": f"HTTP {status}"})
+            by_id[custom_id] = item
+            continue
+        except MediaUnavailable as exc:
+            item = dict(item, _error={"status": "unavailable", "error": str(exc)[:500]})
             by_id[custom_id] = item
             continue
         except Exception as exc:

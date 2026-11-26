@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Ban, ChevronLeft, Loader2, RotateCcw, MessageSquare, PhoneCall, CheckCircle2 } from 'lucide-react';
 import { iosBtnGhost, iosCard } from '../ui/ios';
-import { isChat, subjectTitle, SUBJECT_C2D_SNAPSHOT } from './subjects';
+import { isChat, subjectTitle } from './subjects';
 import { filtersKey, filtersToParams, hasActiveFilters } from './filters';
 import { dayTitle, itemKey, plural, timeOf } from './queueDayRules';
 import { exclusionAuthor } from './exclusionRules';
@@ -21,7 +21,6 @@ import { exclusionAuthor } from './exclusionRules';
 const PAGE = 50;
 
 const unitText = (n, subject) => {
-    if (subject === SUBJECT_C2D_SNAPSHOT) return plural(n, 'заявка', 'заявки', 'заявок');
     if (isChat(subject)) return plural(n, 'чат', 'чата', 'чатов');
     return plural(n, 'звонок', 'звонка', 'звонков');
 };
@@ -56,7 +55,7 @@ function Row({ item, onOpen, onRestore, restoring, canRestore }) {
     const ex = item.exclusion || {};
     const Icon = isChat(item.subject) ? MessageSquare : PhoneCall;
     // «13.10 09:13» → дата и время двумя строками, как в остальных списках раздела;
-    // у заявки Chat2Desk времени нет — только дата.
+    // у заявки Chat2Desk (СЗоВ до 20.11.2026) времени нет — только дата.
     const time = timeOf(item.datetime);
     const date = String(item.datetime || '').replace(time || '', '').trim() || dayTitle(item.day).date;
     const reason = String(ex.reason || '').trim();

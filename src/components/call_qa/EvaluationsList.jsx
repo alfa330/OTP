@@ -5,7 +5,7 @@ import { APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, iosGroupLabel, sco
 import QueueList from './QueueList';
 import ExcludedList from './ExcludedList';
 import { DigestLink } from './QueueDays';
-import { isChat, subjectUnit, SUBJECT_C2D_SNAPSHOT, SUBJECT_IMPORTED_CALL } from './subjects';
+import { isChat, subjectUnit, SUBJECT_IMPORTED_CALL } from './subjects';
 import { filtersKey, filtersToParams, hasActiveFilters, pullParamsFromFilters } from './filters';
 import { commonRowMeta, dayNeighbours, monthGroups, NO_DAY, plural } from './queueDayRules';
 import {
@@ -27,10 +27,9 @@ import {
 
 const DAY_COLUMNS = 'sm:grid sm:grid-cols-[minmax(0,1fr)_4rem_4.5rem_5.5rem_1rem] sm:items-center sm:gap-4';
 
-/* Сколько и чего: «94 звонка», «30 заявок». Единица у переписки СЗоВ — заявка. */
+/* Сколько и чего: «94 звонка», «30 чатов». У переписки СЗоВ с 20.11.2026 (Syntony) единица — чат. */
 const unitsText = (n, subject) => {
     const unit = subjectUnit(subject);
-    if (unit === 'заявка') return plural(n, 'заявка', 'заявки', 'заявок');
     if (unit === 'чат') return plural(n, 'чат', 'чата', 'чатов');
     return plural(n, 'звонок', 'звонка', 'звонков');
 };
@@ -160,7 +159,7 @@ function DayScreen({ days, day, state, subject, titleId, onOpen, onOpenDay, onCl
             <section aria-label="Разговоры дня" className="space-y-2">
                 <div className="px-1">
                     <span className={iosGroupLabel.replace('px-1 ', '')}>
-                        {isChat(subject) ? (subject === SUBJECT_C2D_SNAPSHOT ? 'Заявки дня' : 'Чаты дня') : 'Звонки дня'}
+                        {isChat(subject) ? 'Чаты дня' : 'Звонки дня'}
                     </span>
                 </div>
                 <div className={`${iosCard} overflow-hidden`}>

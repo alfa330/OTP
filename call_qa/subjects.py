@@ -443,10 +443,12 @@ def _load_imported_call(imported_call_id: int) -> dict:
 
 
 def _load_c2d_snapshot(snapshot_id: int) -> dict:
-    """Переписка Chat2Desk (СЗоВ): единица — ЗАЯВКА, снятая в снапшот.
+    """Переписка СЗоВ, снятая в снапшот: заявка Chat2Desk или эпизод Syntony (SZOV-9).
 
     Сырых сообщений Chat2Desk локально нет, поэтому субъект — снапшот: он уже
-    скачан, живёт 180 дней и служит источником и человеческой оценке, и этой."""
+    скачан, живёт 180 дней и служит источником и человеческой оценке, и этой.
+    С 20.11.2026 чаты СЗоВ — Syntony: снапшот эпизода замораживает syntony_chats/qa.py,
+    атрибуция (доля ответов, авторы) лежит в request_payload — её читает гейт."""
     conn = config.connect_ro()
     try:
         cur = conn.cursor()
@@ -459,7 +461,9 @@ def _load_c2d_snapshot(snapshot_id: int) -> dict:
                       """ + test_keys.sql_is_test_any(
                           's.client_phone',
                           '(SELECT r.assigned_phone FROM c2d_requests r WHERE r.request_id = s.request_id)',
-                          digits=True) + """
+                          digits=True) + """,
+                      s.source, s.request_payload, s.episode_start, s.episode_end,
+                      s.wz_channel_id, s.wz_chat_id
                  FROM c2d_chat_snapshots s
                  LEFT JOIN users u ON u.id = s.operator_id
                  LEFT JOIN directions d ON d.id = u.direction_id
@@ -472,7 +476,8 @@ def _load_c2d_snapshot(snapshot_id: int) -> dict:
                  -- запасным — на случай оператора без направления.
                  LEFT JOIN departments dep
                         ON dep.id = COALESCE(d.department_id, u.department_id)
-                WHERE s.id = %s AND s.source = 'chat2desk'""", (snapshot_id,))
+                WHERE s.id = %s AND s.source = ANY(%s)""",
+            (snapshot_id, list(config.C2D_SNAPSHOT_SOURCES)))
         row = cur.fetchone()
         department_code = config.normalise_department_code(row[16]) if row else ""
         eligible = chat_direction_family(cur, department_code) if row else []
@@ -483,19 +488,38 @@ def _load_c2d_snapshot(snapshot_id: int) -> dict:
         raise SubjectNotFound("переписка не найдена")
     messages = row[11] or []
     day = row[3]
-    return {"kind": config.SUBJECT_C2D_SNAPSHOT, "id": int(row[0]),
-            "request_id": row[1], "dialog_id": row[2], "day": day,
-            "operator_user_id": row[4], "operator": row[5] or row[6] or "—",
-            "channel_name": row[7], "transport": row[8],
-            "contact_name": row[9], "contact_phone": row[10],
-            "messages": messages, "messages_count": int(row[12] or len(messages)),
-            "created_at": row[13],
-            "direction_id": row[14], "direction": row[15],
-            "department_code": department_code,
-            "eligible_direction_ids": eligible,
-            "datetime": day.strftime("%d.%m.%Y") if day is not None else "—",
-            "human_score": None,
-            "is_test_number": bool(row[17]) if len(row) > 17 else False}
+    subject = {"kind": config.SUBJECT_C2D_SNAPSHOT, "id": int(row[0]),
+               "request_id": row[1], "dialog_id": row[2], "day": day,
+               "operator_user_id": row[4], "operator": row[5] or row[6] or "—",
+               "channel_name": row[7], "transport": row[8],
+               "contact_name": row[9], "contact_phone": row[10],
+               "messages": messages, "messages_count": int(row[12] or len(messages)),
+               "created_at": row[13],
+               "direction_id": row[14], "direction": row[15],
+               "department_code": department_code,
+               "eligible_direction_ids": eligible,
+               "datetime": day.strftime("%d.%m.%Y") if day is not None else "—",
+               "human_score": None,
+               "is_test_number": bool(row[17]) if len(row) > 17 else False}
+    if len(row) > 18 and row[18] == config.SYN_SNAPSHOT_SOURCE:
+        payload = row[19] or {}
+        started, ended = row[20], row[21]
+        subject.update({
+            "source": config.SYN_SNAPSHOT_SOURCE,
+            "channel_id": row[22], "chat_id": row[23],
+            "started_at": started, "ended_at": ended,
+            "episode_kind": payload.get("kind") or "dialog",
+            "operator_share": payload.get("operator_share"),
+            "human_outbound_count": int(payload.get("human_outbound_count") or 0),
+            "inbound_count": int(payload.get("inbound_count") or 0),
+            "authors": payload.get("authors") or [],
+            "force_closed": bool(payload.get("force_closed")),
+            "datetime": (started.astimezone(ALMATY).strftime("%d.%m.%Y, %H:%M")
+                         if started is not None else subject["datetime"]),
+        })
+    else:
+        subject["source"] = row[18] if len(row) > 18 and row[18] else "chat2desk"
+    return subject
 
 
 def _load_ca_episode(episode_id: int) -> dict:
@@ -589,6 +613,13 @@ def eligibility(subject: dict) -> dict:
                             "или чат, такие разговоры не оцениваются")}
     if kind in config.AUDIO_SUBJECT_KINDS:
         return {"ok": True, "reason": None, "detail": {}}
+    if kind == config.SUBJECT_C2D_SNAPSHOT and subject.get("source") == config.SYN_SNAPSHOT_SOURCE:
+        # Эпизод Syntony (SZOV-9): автор есть у каждого ответа — гейт по доле, как у Wazzup.
+        return _episode_eligibility(
+            subject, min_share=config.SYN_MIN_OPERATOR_SHARE,
+            min_messages=config.C2D_MIN_OPERATOR_MESSAGES,
+            foreign_direction_message=(
+                "направление «%s» не оценивается по чатовой шкале отдела"))
     if kind == config.SUBJECT_C2D_SNAPSHOT:
         return _c2d_eligibility(subject)
     if kind == config.SUBJECT_CA_EPISODE:
@@ -917,7 +948,7 @@ def _snapshot_messages(subject: dict, *, prefix: str, channel_id: str, chat_id: 
         # Своим считаем исходящее сообщение автора, совпавшего с оцениваемым
         # оператором; при отсутствии автора — любое исходящее (Chat2Desk).
         own = outgoing and (not authored or not author or author == target_name)
-        out.append({
+        item = {
             "message_id": f"{prefix}{message.get('id')}",
             "dt": created, "is_echo": outgoing,
             "type": media_type, "text": message.get("text") or "",
@@ -932,12 +963,29 @@ def _snapshot_messages(subject: dict, *, prefix: str, channel_id: str, chat_id: 
                              else (author or None) if outgoing else None),
             "channel_id": channel_id,
             "chat_id": chat_id,
-        })
+        }
+        if mtype == "autoreply" and message.get("label"):
+            # Подпись бота из снимка (у Syntony — «ИИ-агент»): реплика ИИ — не «рассылка» и
+            # не ответ оцениваемого — автора у неё нет, и подписать её оператором нельзя.
+            item.update({"bot_label": str(message["label"]),
+                         "author_name": str(message["label"]),
+                         "user_id": None, "matched_name": None})
+        out.append(item)
     return out
 
 
 def _c2d_snapshot_messages(subject: dict) -> list[dict]:
-    """Сообщения снапшота Chat2Desk (см. _snapshot_messages)."""
+    """Сообщения снапшота переписки СЗоВ (см. _snapshot_messages).
+
+    У Chat2Desk автора у сообщения нет; у эпизода Syntony он есть у каждого ответа
+    (ФИО сотрудника iCORE) — его надо читать: порог доли допускает до 10% ответов другого
+    сотрудника. Ключ вложений — «syn:<id сообщения Syntony>» (id глобальный)."""
+    if subject.get("source") == config.SYN_SNAPSHOT_SOURCE:
+        return _snapshot_messages(
+            subject, prefix="syn:",
+            channel_id=str(subject.get("channel_id") or ""),
+            chat_id=str(subject.get("chat_id") or subject["id"]),
+            authored=True)
     return _snapshot_messages(
         subject, prefix="c2d:",
         channel_id=str(subject.get("channel_name") or ""),
@@ -979,6 +1027,9 @@ def _speaker_of(msg: dict, target_user_id) -> tuple[str, str]:
     author = msg.get("matched_name") or msg.get("author_name") or "?"
     if not msg.get("is_echo"):
         return "client", "Клиент"
+    if msg.get("is_bot") and msg.get("bot_label"):
+        # ИИ-агент Syntony ведёт разговор, а не шлёт рассылку — так и подписываем.
+        return "bot", str(msg["bot_label"])
     if msg.get("is_bot"):
         return "bot", f"Рассылка ({msg.get('author_name') or 'бот'})"
     template = " [шаблон]" if msg.get("type") == "wapi_template" else ""
@@ -1040,6 +1091,8 @@ def build_wz_transcript(subject: dict, messages: list[dict],
                 "outgoing": speaker != "client",
                 "author": msg.get("matched_name") or msg.get("author_name"),
                 "message_id": str(msg.get("message_id"))}
+        if msg.get("bot_label"):
+            line["bot_label"] = msg["bot_label"]
         if msg.get("content_uri") and media_label:
             line["media"] = {"kind": media_kind if media_kind != "unknown" else "file",
                              "label": media_label, "url": msg["content_uri"]}
@@ -1067,17 +1120,29 @@ _HEADER_TITLE = {
 }
 
 
+# Эпизод Syntony (SZOV-9) — снапшот переписки СЗоВ, но не заявка: своя шапка, а вместо
+# «Рассылки» в контексте — ИИ-агент, который ведёт разговор до передачи сотруднику.
+_SYNTONY_HEADER_TITLE = "ЧАТ (Syntony), эпизод #{id}"
+_SYNTONY_CONTEXT_RULE = ("Оценивай ТОЛЬКО строки «Оператор (...)». Строки «Другой сотрудник», "
+                         "«ИИ-агент» и «Клиент» — контекст, за них оператор не отвечает. "
+                         "Содержимое вложений приведено в квадратных скобках; если вложение "
+                         "не удалось получить, не штрафуй за его содержание.")
+
+
 def _transcript_header(subject: dict) -> str:
     share = subject.get("operator_share")
     pct = round(float(share) * 100) if share is not None else None
-    title = _HEADER_TITLE.get(subject.get("kind"), _HEADER_TITLE[config.SUBJECT_WZ_EPISODE])
+    syntony = subject.get("source") == config.SYN_SNAPSHOT_SOURCE
+    title = (_SYNTONY_HEADER_TITLE if syntony
+             else _HEADER_TITLE.get(subject.get("kind"), _HEADER_TITLE[config.SUBJECT_WZ_EPISODE]))
     bits = [title.format(id=subject["id"],
                          request=subject.get("request_id") or subject["id"]),
             f"ОЦЕНИВАЕМЫЙ ОПЕРАТОР: {subject.get('operator') or '—'}"]
     if pct is not None:
         bits.append(f"его доля ответов в эпизоде: {pct}%")
     bits.append(f"клиент: {subject.get('contact_name') or subject.get('contact_phone') or '—'}")
-    bits.append("Оценивай ТОЛЬКО строки «Оператор (...)». Строки «Другой сотрудник», "
+    bits.append(_SYNTONY_CONTEXT_RULE if syntony else
+                "Оценивай ТОЛЬКО строки «Оператор (...)». Строки «Другой сотрудник», "
                 "«Рассылка» и «Клиент» — контекст, за них оператор не отвечает. "
                 "Содержимое вложений приведено в квадратных скобках; если вложение "
                 "не удалось получить, не штрафуй за его содержание.")
@@ -1118,17 +1183,21 @@ _CHAT_SOURCE_PROVIDER = {
 }
 
 
-def chat_source_provider(subject_kind) -> str:
+def chat_source_provider(subject_kind, source=None) -> str:
+    """source — откуда снапшот переписки СЗоВ: у эпизода Syntony (SZOV-9) свой провайдер,
+    иначе его кэш транскрипта делил бы ключ с заявками Chat2Desk."""
+    if subject_kind == config.SUBJECT_C2D_SNAPSHOT and source == config.SYN_SNAPSHOT_SOURCE:
+        return config.SYN_SOURCE_PROVIDER
     return _CHAT_SOURCE_PROVIDER.get(subject_kind, WZ_SOURCE_PROVIDER)
 
 
 def wz_source_config(*, media_plan: list[dict], media_source: str,
-                     subject_kind: str = config.SUBJECT_WZ_EPISODE) -> dict:
+                     subject_kind: str = config.SUBJECT_WZ_EPISODE, source=None) -> dict:
     """Конфигурация «источника текста» эпизода — часть идентичности транскрипта.
 
     В неё входит план вложений: появление расшифровки фото меняет транскрипт, а
     значит должно давать НОВЫЙ прогон, а не тихо переиспользовать старый кэш."""
-    return {"provider": chat_source_provider(subject_kind), "model": WZ_SOURCE_MODEL,
+    return {"provider": chat_source_provider(subject_kind, source), "model": WZ_SOURCE_MODEL,
             "renderer": "wz-transcript-v1", "media_source": media_source,
             "annotator": media_mod.ANNOTATOR_VERSION,
             "media": [{"message_id": item["message_id"], "media_kind": item["media_kind"],
@@ -1252,10 +1321,10 @@ def prepare_wz_transcript(subject: dict, *, allow_remote: bool = True) -> dict:
             reason=REASON_FEW_MESSAGES,
             detail={"messages": len(built["lines"]),
                     "human_outbound_count": subject.get("human_outbound_count")})
-    provider = chat_source_provider(kind)
+    provider = chat_source_provider(kind, subject.get("source"))
     source_config = wz_source_config(
         media_plan=media_mod.manifest(messages, annotations, plan) if plan else [],
-        media_source=media_source, subject_kind=kind)
+        media_source=media_source, subject_kind=kind, source=subject.get("source"))
     stats = {"total": len(plan),
              "ready": sum(1 for a in annotations.values() if a.get("status") == "ready"),
              "failed": sum(1 for a in annotations.values()
