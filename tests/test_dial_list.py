@@ -1502,7 +1502,7 @@ class OutcomeSubtypesTests(unittest.TestCase):
         # Новые — в конце: типы итога, за ними подписание документов (29.09.2026), за ним —
         # что телефон сообщил о последнем звонке (12.10.2026), за ним — автообзвон Тез (15.10.2026),
         # за ним — город и аккаунт водителя в TEZ APP для карточки (06.11.2026), за ними — за кем водитель
-        # закреплён (18.11.2026, pins.py).
+        # закреплён (18.11.2026, pins.py), за ними — поездки, провайдер ЭДО и Sapar «Активации водителей» (26.11.2026).
         self.assertEqual(columns[37:39], ['last_outcome_subtype_id', 'last_outcome_subtype_name'])
         self.assertEqual(columns[39:50], ['iin', 'sign_status', 'sign_checked_at', 'sign_error', 'signed_at',
                                           'success_attempt_id', 'success_operator_id', 'success_operator_name',
@@ -1511,7 +1511,10 @@ class OutcomeSubtypesTests(unittest.TestCase):
                                           'owner_operator_name', 'month_first_order_at', 'last_order_before_at',
                                           'trip_checked_at', 'driver_id'])
         self.assertEqual(columns[59:62], ['city', 'account_registered_at', 'account_checked_at'])
-        self.assertEqual(columns[62:], ['pinned_operator_id', 'pinned_operator_name'])
+        self.assertEqual(columns[62:64], ['pinned_operator_id', 'pinned_operator_name'])
+        self.assertEqual(columns[64:], ['trips_total', 'trip_error', 'fleet_park_id', 'park_name', 'edm_provider',
+                                        'edm_source', 'edm_checked_at', 'edm_error', 'sapar_at', 'sapar_attempt_id',
+                                        'sapar_operator_id', 'sapar_operator_name', 'sapar_resolved_at'])
         # stage, outcome, subtype, for_stage, for_outcome
         summary = [['answered', self.R, self.S1, 2, 3], ['answered', self.R, None, 1, 1],
                    ['exhausted', self.R, self.S2, 0, 2], ['queue', None, None, 5, 5],

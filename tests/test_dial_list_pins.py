@@ -109,7 +109,8 @@ class PinSqlTests(unittest.TestCase):
         self.assertIn('CASE WHEN ' + pins.pinned_sql('l') + ' THEN pnu.name END AS pinned_operator_name', sql)
         self.assertIn('LEFT JOIN users pnu ON pnu.id = l.pinned_operator_id', sql)
         columns = [c.strip() for c in S._JOURNAL_COLUMNS.split(',')]
-        self.assertEqual(columns[62:], ['pinned_operator_id', 'pinned_operator_name'])
+        # За ними (26.11.2026) — поля «Активации водителей»; закрепление — по-прежнему 62–63.
+        self.assertEqual(columns[62:64], ['pinned_operator_id', 'pinned_operator_name'])
         row = [None] * 64
         row[0], row[1], row[3], row[29] = 'l1', 1954, '77010000001', 'queue'
         svc = S.__new__(S)

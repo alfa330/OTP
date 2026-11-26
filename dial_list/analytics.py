@@ -486,6 +486,43 @@ def tez_department_analytics(cur, department_id, period, today=None):
     }
 
 
+# ── «Активация водителей» (СЗоВ, 26.11.2026): вторая цель — провайдер ЭДО Sapar ──────────────────────
+# Поверх дашборда Тез (цель — добрал поездки): сколько водителей базы месяца на Sapar сейчас, сколько перевели
+# (проверка увидела переход — sapar_at), сколько из них засчитано операторам (sapar_attempt_id) и по операторам.
+# Тестовые номера — мимо, как у дашборда.
+_ACTIVATION_SAPAR_SQL = """
+    SELECT COUNT(*) FILTER (WHERE lower(l.edm_provider) = 'sapar'),
+           COUNT(*) FILTER (WHERE l.sapar_at IS NOT NULL),
+           COUNT(*) FILTER (WHERE l.sapar_attempt_id IS NOT NULL),
+           COUNT(*) FILTER (WHERE l.edm_source IN ('card', 'none')),
+           COUNT(*) FILTER (WHERE l.trip_checked_at IS NOT NULL)
+    FROM dial_list_leads l
+    WHERE l.department_id = %(department_id)s AND l.period = %(period)s
+      AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+"""
+
+_ACTIVATION_SAPAR_OPERATORS_SQL = """
+    SELECT l.sapar_operator_id, COUNT(*)
+    FROM dial_list_leads l
+    WHERE l.department_id = %(department_id)s AND l.period = %(period)s AND l.sapar_attempt_id IS NOT NULL
+      AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+    GROUP BY l.sapar_operator_id
+"""
+
+
+def activation_sapar(cur, department_id, period):
+    """Блок Sapar к дашборду «Активации водителей»: {sapar: {on_sapar, switched, successes, provider_checked,
+    trips_checked}, sapar_by_operator: {operator_id: успешек}}."""
+    params = {"department_id": int(department_id), "period": period}
+    cur.execute(_ACTIVATION_SAPAR_SQL, params)
+    r = cur.fetchone() or (0,) * 5
+    cur.execute(_ACTIVATION_SAPAR_OPERATORS_SQL, params)
+    by_operator = {str(row[0]): int(row[1] or 0) for row in cur.fetchall() if row[0] is not None}
+    return {"sapar": {"on_sapar": int(r[0] or 0), "switched": int(r[1] or 0), "successes": int(r[2] or 0),
+                      "provider_checked": int(r[3] or 0), "trips_checked": int(r[4] or 0)},
+            "sapar_by_operator": by_operator}
+
+
 # ── Воронка ОП Тез (задача #407 Алчинбаевой Анель, 03.11.2026) ─────────────────────────────────
 # База → уже зарегистрированы → состоялся диалог → зарегистрировались после контакта → вышли к
 # заказам, по городам; выбор месяца базы, файла загрузки, периода звонков и города; отдельно —

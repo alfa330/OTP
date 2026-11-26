@@ -18,9 +18,13 @@ import { operatorsForFilter } from './linePicker';
 import { PARKED_STAGE } from './batchFocus';
 import { responsibleOf, responsibleSub } from './leadPin';
 import {
-    PROFILE_TEZ, TEZ_STAGES, WA_STATUS_LABEL, attemptDueText, attemptModeText, leadDue, normalizeProfile,
-    registrationLabel, tezStageLabel, tezSuccessText, tripLabel,
+    PROFILE_ACTIVATION, TEZ_STAGES, WA_STATUS_LABEL, attemptDueText, attemptModeText, isAutodialProfile, leadDue,
+    normalizeProfile, registrationLabel, tezStageLabel, tezSuccessText, tripLabel,
 } from './tezAutodial';
+import {
+    ACTIVATION_STAGES, activationStageLabel, providerLabel, providerSourceText, providerTone, saparText, tripsLabel,
+    tripsLeft, tripsProgress,
+} from './driverActivation';
 
 /*
  * Журнал водителей раздела «Обзвон из телефона» (запрос владельца 23.09.2026).
@@ -252,8 +256,17 @@ const initials = (name) => {
     return parts.length ? parts.slice(0, 2).map((p) => p[0].toUpperCase()).join('') : '•';
 };
 
-/** Что стоит за этапом строки — одна короткая фраза под ним. tez — автообзвон Тез. */
-const stageDetail = (lead, tez = false) => {
+/** Кому засчитано «добрал поездки» («Активация водителей»): оператор / «добрал сам» / ждём конца звонка. */
+const activationSuccessText = (sign) => {
+    if (!sign) return '';
+    if (sign.success) return `успешка · ${sign.success.operator?.name || 'оператор'}`;
+    if (!sign.resolved) return 'ждём конца звонка';
+    return 'добрал сам, без разговора';
+};
+
+/** Что стоит за этапом строки — одна короткая фраза под ним. tez — автообзвон Тез (и «Активация водителей»:
+    activation — её цель «добрал поездки»). */
+const stageDetail = (lead, tez = false, activation = false) => {
     const last = lead.last_call;
     const result = last?.result ? lower(RESULT_LABEL[last.result] || last.result) : '';
     // «Звонили ли» — по последнему звонку, а не по счётчику: итог «Перезвонить» и
@@ -282,6 +295,7 @@ const stageDetail = (lead, tez = false) => {
         case 'sign_wait':
             return 'водитель подписал, ждём Яндекс';
         case 'signed':
+            if (activation) return activationSuccessText(lead.sign);
             return tez ? tezSuccessText(lead.sign) : successText(lead.sign);
         default:
             return '';
@@ -298,8 +312,13 @@ const successText = (sign) => {
 
 /** Этап и его подробность одной строкой + состояние документов, когда оно важно. У Тез
     документов нет: вместо них — метка водителя по TEZ APP (кроме «вышел на линию» — это этап). */
-const detailWithSign = (lead, tez = false) => {
-    const detail = stageDetail(lead, tez);
+const detailWithSign = (lead, tez = false, activation = false) => {
+    const detail = stageDetail(lead, tez, activation);
+    if (activation) {
+        // «Активация водителей»: поездки (пока не добрал — это и есть этап) и провайдер ЭДО.
+        const block = lead.activation;
+        return [detail, lead.stage !== 'signed' ? tripsLabel(block) : '', providerLabel(block)].filter(Boolean).join(' · ');
+    }
     if (tez) return [detail, lead.stage !== 'signed' ? tripLabel(lead.trip) : ''].filter(Boolean).join(' · ');
     // У подписавшего и у ждущего Яндекс состояние документов уже названо этапом —
     // второй раз «на проверке у Яндекса» в той же строке был бы повтором.
@@ -333,10 +352,10 @@ const Skeleton = ({ className = '' }) => <div className={`animate-pulse rounded-
    стопка на широком экране не даёт пробежать глазами столбец этапов. */
 const GRID = 'lg:grid lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1.1fr)_minmax(0,1.3fr)_minmax(0,1fr)_14px] lg:items-center lg:gap-4';
 
-const LeadRow = ({ lead, onOpen, showMonth, tez = false }) => {
+const LeadRow = ({ lead, onOpen, showMonth, tez = false, activation = false }) => {
     const excluded = lead.stage === 'excluded';
-    const detail = detailWithSign(lead, tez);
-    const stageLabel = tez ? tezStageLabel(lead) : lead.stage_label;
+    const detail = detailWithSign(lead, tez, activation);
+    const stageLabel = activation ? activationStageLabel(lead) : tez ? tezStageLabel(lead) : lead.stage_label;
     // Срок перезвона или дожима наступил — пора звонить: подробность янтарная (цвет со смыслом).
     const detailTone = tez && leadDue(lead)?.overdue ? 'text-amber-600' : 'text-slate-500';
     // Ответственный: в списке сейчас → за кем закреплён (leadPin.js) → кто звонил последним.
@@ -750,9 +769,9 @@ const STAGE_BADGE = {
 };
 const TEZ_SIGNED_BADGE = { Icon: CarFront, tone: 'green' };
 
-const LeadSummary = ({ lead, tez = false }) => {
+const LeadSummary = ({ lead, tez = false, activation = false }) => {
     const badge = (tez && lead.stage === 'signed' ? TEZ_SIGNED_BADGE : STAGE_BADGE[lead.stage]) || STAGE_BADGE.queue;
-    const detail = detailWithSign(lead, tez);
+    const detail = detailWithSign(lead, tez, activation);
     const attempts = Array.isArray(lead.attempts) ? lead.attempts : null;
     const calls = attempts ? attempts.filter((a) => a.result !== 'cancelled').length : null;
     const talk = attempts ? attempts.reduce((sum, a) => sum + (a.result === 'answered' ? Number(a.billsec) || 0 : 0), 0) : null;
@@ -768,7 +787,9 @@ const LeadSummary = ({ lead, tez = false }) => {
                     <badge.Icon size={17} />
                 </div>
                 <div className="min-w-0 pt-0.5">
-                    <div className="text-[15px] font-semibold leading-tight text-slate-900">{tez ? tezStageLabel(lead) : lead.stage_label}</div>
+                    <div className="text-[15px] font-semibold leading-tight text-slate-900">
+                        {activation ? activationStageLabel(lead) : tez ? tezStageLabel(lead) : lead.stage_label}
+                    </div>
                     {detail && <div className="mt-0.5 text-[12.5px] leading-snug text-slate-500">{detail}</div>}
                 </div>
             </div>
@@ -953,6 +974,113 @@ const TripSection = ({ lead }) => {
     );
 };
 
+/* «Активация водителей» (26.11.2026): поездки (CRM) и провайдер ЭДО (кабинет Fleet), у каждого — своя кнопка
+   «Обновить» (решение владельца: кнопки у руководителя в журнале; в телефоне — следующим выпуском). Ниже — кто
+   перевёл на Sapar, парк, ID водителя и ссылка в кабинет Fleet. */
+const PROVIDER_DOT = { green: '#16a34a', amber: '#eda100', slate: '#94a3b8' };
+
+const RefreshLink = ({ onClick, busy, disabled, children }) => (
+    <button
+        type="button"
+        onClick={onClick}
+        disabled={busy || disabled}
+        className="inline-flex items-center gap-1 text-[12px] font-medium text-blue-600 transition hover:text-blue-700 disabled:cursor-default disabled:text-slate-400"
+    >
+        {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+        {children}
+    </button>
+);
+
+const ActivationSection = ({ lead, canCheck, checking, onCheck }) => {
+    const block = lead.activation || {};
+    const sign = lead.sign || {};
+    const reached = lead.stage === 'signed';
+    const progress = tripsProgress(block);
+    const left = tripsLeft(block);
+    const tripsSub = [
+        block.trips_from_file ? 'из файла, CRM ещё не проверяла' : block.trips_checked_at ? `CRM · ${fmtWhen(block.trips_checked_at)}` : '',
+        left ? `не хватает ${left}` : '',
+    ].filter(Boolean).join(' · ');
+    const providerSub = [providerSourceText(block), block.provider_checked_at ? fmtWhen(block.provider_checked_at) : '']
+        .filter(Boolean).join(' · ');
+    const sapar = saparText(block);
+    return (
+        <section className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+                <span className={iosGroupLabel}>Поездки и ЭДО</span>
+                <IosHint text={`Поездки — завершённые поездки водителя за всё время, по CRM: сервер спрашивает раз в час и перед звонком. Добрал ${block.trips_goal ?? 50} — уходит из обзвона, успешка оператору, который последним поговорил с ним не меньше 10 секунд до этого. Провайдер ЭДО — из карточки водителя в кабинете Fleet: после разговора, раз в сутки и перед звонком, если ему больше 6 часов. Перешёл на Sapar — отдельная успешка, водитель остаётся в обзвоне, пока не доберёт поездки. «Обновить» спрашивает сразу.`} />
+            </div>
+            <div className={`${iosCard} overflow-hidden`}>
+                <div className="ml-4 divide-y divide-slate-100">
+                    {reached ? (
+                        <InfoRow label="Успешка" sub={block.reached_at ? `добрал ${fmtWhen(block.reached_at)}` : ''}>
+                            {sign.success ? sign.success.operator?.name || 'Оператор'
+                                : <span className="text-slate-500">{activationSuccessText(sign)}</span>}
+                        </InfoRow>
+                    ) : (
+                        <div className="py-2.5 pr-4">
+                            <div className="flex items-start justify-between gap-4">
+                                <div className="shrink-0 text-[13.5px] text-slate-500">Поездки</div>
+                                <div className="min-w-0 text-right">
+                                    <div className="text-[13.5px] font-medium text-slate-900">{tripsLabel(block)}</div>
+                                    {tripsSub && <div className="truncate text-[12px] text-slate-400">{tripsSub}</div>}
+                                    {block.trips_error && <div className="text-[12px] text-rose-600">{block.trips_error}</div>}
+                                </div>
+                            </div>
+                            {progress !== null && (
+                                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+                                    <div className="h-full rounded-full bg-emerald-500" style={{ width: `${progress}%` }} />
+                                </div>
+                            )}
+                            {canCheck && (
+                                <div className="mt-1.5 text-right">
+                                    <RefreshLink onClick={() => onCheck('trips')} busy={checking === 'trips'} disabled={Boolean(checking)}>
+                                        Обновить поездки
+                                    </RefreshLink>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    <div className="py-2.5 pr-4">
+                        <div className="flex items-start justify-between gap-4">
+                            <div className="shrink-0 text-[13.5px] text-slate-500">Провайдер ЭДО</div>
+                            <div className="min-w-0 text-right">
+                                <div className="inline-flex items-center gap-1.5 text-[13.5px] font-medium text-slate-900">
+                                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: PROVIDER_DOT[providerTone(block)] }} />
+                                    {providerLabel(block).replace(/^ЭДО: /, '')}
+                                </div>
+                                {providerSub && <div className="truncate text-[12px] text-slate-400">{providerSub}</div>}
+                                {block.provider_error && <div className="text-[12px] text-rose-600">{block.provider_error}</div>}
+                            </div>
+                        </div>
+                        {canCheck && !block.on_sapar && (
+                            <div className="mt-1.5 text-right">
+                                <RefreshLink onClick={() => onCheck('provider')} busy={checking === 'provider'} disabled={Boolean(checking)}>
+                                    Обновить провайдера
+                                </RefreshLink>
+                            </div>
+                        )}
+                    </div>
+                    {sapar && <InfoRow label="Sapar" sub={block.sapar?.at ? fmtWhen(block.sapar.at) : ''}>{sapar}</InfoRow>}
+                    {block.park_name && <InfoRow label="Диспетчерская">{block.park_name}</InfoRow>}
+                    {block.driver_id && (
+                        <InfoRow label="ID водителя">
+                            <span className="font-mono text-[12px]">{block.driver_id}</span>
+                        </InfoRow>
+                    )}
+                    {block.fleet_url && (
+                        <InfoRow label="Кабинет Fleet">
+                            <a href={block.fleet_url} target="_blank" rel="noreferrer" className="font-medium text-blue-600 hover:underline">
+                                открыть карточку
+                            </a>
+                        </InfoRow>
+                    )}
+                </div>
+            </div>
+        </section>
+    );
+};
+
 /* Сообщения WhatsApp, которые операторы отправили водителю из карточки звонка. */
 const WaSection = ({ messages }) => (
     <section className="space-y-1.5">
@@ -987,6 +1115,7 @@ const CONFIRM_TEXT = {
 const LeadSheet = ({
     open, lead, loading, error, canEdit, busy, recordings,
     onClose, onRetry, onRequeue, onExclude, onSaveNote, onRecording, onSignCheck, checking, tez = false,
+    activation = false,
 }) => {
     const [confirm, setConfirm] = useState(null); // 'requeue' | 'restore' | 'exclude' | null
     const [reason, setReason] = useState('');
@@ -1091,9 +1220,9 @@ const LeadSheet = ({
                     <span className="text-[12.5px] text-slate-500">Сейчас у оператора — вернуть можно после звонка</span>
                 )}
                 {canCheck && (
-                    <button type="button" onClick={onSignCheck} disabled={checking} className={iosBtnSecondary}>
-                        {checking ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                        {tez ? 'Проверить поездки' : 'Проверить подписание'}
+                    <button type="button" onClick={() => onSignCheck('')} disabled={Boolean(checking)} className={iosBtnSecondary}>
+                        {checking === 'all' ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                        {activation ? 'Обновить поездки и ЭДО' : tez ? 'Проверить поездки' : 'Проверить подписание'}
                     </button>
                 )}
                 {canRequeue && (
@@ -1146,7 +1275,7 @@ const LeadSheet = ({
                         aria-label="О водителе"
                         className="thin-scroll space-y-4 px-4 lg:order-2 lg:overflow-y-auto lg:overscroll-contain lg:border-l lg:border-slate-200/70 lg:px-5 lg:py-5"
                     >
-                        <LeadSummary lead={lead} tez={tez} />
+                        <LeadSummary lead={lead} tez={tez} activation={activation} />
 
                         <section className="space-y-1.5">
                             <div className={iosGroupLabel}>Обзвон</div>
@@ -1178,7 +1307,9 @@ const LeadSheet = ({
 
                         {tez ? (
                             <>
-                                <TripSection lead={lead} />
+                                {activation
+                                    ? <ActivationSection lead={lead} canCheck={canCheck} checking={checking} onCheck={onSignCheck} />
+                                    : <TripSection lead={lead} />}
                                 {historyReady && Array.isArray(lead.wa_messages) && lead.wa_messages.length > 0 && (
                                     <WaSection messages={lead.wa_messages} />
                                 )}
@@ -1226,7 +1357,9 @@ const DialListJournal = ({
     apiBaseUrl, authHeaders, departmentId, batches = [], periods = [], activePeriod = '',
     period = '', onPeriodChange, canEdit = true, showToast, onChanged, preset = null, profile = '',
 }) => {
-    const tez = normalizeProfile(profile) === PROFILE_TEZ;
+    // Движок автообзвона — Тез и «Активация водителей» (26.11.2026): свои этапы и сроки; у активации — поездки и ЭДО.
+    const tez = isAutodialProfile(profile);
+    const activation = normalizeProfile(profile) === PROFILE_ACTIVATION;
     const [q, setQ] = useState('');
     const [qDebounced, setQDebounced] = useState('');
     // Отбор из «Аналитики» применяется сразу при открытии — без запроса с пустыми фильтрами.
@@ -1258,7 +1391,8 @@ const DialListJournal = ({
     const [cardLoading, setCardLoading] = useState(false);
     const [cardError, setCardError] = useState('');
     const [busy, setBusy] = useState(false);
-    const [checking, setChecking] = useState(false);
+    // Что сейчас проверяется: '' — ничего, 'all' — всё сразу, 'trips' / 'provider' — у «Активации водителей».
+    const [checking, setChecking] = useState('');
     const [recordings, setRecordings] = useState({});
     const requestSeq = useRef(0);
     const summarySeq = useRef(0);
@@ -1443,15 +1577,17 @@ const DialListJournal = ({
         }
     };
 
-    /* «Проверить сейчас»: ответ — обновлённая карточка; тост называет итог. */
-    const checkSign = async () => {
+    /* «Проверить сейчас»: ответ — обновлённая карточка; тост называет итог. what — у «Активации водителей»:
+       'trips' — поездки, 'provider' — провайдер ЭДО, '' — оба; checking — что сейчас проверяется. */
+    const checkSign = async (what = '') => {
         const leadId = openId;
         if (!leadId || checking) return;
         // Этап до проверки — чтобы после неё заметить любую его смену.
         const prevStage = card?.stage;
-        setChecking(true);
+        setChecking(activation && what ? what : 'all');
         try {
-            const resp = await fetch(`${apiBaseUrl}/api/dial_list/leads/${leadId}/sign_check`, {
+            const qs = activation && what ? `?what=${encodeURIComponent(what)}` : '';
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/leads/${leadId}/sign_check${qs}`, {
                 method: 'POST', credentials: 'include',
                 headers: authHeaders({ 'Content-Type': 'application/json' }), body: '{}',
             });
@@ -1468,7 +1604,12 @@ const DialListJournal = ({
                     load(0, { keepSize: true }); onChanged?.();
                 }
                 const label = data.lead.sign?.label || '';
-                if (tez) {
+                if (activation) {
+                    const block = data.lead.activation;
+                    toast(data.lead.stage === 'signed'
+                        ? `Добрал поездки — ${lower(activationSuccessText(data.lead.sign))}`
+                        : [tripsLabel(block), providerLabel(block)].filter(Boolean).join(' · '), 'success');
+                } else if (tez) {
                     toast(data.lead.stage === 'signed'
                         ? `Вышел на линию — ${lower(tezSuccessText(data.lead.sign))}`
                         : `TEZ APP: ${lower(tripLabel(data.lead.trip) || 'заказов не было')}`, 'success');
@@ -1479,7 +1620,7 @@ const DialListJournal = ({
         } catch (e) {
             toast(e.message || 'Не удалось проверить', 'error');
         } finally {
-            setChecking(false);
+            setChecking('');
         }
     };
 
@@ -1531,7 +1672,7 @@ const DialListJournal = ({
         },
         sign && {
             // У Тез отбор приходит только из «Аналитики» (успешки): документов там нет.
-            key: 'sign', name: tez ? 'Вышли на линию' : 'Документы',
+            key: 'sign', name: activation ? 'Добрали поездки' : tez ? 'Вышли на линию' : 'Документы',
             label: (tez ? TEZ_SIGN_CHIP[sign] : SIGN_FILTER_OPTIONS.find((o) => o.value === sign)?.label) || sign,
             clear: () => setSign(''),
         },
@@ -1659,7 +1800,7 @@ const DialListJournal = ({
                 </div>
             )}
 
-            <StageStrip value={stage} onChange={setStage} counts={byStage} stages={tez ? TEZ_STAGES : STAGES} />
+            <StageStrip value={stage} onChange={setStage} counts={byStage} stages={activation ? ACTIVATION_STAGES : tez ? TEZ_STAGES : STAGES} />
             <OutcomeStrip
                 outcomes={byOutcome}
                 value={outcomeId}
@@ -1727,7 +1868,7 @@ const DialListJournal = ({
                         <>
                             <div className={`divide-y divide-slate-100 transition-opacity ${loading ? 'opacity-60' : ''}`}>
                                 {items.map((lead) => (
-                                    <LeadRow key={lead.id} lead={lead} onOpen={openLead} showMonth={shownPeriod === 'all'} tez={tez} />
+                                    <LeadRow key={lead.id} lead={lead} onOpen={openLead} showMonth={shownPeriod === 'all'} tez={tez} activation={activation} />
                                 ))}
                             </div>
                             {items.length < total && (
@@ -1761,6 +1902,7 @@ const DialListJournal = ({
                 onSignCheck={checkSign}
                 checking={checking}
                 tez={tez}
+                activation={activation}
             />
         </section>
     );

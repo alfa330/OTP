@@ -60790,6 +60790,16 @@ if __name__ == '__main__':
         except Exception as e:
             logging.exception(f"Error scheduling dial_list trips check: {e}")
 
+    async def dial_list_activation_check_job():
+        # «Активация водителей» СЗоВ (26.11.2026): поездки водителей базы в CRM и провайдер ЭДО по карточкам Fleet.
+        # Джоба ставит прогон в поток раздела и не ждёт; кому пора — решает dial_list/activation_check.py, а идёт
+        # прогон в одном процессе из всех (аренда в базе). Без доступа к CRM — no-op с предупреждением.
+        try:
+            if _dial_list_service is not None:
+                _dial_list_service.request_activation_check('планировщик')
+        except Exception as e:
+            logging.exception(f"Error scheduling dial_list activation check: {e}")
+
     async def reg_contest_sync_job():
         # Конкурс «Топ по регистрациям»: срез засчитанных водителей из CRM
         # каждые полчаса — рейтинг живёт сам, без кнопки. После дедлайна
@@ -60942,6 +60952,16 @@ if __name__ == '__main__':
         dial_list_trips_check_job,
         CronTrigger(minute='27,57', timezone=ZoneInfo('Asia/Almaty')),
         id='dial_list_trips_check',
+        misfire_grace_time=600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    scheduler.add_job(
+        dial_list_activation_check_job,
+        # В стороне от прогонов Sapar и TEZ APP (:12/:42, :27/:57) и «:00/:30».
+        CronTrigger(minute='18,48', timezone=ZoneInfo('Asia/Almaty')),
+        id='dial_list_activation_check',
         misfire_grace_time=600,
         max_instances=1,
         coalesce=True

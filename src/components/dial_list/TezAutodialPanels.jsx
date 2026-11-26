@@ -67,7 +67,8 @@ export const LiveStatusChip = ({ status }) => {
  * Цвет: зелёный — цель (вышли на линию), янтарный — просрочки постобработки,
  * красный — отказы АТС; прочие числа нейтральны.
  */
-export const TezOperatorRow = ({ row }) => {
+/* activation — «Активация водителей» (26.11.2026): успешка — добрал поездки, ещё переводы на Sapar. */
+export const TezOperatorRow = ({ row, activation = false }) => {
     const progress = row.issued ? Math.min(100, Math.round((row.done / row.issued) * 100)) : 0;
     const answered = pct(row.answered, row.attempts);
     const hasAuto = row.auto_attempts !== undefined && row.auto_attempts !== null;
@@ -79,7 +80,8 @@ export const TezOperatorRow = ({ row }) => {
         `${row.attempts} звон.${hasAuto && auto ? ` (авто ${auto})` : ''}`,
         `дозв. ${row.answered}`,
         row.agreements ? `согл. ${row.agreements}` : '',
-        row.successes ? `вышли ${row.successes}` : '',
+        row.successes ? `${activation ? 'добрали' : 'вышли'} ${row.successes}` : '',
+        activation && row.sapar_successes ? `Sapar ${row.sapar_successes}` : '',
         row.wrapup_expired ? `просрочки ${row.wrapup_expired}` : '',
     ].filter(Boolean).join(' · ');
     return (
@@ -111,14 +113,24 @@ export const TezOperatorRow = ({ row }) => {
                 </IosBadge>
                 <IosBadge tone="slate" title="Разговоры">{fmtTalk(row.talk_sec)}</IosBadge>
                 {row.agreements > 0 && (
-                    <IosBadge tone="slate" title="Согласились выйти на линию: итог с датой выхода">согласия {row.agreements}</IosBadge>
+                    <IosBadge tone="slate" title={activation ? 'Обещали начать ездить: итог с датой' : 'Согласились выйти на линию: итог с датой выхода'}>согласия {row.agreements}</IosBadge>
                 )}
                 {row.callbacks > 0 && (
                     <IosBadge tone="slate" title="Назначили перезвон с датой">перезвоны {row.callbacks}</IosBadge>
                 )}
                 {row.successes > 0 && (
-                    <IosBadge tone="green" title="Вышли на линию в этот день после разговора с оператором — успешки">
-                        вышли {row.successes}
+                    <IosBadge
+                        tone="green"
+                        title={activation
+                            ? 'Добрали цель по поездкам в этот день после разговора с оператором — успешки'
+                            : 'Вышли на линию в этот день после разговора с оператором — успешки'}
+                    >
+                        {activation ? 'добрали' : 'вышли'} {row.successes}
+                    </IosBadge>
+                )}
+                {activation && row.sapar_successes > 0 && (
+                    <IosBadge tone="blue" title="Перешли на провайдера ЭДО Sapar в этот день после разговора с оператором — успешки за Sapar">
+                        Sapar {row.sapar_successes}
                     </IosBadge>
                 )}
                 {row.wrapup_expired > 0 && (

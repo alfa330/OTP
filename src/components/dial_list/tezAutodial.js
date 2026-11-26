@@ -27,15 +27,29 @@ import { isNewId } from './outcomeFormat.js';
 
 export const PROFILE_REMOTE_CC = 'remote_cc';
 export const PROFILE_TEZ = 'tez';
+/* «Активация водителей» для СЗоВ (26.11.2026): тот же движок автообзвона, что у Тез (автоцикл, сроки,
+   постобработка, офферы), цель — водитель добрал N поездок (CRM), вторая цель — провайдер ЭДО Sapar (Fleet).
+   Логика вкладок и подписей активации — в driverActivation.js. */
+export const PROFILE_ACTIVATION = 'activation';
 
 // Владелец 03.11.2026: раздел переименован, когда в него переехали успешки ОП из «Учёта часов».
 export const TEZ_SECTION_TITLE = 'Воронка ОП Tez';
+export const ACTIVATION_SECTION_TITLE = 'Активация водителей';
 
-/** Профиль отдела: 'tez' или 'remote_cc'. Пустое и незнакомое — удалённый КЦ:
+const KNOWN_PROFILES = [PROFILE_REMOTE_CC, PROFILE_TEZ, PROFILE_ACTIVATION];
+
+/** Профиль отдела: 'tez', 'activation' или 'remote_cc'. Пустое и незнакомое — удалённый КЦ:
     сервер до профилей считал так все отделы раздела. */
-export const normalizeProfile = (value) => (
-    String(value ?? '').trim().toLowerCase() === PROFILE_TEZ ? PROFILE_TEZ : PROFILE_REMOTE_CC
-);
+export const normalizeProfile = (value) => {
+    const text = String(value ?? '').trim().toLowerCase();
+    return KNOWN_PROFILES.includes(text) ? text : PROFILE_REMOTE_CC;
+};
+
+/** Отдел на движке автообзвона (Тез или «Активация водителей»): автоцикл, сроки, офферы, этапы журнала Тез. */
+export const isAutodialProfile = (value) => {
+    const profile = normalizeProfile(value);
+    return profile === PROFILE_TEZ || profile === PROFILE_ACTIVATION;
+};
 
 /**
  * Отделы своего профиля из GET /api/dial_list/departments. Сервер режет список сам

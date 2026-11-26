@@ -57,6 +57,42 @@ const SUCCESS_HINT = 'Успешка — водитель вышел на лин
     + 'разговора с оператором не короче 10 секунд; засчитывается тому, кто говорил с ним последним до первого заказа. '
     + 'Вышел без такого разговора — «вышел сам», успешки нет.';
 
+/* Слова дашборда по профилю (26.11.2026): у «Активации водителей» цель — добрал N поездок (CRM), а не выход на
+   линию в TEZ APP; числа сервер считает теми же правилами (signed_at, успешка — последний разговор от 10 с). */
+const TEZ_WORDS = {
+    goalTitle: 'Выход на линию',
+    goal: 'Вышли на линию',
+    goalShort: 'Вышли',
+    successRow: 'Вышли после разговора — успешки',
+    selfRow: 'Вышли сами, без разговора',
+    uploadRow: 'Уже работали при загрузке',
+    promisedRow: 'Обещали выйти и не вышли',
+    agreementHelp: 'Водители с итогом «согласен выйти на линию» — итог с датой выхода.',
+    successHint: SUCCESS_HINT,
+    byDayHint: 'Звонки, разговоры и согласия — по дню звонка; вышли на линию — по дню первого заказа водителя. Всё — по водителям базы выбранного месяца.',
+    remainingHelp: 'Ещё в обзвоне: новые и те, кому уже звонили, — пока не вышли на линию.',
+    processedHelp: 'Обзвон по водителю закончен: вышел на линию, дозвонились без перезвона, кончились попытки или руководитель исключил.',
+    offersHelp: 'Сколько раз оператор отметил оффер в окне итога, сколько из этих водителей согласились выйти на линию и сколько вышли.',
+};
+
+export const activationWords = (goal) => ({
+    goalTitle: 'Поездки',
+    goal: `Добрали ${goal} поездок`,
+    goalShort: 'Добрали',
+    successRow: 'Добрали после разговора — успешки',
+    selfRow: 'Добрали сами, без разговора',
+    uploadRow: 'Уже добрали при загрузке',
+    promisedRow: 'Обещали ездить и не добрали',
+    agreementHelp: 'Водители с итогом «будет ездить» — итог с датой, когда начнёт.',
+    successHint: `Успешка — водитель добрал ${goal} завершённых поездок (по CRM) после разговора с оператором не короче 10 секунд; засчитывается тому, кто говорил с ним последним до этого. Добрал без такого разговора — «добрал сам», успешки нет.`,
+    byDayHint: 'Звонки, разговоры и согласия — по дню звонка; добрали поездки — по дню, когда это увидела проверка. Всё — по водителям базы выбранного месяца.',
+    remainingHelp: 'Ещё в обзвоне: новые и те, кому уже звонили, — пока не добрали поездки.',
+    processedHelp: 'Обзвон по водителю закончен: добрал поездки, дозвонились без перезвона, кончились попытки или руководитель исключил.',
+    offersHelp: 'Сколько раз оператор отметил оффер в окне итога, сколько из этих водителей пообещали начать ездить и сколько добрали поездки.',
+});
+
+const wordsOf = (data) => (data?.profile === 'activation' ? activationWords(data?.trips_goal ?? 50) : TEZ_WORDS);
+
 const Notice = ({ children }) => (
     <div className="flex items-start gap-2 rounded-xl bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-800 ring-1 ring-amber-100">
         <TriangleAlert size={14} className="mt-[1px] shrink-0" />
@@ -89,22 +125,22 @@ const ListRow = ({ label, sub, value, whole, color, onClick, indent = false }) =
    там, где у журнала есть ровно такой же отбор (успешки — фильтр «успешка»): число в строке и число
    строк в журнале обязаны совпадать. «Обещали и не вышли» и «перезвоны» считаются за всю базу, а
    этапы журнала «Обещали выйти» / «Перезвон назначен» — кто ждёт срока сейчас: они в полосе этапов. */
-const GoalCard = ({ totals, onOpen }) => {
+const GoalCard = ({ totals, onOpen, words = TEZ_WORDS }) => {
     const wentOnline = Number(totals.went_online) || 0;
     const successes = Number(totals.successes) || 0;
     const self = Math.max(0, wentOnline - successes);
     return (
         <section className="space-y-1.5">
             <div className="flex items-center gap-1.5">
-                <span className={iosGroupLabel}>Выход на линию</span>
-                <IosHint text={`${SUCCESS_HINT} Нажмите на строку успешек — откроется журнал с этими водителями. Кого дожать и кому перезвонить сейчас — этапы «Обещали выйти» и «Перезвон назначен» в журнале.`} />
+                <span className={iosGroupLabel}>{words.goalTitle}</span>
+                <IosHint text={`${words.successHint} Нажмите на строку успешек — откроется журнал с этими водителями. Кого дожать и кому перезвонить сейчас — этапы «${words === TEZ_WORDS ? 'Обещали выйти' : 'Обещали ездить'}» и «Перезвон назначен» в журнале.`} />
             </div>
             <div className={`${iosCard} px-4 py-2`}>
                 <ul className="divide-y divide-slate-100">
-                    <ListRow label="Вышли после разговора — успешки" value={successes} color="#16a34a" onClick={() => onOpen?.({ sign: 'success' })} />
-                    <ListRow label="Вышли сами, без разговора" value={self} />
-                    <ListRow label="Уже работали при загрузке" value={totals.online_at_upload} />
-                    <ListRow label="Обещали выйти и не вышли" sub="дожать" value={totals.promised_not_online} color="#eda100" />
+                    <ListRow label={words.successRow} value={successes} color="#16a34a" onClick={() => onOpen?.({ sign: 'success' })} />
+                    <ListRow label={words.selfRow} value={self} />
+                    <ListRow label={words.uploadRow} value={totals.online_at_upload} />
+                    <ListRow label={words.promisedRow} sub="дожать" value={totals.promised_not_online} color="#eda100" />
                     <ListRow label="Назначали перезвон" value={totals.callbacks} />
                 </ul>
             </div>
@@ -159,6 +195,11 @@ const OutcomesCard = ({ items, onOpen }) => {
     );
 };
 
+const metricsOf = (words) => [
+    { value: 'successes', label: words.goal, name: words.goal },
+    ...METRICS.slice(1),
+];
+
 const METRICS = [
     { value: 'successes', label: 'Вышли на линию', name: 'Вышли на линию' },
     { value: 'agreements', label: 'Согласия', name: 'Согласий' },
@@ -179,20 +220,21 @@ const DayTooltip = ({ active, payload, metricName }) => {
 };
 
 /* По дням — один показатель за раз (одна ось, один цвет), рядом таблица. */
-const ByDayCard = ({ days }) => {
+const ByDayCard = ({ days, words = TEZ_WORDS }) => {
     const [metric, setMetric] = useState('successes');
     const [view, setView] = useState('chart');
-    const meta = METRICS.find((m) => m.value === metric) || METRICS[0];
+    const metrics = metricsOf(words);
+    const meta = metrics.find((m) => m.value === metric) || metrics[0];
     const total = days.reduce((sum, d) => sum + (Number(d[metric]) || 0), 0);
     return (
         <section className="space-y-1.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5">
                     <span className={iosGroupLabel}>По дням</span>
-                    <IosHint text="Звонки, разговоры и согласия — по дню звонка; вышли на линию — по дню первого заказа водителя. Всё — по водителям базы выбранного месяца." />
+                    <IosHint text={words.byDayHint} />
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                    <IosSegmented value={metric} onChange={setMetric} options={METRICS} size="xs" ariaLabel="Показатель" />
+                    <IosSegmented value={metric} onChange={setMetric} options={metrics} size="xs" ariaLabel="Показатель" />
                     <IosSegmented
                         value={view}
                         onChange={setView}
@@ -233,7 +275,7 @@ const ByDayCard = ({ days }) => {
                     <div className="max-h-72 overflow-auto">
                         <table className="w-full border-collapse">
                             <thead className="sticky top-0 border-b border-slate-100 bg-white">
-                                <tr><Th>День</Th><Th right>Звонки</Th><Th right>Разговоры ≥10 с</Th><Th right>Согласия</Th><Th right>Вышли</Th></tr>
+                                <tr><Th>День</Th><Th right>Звонки</Th><Th right>Разговоры ≥10 с</Th><Th right>Согласия</Th><Th right>{words.goalShort}</Th></tr>
                             </thead>
                             <tbody className="divide-y divide-slate-50">
                                 {[...days].reverse().map((d) => (
@@ -258,7 +300,26 @@ const ByDayCard = ({ days }) => {
  * Показатели — по готовому ответу сервера (вынесено из загрузки, чтобы проверять
  * разметку тестом без сети). data — ответ GET …/analytics у профиля tez.
  */
+/* «Активация водителей»: вторая цель — Sapar (сервер: analytics.activation_sapar). */
+const SaparCard = ({ sapar }) => (
+    <section className="space-y-1.5">
+        <div className="flex items-center gap-1.5">
+            <span className={iosGroupLabel}>Провайдер ЭДО Sapar</span>
+            <IosHint text="На Sapar сейчас — по последнему, что известно о водителе: карточка кабинета Fleet или файл базы. Перевели — проверка увидела переход на Sapar у водителя, у которого был другой провайдер или не было никакого. Успешка за Sapar — оператору, который последним поговорил с водителем не меньше 10 секунд до перехода; водитель при этом остаётся в обзвоне, пока не доберёт поездки." />
+        </div>
+        <div className={`${iosCard} grid grid-cols-2 gap-2 p-2 sm:grid-cols-4`}>
+            <Metric label="На Sapar сейчас" value={num(sapar.on_sapar)} />
+            <Metric label="Перевели на Sapar" value={num(sapar.switched)} tone={sapar.switched ? 'good' : null} />
+            <Metric label="Успешки за Sapar" value={num(sapar.successes)} tone={sapar.successes ? 'good' : null} />
+            <Metric label="Провайдер проверен" value={num(sapar.provider_checked)} hint="по карточке Fleet" />
+        </div>
+    </section>
+);
+
 export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
+    const words = wordsOf(data);
+    const activation = data?.profile === 'activation';
+    const saparByOperator = data?.sapar_by_operator || {};
     const t = data?.totals || {};
     const rates = data?.rates || {};
     const operators = Array.isArray(data?.operators) ? data.operators : [];
@@ -277,13 +338,13 @@ export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
                     label="Обработано"
                     value={num(t.processed)}
                     hint={`${share(t.processed, t.leads)}% базы`}
-                    help="Обзвон по водителю закончен: вышел на линию, дозвонились без перезвона, кончились попытки или руководитель исключил."
+                    help={words.processedHelp}
                 />
                 <Metric
                     label="Осталось"
                     value={num(t.remaining)}
                     hint={`${share(t.remaining, t.leads)}% базы`}
-                    help="Ещё в обзвоне: новые и те, кому уже звонили, — пока не вышли на линию."
+                    help={words.remainingHelp}
                 />
                 <Metric
                     label="Дозвонились"
@@ -295,14 +356,14 @@ export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
                     label="Согласились"
                     value={num(t.agreements)}
                     hint={`${pctText(rates.agreement)} поговоривших`}
-                    help="Водители с итогом «согласен выйти на линию» — итог с датой выхода."
+                    help={words.agreementHelp}
                 />
                 <Metric
-                    label="Вышли на линию"
+                    label={words.goal}
                     value={num(t.went_online)}
                     tone={t.went_online ? 'good' : null}
                     hint={`успешек — ${num(t.successes)}`}
-                    help={`Вышли на линию после загрузки базы. ${SUCCESS_HINT}`}
+                    help={`${words.goal} после загрузки базы. ${words.successHint}`}
                 />
                 <Metric
                     label="Конверсия"
@@ -316,11 +377,13 @@ export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
             {/* min-w-0: иначе колонка сетки растягивается по неразрывному ряду
                 переключателей, и на телефоне карточки уезжают за край. */}
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 [&>*]:min-w-0">
-                <GoalCard totals={t} onOpen={onOpenJournal} />
+                <GoalCard totals={t} onOpen={onOpenJournal} words={words} />
                 <OutcomesCard items={byOutcome} onOpen={onOpenJournal} />
             </div>
 
-            <ByDayCard days={Array.isArray(data?.by_day) ? data.by_day : []} />
+            {activation && data?.sapar && <SaparCard sapar={data.sapar} />}
+
+            <ByDayCard days={Array.isArray(data?.by_day) ? data.by_day : []} words={words} />
 
             <PagedTable
                 title="Операторы"
@@ -338,7 +401,8 @@ export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
                         <Th right>Время</Th>
                         <Th right>Согласия</Th>
                         <Th right>Перезвоны</Th>
-                        <Th right>Вышли</Th>
+                        <Th right>{words.goalShort}</Th>
+                        {activation && <Th right>Sapar</Th>}
                         <Th right>Конверсия</Th>
                         <Th right>Просрочки</Th>
                         <Th right>Постобработка</Th>
@@ -359,6 +423,7 @@ export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
                         <Td right>{num(o.agreements)}</Td>
                         <Td right>{num(o.callbacks)}</Td>
                         <Td right><span className="font-semibold text-slate-900">{num(o.successes)}</span></Td>
+                        {activation && <Td right>{num(saparByOperator[String(o.operator_id)] || 0)}</Td>}
                         <Td right>
                             {o.talked ? <Bar done={o.successes} total={o.talked} tone="emerald" /> : <span className="text-slate-400">—</span>}
                         </Td>
@@ -375,7 +440,7 @@ export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 [&>*]:min-w-0">
                 <PagedTable
                     title="Акции и офферы"
-                    help="Сколько раз оператор отметил оффер в окне итога, сколько из этих водителей согласились выйти на линию и сколько вышли."
+                    help={words.offersHelp}
                     rows={offers}
                     perPage={5}
                     empty="Офферы в этой базе ещё не предлагали."
@@ -384,7 +449,7 @@ export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
                             <Th>Оффер</Th>
                             <Th right>Предложили</Th>
                             <Th right>Согласились</Th>
-                            <Th right>Вышли</Th>
+                            <Th right>{words.goalShort}</Th>
                         </tr>
                     )}
                     renderRow={(o) => (
@@ -423,8 +488,11 @@ const VIEWS = [
 
 const TezAutodialAnalytics = ({
     apiBaseUrl, authHeaders, departmentId, periods = [], activePeriod = '', period = '', onPeriodChange, onOpenJournal,
+    profile = 'tez',
 }) => {
-    const [view, setView] = useState('funnel');
+    // «Активация водителей» (26.11.2026): «Воронки ОП» у неё нет — сразу показатели автообзвона.
+    const activationSection = profile === 'activation';
+    const [view, setView] = useState(activationSection ? 'dial' : 'funnel');
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -462,14 +530,16 @@ const TezAutodialAnalytics = ({
 
     // Сервер, который профиль tez ещё не знает, отдал бы аналитику удалённого КЦ
     // (документы Sapar) — её показывать нельзя: у Тез таких чисел нет.
-    const ready = data && data.profile === 'tez' && data.totals;
-    const dial = view === 'dial';
+    const ready = data && data.profile === (activationSection ? 'activation' : 'tez') && data.totals;
+    const dial = activationSection || view === 'dial';
 
     return (
         <section className="space-y-4">
-            <div className="-mx-1 overflow-x-auto px-1" style={{ scrollbarWidth: 'none' }}>
-                <IosSegmented value={view} onChange={setView} options={VIEWS} className="min-w-max" ariaLabel="Разрез аналитики" />
-            </div>
+            {!activationSection && (
+                <div className="-mx-1 overflow-x-auto px-1" style={{ scrollbarWidth: 'none' }}>
+                    <IosSegmented value={view} onChange={setView} options={VIEWS} className="min-w-max" ariaLabel="Разрез аналитики" />
+                </div>
+            )}
             {dial && (
                 <div className="flex items-center gap-2">
                     <CustomSelect
@@ -510,7 +580,7 @@ const TezAutodialAnalytics = ({
             )}
 
             {dial && data && !ready && !loading && (
-                <Notice>Сервер ещё не считает аналитику автообзвона Тез — показатели появятся после его обновления.</Notice>
+                <Notice>Сервер ещё не считает аналитику {activationSection ? 'активации водителей' : 'автообзвона Тез'} — показатели появятся после его обновления.</Notice>
             )}
 
             {dial && ready && (

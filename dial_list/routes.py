@@ -281,7 +281,8 @@ from io import BytesIO
 from flask import Blueprint, jsonify, request, send_file
 
 from . import calls_export as calls_export_report
-from .service import (PHONE_VERSION_HEADER, PROFILE_REMOTE_CC, PROFILE_TEZ, PROFILES, SUBTYPE_NOT_SENT,
+from .service import (AUTODIAL_PROFILES, PHONE_VERSION_HEADER, PROFILE_ACTIVATION, PROFILE_CHOICES_TEXT,
+                      PROFILE_REMOTE_CC, PROFILE_TEZ, PROFILES, SUBTYPE_NOT_SENT,
                       VIEW_ONLY_DENIED, WA_MEDIA, DialListError, DialListService, parse_period, phone_shows_qr_lock,
                       pilot_allows, view_only_user, webhook_remote_addr)
 
@@ -724,10 +725,14 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             }), 200
         profile = (request.args.get('profile') or PROFILE_REMOTE_CC).strip().lower()
         if profile not in PROFILES:
-            raise DialListError("profile: remote_cc или tez")
+            raise DialListError("profile: " + PROFILE_CHOICES_TEXT)
         candidates = []
         if scope is None:
-            if profile != PROFILE_TEZ:
+            if profile == PROFILE_ACTIVATION:
+                # «Активация водителей» (26.11.2026): отдел подключает администратор компании — как у Тез.
+                if _global_admin():
+                    candidates = svc.candidate_departments(profile=PROFILE_ACTIVATION)
+            elif profile != PROFILE_TEZ:
                 candidates = svc.candidate_departments()
             elif _global_admin():
                 # Кандидаты автообзвона — и отделы удалённого КЦ без данных: перевод отдела между
@@ -752,7 +757,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         payload = request.get_json(silent=True) or {}
         # К автообзвону Тез подключение может и перевести отдел удалённого КЦ (без данных) —
         # только администратору компании (_global_admin), как и смена профиля в настройках.
-        if str(payload.get('profile') or '').strip().lower() == PROFILE_TEZ and not _global_admin():
+        if str(payload.get('profile') or '').strip().lower() in AUTODIAL_PROFILES and not _global_admin():
             raise DialListError("Подключить отдел к автообзвону может администратор", 403)
         extra = {"profile": payload['profile']} if payload.get('profile') else {}
         settings = svc.enroll_department(department_id, changed_by=requester_id, **extra)
@@ -904,6 +909,33 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         return jsonify({"status": "success", **svc.release_line(
             department_id, user_id, changed_by=requester_id, seat_anyone=_seats_anyone())}), 200
 
+    def _activation_upload(department_id, requester_id, file_name, file_ext, raw_bytes, period):
+        """База «Активации водителей» (26.11.2026, activation.parse_activation_file): выгрузка «Новички по
+        поездкам с ЭДО» — ID водителя, ФИО, телефон, ИИН, диспетчерская, поездки и провайдер ЭДО. Водители, у
+        которых в файле уже цель по поездкам, не грузятся. Свежую базу CRM проверяет сразу (свой поток)."""
+        from .activation import parse_activation_file
+        goal = svc.department_settings(department_id).get("trips_goal")
+        try:
+            rows, extras, file_counts = parse_activation_file(raw_bytes, file_ext, goal=goal)
+        except ValueError as exc:
+            raise DialListError(str(exc))
+        counts = {"rows_total": 0, "rows_new": 0, "rows_duplicate": 0, "rows_invalid": 0, "rows_bad_iin": 0,
+                  "bad_iin_rows": [], "invalid_rows": []}
+        if rows:
+            counts = svc.import_leads(department_id, requester_id, file_name, rows, period=period,
+                                      require_iin=False, keep_iin=True, extras=extras)
+        else:
+            counts["period"] = (period or svc.department_settings(department_id)["_period"]).isoformat()
+        counts["rows_total"] = int(counts.get("rows_total") or 0) + file_counts["rows_goal_reached"]             + file_counts["rows_bad_id"] + file_counts["duplicate_ids"]
+        counts["rows_duplicate"] = int(counts.get("rows_duplicate") or 0) + file_counts["duplicate_ids"]
+        counts.update({"rows_goal_reached": file_counts["rows_goal_reached"], "rows_bad_id": file_counts["rows_bad_id"],
+                       "bad_id_rows": file_counts["bad_id_rows"], "trips_goal": goal, "sheets": file_counts["sheets"]})
+        check = ""
+        if counts.get("rows_new") or counts.get("rows_duplicate"):
+            svc.request_activation_check("загрузка базы")
+            check = "queued"
+        return jsonify({"status": "success", **counts, "activation_check": check}), 200
+
     @bp.route('/api/dial_list/departments/<int:department_id>/leads/upload', methods=['POST', 'OPTIONS'])
     @require_api_key
     @_guard
@@ -925,7 +957,10 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         period = parse_period(request.form.get('period'))
         # Автообзвон Тез (15.10.2026): ФИО + телефон, ИИН не нужен — цель лида не подписание в
         # Sapar, а выход на линию по TEZ APP.
-        tez = svc.department_profile(department_id) == PROFILE_TEZ
+        profile = svc.department_profile(department_id)
+        tez = profile == PROFILE_TEZ
+        if profile == PROFILE_ACTIVATION:
+            return _activation_upload(department_id, requester_id, file_name, file_ext, raw_bytes, period)
         # Общий разбор файла «fio + phone» и общая нормализация номера — одна
         # точка правды для всей телефонии проекта. ИИН в базе обзвона обязателен
         # (владелец, 29.09.2026): по нему проверяется подписание документов.
@@ -1130,9 +1165,10 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
 
     # ── автообзвон Тез: офферы, WhatsApp, поездки (15.10.2026) ─────────────────
     def _tez_department(department_id):
-        """Руководитель отдела автообзвона Тез: у отдела другого профиля этих настроек нет."""
+        """Руководитель отдела автообзвона Тез (и «Активации водителей» — тот же движок, 26.11.2026): у отдела
+        другого профиля этих настроек нет."""
         requester_id, scope = _manager(department_id)
-        if svc.department_profile(department_id) != PROFILE_TEZ:
+        if svc.department_profile(department_id) not in AUTODIAL_PROFILES:
             raise DialListError("Это настройка автообзвона Тез", 409)
         return requester_id, scope
 
@@ -1195,6 +1231,11 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         """«Проверить поездки сейчас»: внеочередной прогон проверки TEZ APP в своём потоке (кому пора —
         как в получасовом). started: false — прогон уже идёт, после него пройдёт ещё раз."""
         _tez_department(department_id)
+        if svc.department_profile(department_id) == PROFILE_ACTIVATION:
+            # «Активация водителей»: внеочередной прогон — поездки в CRM и провайдер по карточкам Fleet.
+            started = svc.request_activation_check("руководитель")
+            return jsonify({"status": "success", "started": bool(started),
+                            "state": svc.activation_checker.state()}), 200
         started = svc.request_trip_check("руководитель")
         return jsonify({"status": "success", "started": bool(started), "state": svc.trip_checker.state()}), 200
 
@@ -1298,7 +1339,12 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     def lead_sign_check(lead_id):
         """«Проверить сейчас»: подписание документов водителя в Sapar, сразу."""
         lead_id = _uuid_or_404(lead_id, "Водитель")
-        _manager(svc.lead_department(lead_id))
+        department_id = svc.lead_department(lead_id)
+        _manager(department_id)
+        # «Активация водителей» (26.11.2026): кнопки «Обновить» — поездки, провайдер или оба (?what=trips|provider).
+        if svc.department_profile(department_id) == PROFILE_ACTIVATION:
+            what = request.args.get('what') or (request.get_json(silent=True) or {}).get('what') or ''
+            return jsonify({"status": "success", "lead": svc.check_lead_activation(lead_id, what)}), 200
         return jsonify({"status": "success", "lead": svc.check_lead_signature(lead_id)}), 200
 
     @bp.route('/api/dial_list/leads/<lead_id>/note', methods=['PUT', 'OPTIONS'])
@@ -1394,8 +1440,14 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 raise DialListError("Это не ваш отдел", 403)
             department_ids = [wanted_id]
             # Отдел автообзвона Тез — ещё звонки автоцикла, согласия, перезвоны и статус сейчас.
-            tez = svc.department_profile(wanted_id) == PROFILE_TEZ
-        operators = svc.overview(department_ids, day, tez=True) if tez else svc.overview(department_ids, day)
+            profile = svc.department_profile(wanted_id)
+            tez = profile in AUTODIAL_PROFILES
+        if tez:
+            # «Активация водителей» (26.11.2026) — сводка как у Тез и переводы на Sapar.
+            extra = {"activation_dept": True} if profile == PROFILE_ACTIVATION else {}
+            operators = svc.overview(department_ids, day, tez=True, **extra)
+        else:
+            operators = svc.overview(department_ids, day)
         return jsonify({"status": "success", "date": day.isoformat(), "operators": operators}), 200
 
     # ── Binotel ─────────────────────────────────────────────────────────────

@@ -1060,9 +1060,10 @@ class SectionNameTests(unittest.TestCase):
         self.assertEqual(app.count("handleSidebarViewNavigation(e, 'dial_list')"), 3)
         view = _read(os.path.join(ROOT, 'src', 'components', 'dial_list', 'DialListView.jsx'))
         self.assertIn("const SECTION_TITLE = 'Удаленный КЦ';", view)
-        # С 15.10.2026 тот же экран — и «Автообзвон Тез» (profile='tez'): заголовок — по профилю,
-        # у удалённого КЦ — прежний SECTION_TITLE.
-        self.assertIn('const sectionTitle = tez ? TEZ_SECTION_TITLE : SECTION_TITLE;', view)
+        # С 15.10.2026 тот же экран — и «Автообзвон Тез» (profile='tez'), с 26.11.2026 — «Активация водителей»
+        # (profile='activation'): заголовок — по профилю, у удалённого КЦ — прежний SECTION_TITLE.
+        self.assertIn('const sectionTitle = SECTION_TITLES[sectionProfile] || SECTION_TITLE;', view)
+        self.assertIn('const SECTION_TITLES = { [PROFILE_TEZ]: TEZ_SECTION_TITLE, [PROFILE_ACTIVATION]: ACTIVATION_SECTION_TITLE };', view)
         header = view[view.index('fas fa-list-check'):view.index('<IosHint')]
         self.assertIn('{sectionTitle}', header)
         self.assertNotIn('Обзвон из телефона', header)

@@ -58,6 +58,8 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
 удалённый КЦ, как было; 'tez' — автообзвон Тез КЦ на том же движке: база без ИИН,
 «цель» лида — водитель вышел на линию (поездка в TEZ APP, trips_check.py), сроки
 повторов и перезвонов (next_call_at, owner_*), постобработка, офферы, WhatsApp.
+'activation' (26.11.2026) — «Активация водителей» для СЗоВ: движок автообзвона Тез, цель —
+trips_goal поездок (CRM), вторая цель — провайдер ЭДО Sapar (Fleet), activation_check.py.
 
 Почему свои таблицы настроек, а не колонки в sip_department_config:
 _SIP_OPERATOR_SELECT читает строки по индексам, и каждая новая колонка там —
@@ -605,6 +607,18 @@ DDL = [
         PRIMARY KEY (batch_id, lead_id)
     )
     """,
+    # Аренда фонового прогона (26.11.2026, «Активация водителей», activation_check.py): на /api прода отвечают
+    # несколько процессов, и планировщик есть в каждом. Прогон идёт, только если взял аренду (until в будущем —
+    # занято другим процессом), — иначе два процесса вдвое грузили бы CRM и кабинет Fleet одними запросами.
+    # last_summary — сводка последнего прогона для экрана руководителя (её видит любой процесс).
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_check_leases (
+        name VARCHAR(32) PRIMARY KEY,
+        owner VARCHAR(64) NOT NULL DEFAULT '',
+        until TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_summary JSONB
+    )
+    """,
     # Закреплённые водители (владелец, 18.11.2026; правило — pins.py): водитель выдаётся только оператору
     # pinned_operator_id — первым в его списке и мимо отметок файлов, остальным — никогда, пока тот работает в
     # отделе. pinned_at / pinned_by — когда и кто закрепил. FK на users нет намеренно, как у focused_by: стартовый
@@ -618,6 +632,34 @@ DDL = [
     # говорили (answered_at) и которого итог вернул в список. NULL — значение профиля по умолчанию
     # (REPEAT_SHARE_DEFAULTS в service.py: удалённый КЦ — 20, Тез — без ограничения).
     "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS repeat_share_pct SMALLINT",
+    # Активация водителей (СЗоВ, 26.11.2026; профиль 'activation', правила — activation.py и activation_check.py):
+    # база — новички, не добравшие trips_goal поездок; вторая цель — перевести водителя на провайдера ЭДО Sapar.
+    #   trips_goal          сколько завершённых поездок — «добрал» (водитель уходит из обзвона), 1..1000
+    # Поля водителя (у других профилей пусты):
+    #   driver_id           (колонка Тез) — ID водителя в Яндексе (contractor_id, 32 hex), по нему CRM и Fleet
+    #   trips_total         завершённые поездки за всё время аккаунта; NULL — не знаем. Пишет CRM-проверка
+    #                       (trip_checked_at / trip_error — колонки Тез), до неё — число из файла
+    #   fleet_park_id       ID парка в Яндекс.Fleet (из CRM): карточка водителя во Fleet открывается только с ним
+    #   park_name           «Диспетчерская» из файла
+    #   edm_provider        провайдер ЭДО: имя, как его пишет кабинет Fleet ('' — не знаем); edm_source — откуда:
+    #                       'file' (файл базы) | 'card' (карточка Fleet) | 'none' (у водителя провайдера нет);
+    #                       edm_checked_at — когда это было верно; edm_error — почему последняя проверка не удалась
+    #   sapar_at            когда проверка увидела переход на Sapar (раньше знали другого провайдера)
+    #   sapar_attempt_id / sapar_operator_id / sapar_resolved_at — успешка «перевёл на Sapar», как success_* у
+    #                       цели: последний разговор от 10 с до sapar_at; NULL resolved — решение ещё не принято.
+    #                       Без FK на users и попытки — по тем же причинам, что success_attempt_id и pinned_by.
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS trips_goal SMALLINT NOT NULL DEFAULT 50",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS trips_total INTEGER",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS fleet_park_id VARCHAR(64) NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS park_name VARCHAR(128) NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS edm_provider VARCHAR(64) NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS edm_source VARCHAR(8) NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS edm_checked_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS edm_error TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sapar_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sapar_attempt_id UUID",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sapar_operator_id INTEGER",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sapar_resolved_at TIMESTAMP WITH TIME ZONE",
     # Индексов по отметкам проверок (sign_checked_at, trip_checked_at) нет НАМЕРЕННО.
     # Отметку пишет каждая проверка подписи и поездок — у каждого неподписавшего раз в
     # час-три, ~100 тыс. обновлений в сутки. Пока отметка стояла в индексе, обновление было

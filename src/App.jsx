@@ -706,6 +706,8 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     dial_list: ['remote_cc'],
     // «Воронка ОП Tez» (15.10.2026, до 03.11.2026 — «Автообзвон Тез») — тот же движок обзвона, отдел Тез КЦ (профиль tez).
     tez_autodial: ['tez'],
+    // «Активация водителей» (26.11.2026) — тот же движок, автообзвон новичков для СЗоВ (профиль activation).
+    driver_activation: ['szov'],
     // Обучение
     trainings: ['szov', 'op'],
     voice_trainer: ['szov'],
@@ -45157,6 +45159,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const dialListViewOnly = !canManageDialListSection && dialListPilotAllows(user)
                 && DIAL_LIST_VIEW_ONLY_USER_IDS.has(Number(user?.id));
             const canAccessDialListSection = canManageDialListSection || dialListViewOnly;
+            // «Активация водителей» (26.11.2026, профиль activation): автообзвон новичков до N поездок и перевод на
+            // Sapar для СЗоВ — админы, глава СЗоВ и СВ СЗоВ (те, кому весь «Удаленный КЦ»). Решающий — сервер
+            // (dial_list.service.manager_scope; подключает отдел администратор компании).
+            const canAccessDriverActivationSection = dialListPilotAllows(user) && (isAdminLikeRole
+                || (isDepartmentHead(user)
+                    && aiQaHeadDepartmentCodesOf(user).some((code) => DIAL_LIST_OVERSEER_DEPARTMENT_CODES.has(code)))
+                || (isSupervisorRole(currentUserRole)
+                    && DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES.has(
+                        normalizeDepartmentCode(user?.department_code ?? user?.departmentCode))));
             // То же для «Графиков работы» (WORK_SCHEDULE_VIEW_ONLY_USER_IDS): сетка всех отделов
             // на просмотр — у рядового отдельным пунктом меню рядом с «Мои смены».
             const workSchedulesViewOnly = isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
@@ -49084,6 +49095,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     // уезжала в раздел по умолчанию.
                     (requestedViewFromUrl !== 'oktell_guard' || canAccessOktellGuard) &&
                     (requestedViewFromUrl !== 'tez_autodial' || canAccessTezAutodialSection) &&
+                    (requestedViewFromUrl !== 'driver_activation' || canAccessDriverActivationSection) &&
                     (requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings) &&
                     // «Оплата счетов»: диплинк из Telegram ведёт на ?view=payments&request=<id>.
                     (requestedViewFromUrl !== 'payments' || canAccessPaymentsSection) &&
@@ -49124,7 +49136,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFixedAssetsSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverActivationSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFixedAssetsSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks') return;
@@ -55406,6 +55418,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (view === WORK_SCHEDULES_VIEW_ONLY_VIEW && workSchedulesViewOnly) return;
                 // «Воронка ОП Tez» — так же, свой круг доступа.
                 if (view === 'tez_autodial' && canAccessTezAutodialSection) return;
+                // «Активация водителей» — так же, свой круг доступа.
+                if (view === 'driver_activation' && canAccessDriverActivationSection) return;
                 // Ограничитель «Перезвона» — тоже общий раздел вне allowlist отдела.
                 if (view === 'oktell_guard' && canAccessOktellGuard) return;
                 // «Провайдер ЭДО» — выгрузка из диспетчерских, тоже свой предикат.
@@ -57789,6 +57803,16 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </button>
                                             </li>
                                             )}
+                                            {canAccessDriverActivationSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'driver_activation')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_activation' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-car"></FaIcon> <span className="sidebar-text">Активация водителей</span>
+                                                </button>
+                                            </li>
+                                            )}
                                             {renderDividerIfInner(
                                                 departmentAllowsView(user, 'profile'),
                                                 departmentAllowsView(user, 'hours'),
@@ -58257,6 +58281,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 canAccessTestNumbersSection,
                                                 canAccessDialListSection && deptAllowsInner('dial_list'),
                                                 canAccessTezAutodialSection && deptAllowsInner('tez_autodial'),
+                                                canAccessDriverActivationSection && deptAllowsInner('driver_activation'),
                                                 canAccessFleetEdm && deptAllowsInner('fleet_edm'),
                                                 canAccessDriverMailings && deptAllowsInner('driver_mailings'),
                                                 canAccessPaymentsSection,
@@ -58308,6 +58333,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tez_autodial' ? 'bg-blue-700' : ''}`}
                                                         >
                                                             <FaIcon className="fas fa-filter"></FaIcon> <span className="sidebar-text">Воронка ОП Tez</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            {canAccessDriverActivationSection && (
+                                                <SidebarDeptScope section="driver_activation" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'driver_activation')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_activation' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-car"></FaIcon> <span className="sidebar-text">Активация водителей</span>
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
@@ -58405,6 +58442,16 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'dial_list' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Удаленный КЦ</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessDriverActivationSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'driver_activation')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_activation' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-car"></FaIcon> <span className="sidebar-text">Активация водителей</span>
                                                 </button>
                                             </li>
                                             )}
@@ -61116,6 +61163,21 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     canEdit={canAccessTezAutodialSection}
                                     profile="tez"
+                                />
+                            </Suspense>
+                        ))}
+                        {/* «Активация водителей» (26.11.2026): тот же экран с профилем activation — автообзвон новичков до
+                            N поездок и перевод на Sapar для СЗоВ. key — как у Тез: разделы не делят состояние. */}
+                        {( view === "driver_activation" && canAccessDriverActivationSection && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <DialListView
+                                    key="driver_activation"
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    canEdit={canAccessDriverActivationSection}
+                                    profile="activation"
                                 />
                             </Suspense>
                         ))}

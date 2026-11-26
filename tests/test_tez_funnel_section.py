@@ -32,7 +32,9 @@ class AnalyticsViewsTests(unittest.TestCase):
         views = views[:views.index("];")]
         self.assertLess(views.index("'funnel'"), views.index("'dial'"))
         self.assertIn("{ value: 'funnel', label: 'Воронка ОП' }", views)
-        self.assertIn("const [view, setView] = useState('funnel');", ANALYTICS)
+        # У Тез первая — воронка; у «Активации водителей» (26.11.2026) воронки ОП нет — сразу «Автообзвон».
+        self.assertIn("const [view, setView] = useState(activationSection ? 'dial' : 'funnel');", ANALYTICS)
+        self.assertIn("const dial = activationSection || view === 'dial';", ANALYTICS)
 
     def test_dial_dashboard_loads_only_on_its_view(self):
         self.assertIn("useEffect(() => { if (view === 'dial') load(); }, [load, view]);", ANALYTICS)

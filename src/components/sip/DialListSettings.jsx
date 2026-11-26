@@ -12,10 +12,13 @@ import {
     summaryMatchesScope, toggledFocus, uploadFocusNote, withFocusDraft,
 } from '../dial_list/batchFocus';
 import {
-    LIMITS, PROFILE_REMOTE_CC, PROFILE_TEZ, RETRY_MINUTES_MAX, RETRY_SCHEDULE_MAX, formatMinutes, formatSchedule,
-    formatSeconds, mirrorSummary, normalizeProfile, rateLabel, retryPlanText, scheduleFromInputs, tezSettingsForm,
-    tezSettingsPayload, tezUploadSummary, validateTezSettings, whenText, wrapupText,
+    LIMITS, PROFILE_ACTIVATION, PROFILE_REMOTE_CC, RETRY_MINUTES_MAX, RETRY_SCHEDULE_MAX, formatMinutes, formatSchedule,
+    formatSeconds, isAutodialProfile, mirrorSummary, normalizeProfile, rateLabel, retryPlanText, scheduleFromInputs,
+    tezSettingsForm, tezSettingsPayload, tezUploadSummary, validateTezSettings, whenText, wrapupText,
 } from '../dial_list/tezAutodial';
+import {
+    TRIPS_GOAL_DEFAULT, TRIPS_GOAL_MAX, TRIPS_GOAL_MIN, activationUploadSummary, checkWarning, validateTripsGoal,
+} from '../dial_list/driverActivation';
 
 /*
  * Обзвон из телефона (раздел dial_list): панели настроек отдела, базы водителей
@@ -35,6 +38,10 @@ import {
  * profile='tez' (контракт сервер ↔ сайт ↔ телефон): там нет ИИН и Sapar, цель лида —
  * выход водителя на линию, а в настройках — автообзвон, постобработка и расписание
  * недозвонов. Без параметра (profile='remote_cc') панели те же, что были.
+ *
+ * С 26.11.2026 — и в разделе «Активация водителей» (profile='activation', СЗоВ): тот же движок автообзвона, цель —
+ * водитель добрал N поездок (N — «Цель по поездкам» в настройках), вторая цель — провайдер ЭДО Sapar. База —
+ * выгрузка «Новички по поездкам с ЭДО» (ID водителя, ФИО, телефон, поездки, провайдер).
  */
 
 const OPERATOR_MODES = [
@@ -233,7 +240,7 @@ const RetryScheduleEditor = ({ values, onChange, maxAttempts, canEdit }) => {
    переключились бы в обзвон. Кому работать в режиме, руководитель включает лично —
    «Сотрудники» ниже; это и есть «операторы под распределение». Пояснения — под «i»,
    на экране числа и их вид словами. */
-const TezAutodialRows = ({ form, setForm, canEdit, numberInput }) => {
+const TezAutodialRows = ({ form, setForm, canEdit, numberInput, activation = false }) => {
     const schedule = scheduleFromInputs(form.retry_schedule);
     return (
         <>
@@ -242,7 +249,7 @@ const TezAutodialRows = ({ form, setForm, canEdit, numberInput }) => {
                     <span className={iosGroupLabel}>Автообзвон</span>
                     <IosHint
                         label="Как включается режим"
-                        text="Режим включают каждому оператору лично — «Сотрудники» ниже: им сервер и раздаёт пачки. Режим отдела целиком у Тез не включается. Телефон подхватывает эти настройки при следующем обновлении списка."
+                        text={`Режим включают каждому оператору лично — «Сотрудники» ниже: им сервер и раздаёт пачки. Режим отдела целиком ${activation ? 'здесь' : 'у Тез'} не включается. Телефон подхватывает эти настройки при следующем обновлении списка.`}
                     />
                 </div>
                 <div className={`${iosCard} divide-y divide-slate-100`}>
@@ -321,7 +328,9 @@ const TezAutodialRows = ({ form, setForm, canEdit, numberInput }) => {
                     <Row
                         label="Дожать через, мин"
                         hint={formatMinutes(form.followup_after_min) || 'сразу'}
-                        info="Водитель обещал выйти на линию, а завершённого заказа в TEZ APP так и нет — через столько минут после обещанного времени он вернётся к своему оператору, чтобы дожать."
+                        info={activation
+                            ? 'Водитель обещал начать ездить, а поездок не прибавилось — через столько минут после обещанного времени он вернётся к своему оператору, чтобы дожать.'
+                            : 'Водитель обещал выйти на линию, а завершённого заказа в TEZ APP так и нет — через столько минут после обещанного времени он вернётся к своему оператору, чтобы дожать.'}
                     >
                         {numberInput('followup_after_min', ...LIMITS.followup_after_min)}
                     </Row>
@@ -335,7 +344,9 @@ const TezAutodialRows = ({ form, setForm, canEdit, numberInput }) => {
     profile='tez' — вместо режима отдела автообзвон, постобработка, расписание недозвонов,
     перезвоны и дожим (TezAutodialRows выше). */
 export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, settings, periods = [], onSaved, canEdit = true, showToast, profile = PROFILE_REMOTE_CC }) => {
-    const isTez = normalizeProfile(profile) === PROFILE_TEZ;
+    // Движок автообзвона — Тез и «Активация водителей» (26.11.2026); у активации ещё «Цель по поездкам».
+    const isTez = isAutodialProfile(profile);
+    const isActivation = normalizeProfile(profile) === PROFILE_ACTIVATION;
     const [form, setForm] = useState(null);
     const [saving, setSaving] = useState(false);
 
@@ -354,8 +365,9 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
             caller_id_for_employee: settings.caller_id_for_employee || '',
             active_period: settings.active_period || '',
             ...(isTez ? tezSettingsForm(settings) : {}),
+            ...(isActivation ? { trips_goal: String(settings.trips_goal ?? TRIPS_GOAL_DEFAULT) } : {}),
         });
-    }, [settings, isTez]);
+    }, [settings, isTez, isActivation]);
 
     const save = async () => {
         if (!form) return;
@@ -365,6 +377,11 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
         if (tezPayload) {
             const problem = validateTezSettings(tezPayload);
             if (problem) { toast(problem, 'error'); return; }
+        }
+        if (tezPayload && isActivation) {
+            const goalProblem = validateTripsGoal(form.trips_goal);
+            if (goalProblem) { toast(goalProblem, 'error'); return; }
+            tezPayload.trips_goal = Number(String(form.trips_goal).trim());
         }
         setSaving(true);
         try {
@@ -411,8 +428,22 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
 
     return (
         <div className="space-y-4">
+            {isActivation && (
+                <section className="space-y-1.5">
+                    <div className={iosGroupLabel}>Цель</div>
+                    <div className={`${iosCard} divide-y divide-slate-100`}>
+                        <Row
+                            label="Цель по поездкам"
+                            hint={`Добрал — уходит из обзвона. Сейчас: ${settings?.trips_goal ?? TRIPS_GOAL_DEFAULT}`}
+                            info="Сколько завершённых поездок за всё время должен сделать водитель. Добрал — он уходит из обзвона, а оператору, который последним поговорил с ним не меньше 10 секунд, засчитывается успешка. Водители, у которых в файле уже столько поездок, не загружаются. Если цель поднять, уже добравшие в обзвон не вернутся; если опустить — следующая проверка уберёт тех, кто до неё дотянул."
+                        >
+                            {numberInput('trips_goal', TRIPS_GOAL_MIN, TRIPS_GOAL_MAX)}
+                        </Row>
+                    </div>
+                </section>
+            )}
             {isTez ? (
-                <TezAutodialRows form={form} setForm={setForm} canEdit={canEdit} numberInput={numberInput} />
+                <TezAutodialRows form={form} setForm={setForm} canEdit={canEdit} numberInput={numberInput} activation={isActivation} />
             ) : (
                 <section className="space-y-1.5">
                     <div className={iosGroupLabel}>Режим</div>
@@ -515,6 +546,68 @@ const tezLeadTiles = (summary) => {
     ];
 };
 
+/* Плитки базы «Активации водителей» (26.11.2026, leads/summary): цель — добрал поездки, вторая цель — Sapar.
+   Зелёный — цель, синий — Sapar. Ключа нет — прочерк, а не ноль. */
+const activationLeadTiles = (summary) => {
+    const status = summary?.by_status || {};
+    const has = (key) => summary && Object.prototype.hasOwnProperty.call(summary, key);
+    const dash = (key) => (has(key) ? summary[key] : '—');
+    const goal = summary?.trips_goal ?? TRIPS_GOAL_DEFAULT;
+    return [
+        { label: 'Всего', value: summary?.total ?? 0, tone: 'text-slate-900',
+            info: 'Водители базы выбранного месяца.' },
+        { label: `Добрали ${goal} поездок`, value: dash('reached'), tone: 'text-emerald-600',
+            info: `Водители базы, у которых по CRM уже ${goal} завершённых поездок и больше. Такой водитель уходит из обзвона; успешка — оператору, который последним поговорил с ним не меньше 10 секунд до этого.` },
+        { label: 'В обзвоне', value: (Number(status.new) || 0) + (Number(status.in_progress) || 0), tone: 'text-slate-900',
+            info: 'Ещё не добрали поездки и не закрыты: новые и те, кому уже звонили.' },
+        { label: 'На Sapar сейчас', value: dash('on_sapar'), tone: 'text-blue-600',
+            info: 'Водители базы с провайдером ЭДО Sapar — по последнему, что известно: карточка Fleet или файл базы.' },
+        { label: 'Перевели на Sapar', value: dash('sapar_switched'), tone: 'text-blue-600',
+            info: 'Проверка увидела переход на Sapar у водителя, у которого раньше был другой провайдер или не было никакого. Оператору засчитывается, если его последний разговор с водителем от 10 секунд был до перехода.' },
+        { label: 'Перезвоны и дожим', value: (Number(summary?.callbacks) || 0) + (Number(summary?.followups) || 0),
+            tone: 'text-slate-900', info: 'Водители, которым оператор назначил перезвон или «дожать» (обещали начать ездить).' },
+    ];
+};
+
+/* Проверка водителей «Активации» (leads/summary → activation_check): поездки в CRM и провайдер в кабинете Fleet. */
+const ActivationCheckCard = ({ summary }) => {
+    const check = summary?.activation_check;
+    if (!check) return null;
+    let state;
+    if (check.configured === false) state = 'CRM не настроена на сервере — поездки не проверяются';
+    else if (check.running) state = 'идёт проверка…';
+    else if (check.last_run) state = `проверено ${whenText(check.last_run)}`;
+    else state = 'ещё не проверяли';
+    const warning = checkWarning(summary);
+    const stats = check.configured === false ? [] : [
+        { label: 'Поездки (CRM)', value: summary?.trips_checked },
+        { label: 'Провайдер по карточке', value: summary?.provider_checked },
+        { label: 'Без ID водителя', value: summary?.without_driver_id, bad: true },
+    ].filter((x) => x.value !== undefined && x.value !== null && !(x.bad && !Number(x.value)));
+    return (
+        <section className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+                <span className={iosGroupLabel}>Поездки и провайдер ЭДО</span>
+                <IosHint text="Раз в 30 минут и сразу после загрузки базы сервер спрашивает CRM, сколько у водителя завершённых поездок за всё время, и по одной проверяет провайдера ЭДО в карточке кабинета Fleet (около 20 карточек в минуту): сначала тех, с кем говорили после прошлой проверки, потом тех, о ком известно только из файла, остальных — раз в сутки. Кто уже на Sapar, не перепроверяется. Перед звонком сервер освежает поездки этого водителя, а провайдера — если ему больше 6 часов." />
+            </div>
+            <div className={`${iosCard} flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3`}>
+                <div className={`flex min-w-0 items-center gap-2 text-[13px] ${check.configured === false ? 'text-amber-700' : 'text-slate-700'}`}>
+                    {check.running && <FaIcon className="fas fa-spinner fa-spin" />}
+                    <span className="min-w-0">{state}</span>
+                </div>
+                {stats.map((x) => (
+                    <div key={x.label} className="text-[12.5px] text-slate-500">
+                        {x.label} <span className={`font-semibold tabular-nums ${x.bad ? 'text-rose-600' : 'text-slate-900'}`}>{x.value}</span>
+                    </div>
+                ))}
+            </div>
+            {warning && check.configured !== false && (
+                <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">{warning}</div>
+            )}
+        </section>
+    );
+};
+
 /* Проверка поездок в TEZ APP (leads/summary → trip_check): идёт / когда была / что нашла. */
 const TripCheckCard = ({ check }) => {
     if (!check) return null;
@@ -554,7 +647,7 @@ const TripCheckCard = ({ check }) => {
    обработано. Под названием — что дала загрузка; справа — сколько осталось и цель отдела. Полоса: зелёное — цель,
    синее — остальные обработанные. Пока отмечены другие файлы, неотмеченный приглушён: его водителей операторы не
    получают. Нажатие по всей строке — отметить или снять (только обзваниваемый месяц и с правом правки). */
-const BatchRow = ({ batch, isTez, mark, paused, busy, onToggle }) => {
+const BatchRow = ({ batch, isTez, goalText = '', mark, paused, busy, onToggle }) => {
     const pr = batchProgress(batch);
     const upload = [fmtDate(batch.created_at), `строк ${batch.rows_total ?? 0}`];
     if (batch.rows_new) upload.push(`новых ${batch.rows_new}`);
@@ -585,7 +678,7 @@ const BatchRow = ({ batch, isTez, mark, paused, busy, onToggle }) => {
                     {!pr.known ? null : pr.total > 0 ? (
                         <span className="tabular-nums">
                             {`осталось ${pr.open}`}
-                            {pr.goal > 0 && <span className="text-emerald-600">{` · ${goalLabel(isTez)} ${pr.goal}`}</span>}
+                            {pr.goal > 0 && <span className="text-emerald-600">{` · ${goalText || goalLabel(isTez)} ${pr.goal}`}</span>}
                         </span>
                     ) : <span>водителей нет</span>}
                 </div>
@@ -615,7 +708,9 @@ const BatchRow = ({ batch, isTez, mark, paused, busy, onToggle }) => {
 };
 
 export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summary, period = '', onPeriodChange, onChanged, onSummary, canEdit = true, showToast, profile = PROFILE_REMOTE_CC }) => {
-    const isTez = normalizeProfile(profile) === PROFILE_TEZ;
+    // Движок автообзвона — Тез и «Активация водителей» (26.11.2026): у активации свой файл, плитки и проверки.
+    const isTez = isAutodialProfile(profile);
+    const isActivation = normalizeProfile(profile) === PROFILE_ACTIVATION;
     const [uploading, setUploading] = useState(false);
     const [dragOver, setDragOver] = useState(false);
     // Тез: что сказал сервер о последней загрузке (зеркало в базу успешек — вкладку
@@ -643,7 +738,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
     useEffect(() => { setLastUpload(null); setPollUntil(0); setFocusDraft(null); }, [departmentId]);
     useEffect(() => { setFocusDraft(null); }, [period]);
 
-    const tripRunning = !!summary?.trip_check?.running;
+    const tripRunning = !!(summary?.trip_check?.running || summary?.activation_check?.running);
     useEffect(() => {
         if (!isTez || (!tripRunning && Date.now() > pollUntil)) return undefined;
         const timer = setTimeout(reloadSummary, 5000);
@@ -674,7 +769,13 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
             // Отмечены другие файлы обзваниваемого месяца — новый сам в работу не встаёт: сказать сразу.
             const focusNote = uploadFocusNote(summary, { isActive, failed: Boolean(failedAll) });
             const withFocusNote = (text) => (focusNote ? `${text}. ${focusNote}` : text);
-            if (isTez) {
+            if (isActivation) {
+                const nothing = !data.rows_new && !data.rows_duplicate;
+                toast(withFocusNote(activationUploadSummary(data, monthLabel(data.period || shownPeriod))),
+                    nothing && (data.rows_bad_id || data.rows_invalid) ? 'error' : 'success');
+                setLastUpload({ fileName: file.name, at: new Date().toISOString(), data, mirror: null });
+                setPollUntil(Date.now() + 90 * 1000);
+            } else if (isTez) {
                 toast(withFocusNote(tezUploadSummary(data, monthLabel(data.period || shownPeriod))), failedAll ? 'error' : 'success');
                 // Сбой зеркала загрузку не валит (контракт §5) — но руководитель должен
                 // знать, что во второй базе этого файла нет: отдельным тостом-ошибкой.
@@ -756,7 +857,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
 
     // Подписавшие документы — своей плиткой: их больше не обзванивают, и в «Не
     // звонили» / «В работе» они бы врали (сервер их туда и не считает).
-    const tiles = isTez ? tezLeadTiles(summary) : [
+    const tiles = isActivation ? activationLeadTiles(summary) : isTez ? tezLeadTiles(summary) : [
         { label: 'Всего', value: summary?.total ?? 0, tone: 'text-slate-900' },
         { label: 'Не звонили', value: summary?.by_status?.new ?? 0, tone: 'text-slate-900' },
         { label: 'В работе', value: summary?.by_status?.in_progress ?? 0, tone: 'text-amber-600' },
@@ -810,7 +911,8 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                 ))}
             </div>
 
-            {isTez && <TripCheckCard check={summary?.trip_check} />}
+            {isActivation && <ActivationCheckCard summary={summary} />}
+            {isTez && !isActivation && <TripCheckCard check={summary?.trip_check} />}
 
             {isTez && lastUpload && (
                 <section className="space-y-1.5">
@@ -819,9 +921,13 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                         <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
                             <div className="min-w-0">
                                 <div className="truncate text-[13.5px] font-medium text-slate-800">{lastUpload.fileName}</div>
-                                <div className="text-[11.5px] text-slate-500">{tezUploadSummary(lastUpload.data, monthLabel(lastUpload.data.period || shownPeriod))}</div>
+                                <div className="text-[11.5px] text-slate-500">
+                                    {(isActivation ? activationUploadSummary : tezUploadSummary)(lastUpload.data, monthLabel(lastUpload.data.period || shownPeriod))}
+                                </div>
                             </div>
-                            {lastUpload.data.trip_check === 'queued' && <IosBadge tone="blue">проверка поездок поставлена</IosBadge>}
+                            {(lastUpload.data.trip_check === 'queued' || lastUpload.data.activation_check === 'queued') && (
+                                <IosBadge tone="blue">проверка поездок поставлена</IosBadge>
+                            )}
                         </div>
                         {lastUpload.mirror && (
                             <div className={`px-4 py-3 text-[12.5px] ${lastUpload.mirror.ok ? 'text-slate-600' : 'text-rose-600'}`}>
@@ -845,7 +951,17 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                         <FaIcon className={uploading ? 'fas fa-spinner fa-spin' : 'fas fa-file-arrow-up'} style={{ width: 18, height: 18 }} />
                     </div>
                     <div className="mt-3 text-[14px] font-semibold text-slate-800">Загрузить список водителей{shownPeriod ? ` за ${monthLabel(shownPeriod)}` : ''}</div>
-                    {isTez ? (
+                    {isActivation ? (
+                        <div className="mt-1 text-[12.5px] text-slate-500">
+                            Перетащите сюда выгрузку «Новички по поездкам с ЭДО» (Excel или CSV) с колонками <b>ID водителя</b>, <b>ФИО</b>, <b>Телефон</b>, <b>Завершено поездок</b> и <b>Провайдер ЭДО</b>, или выберите файл.{' '}
+                            <span className="inline-block align-middle">
+                                <IosHint
+                                    align="right"
+                                    text={`ID водителя обязателен: по нему сервер узнаёт в CRM поездки водителя, а в кабинете Fleet — его провайдера ЭДО. Читаются все листы файла с такими колонками; водители, у которых в файле уже ${summary?.trips_goal ?? TRIPS_GOAL_DEFAULT} поездок и больше (цель из «Настроек»), не загружаются. ИИН, «Диспетчерская» и «Дата регистрации» необязательны: город берётся из скобок «Диспетчерской». Поездки и провайдер из файла видны, пока сервер их не проверит. Внутри месяца повторные номера и ID не дублируются; в базе другого месяца тот же водитель допускается.`}
+                                />
+                            </span>
+                        </div>
+                    ) : isTez ? (
                         <div className="mt-1 text-[12.5px] text-slate-500">
                             Перетащите сюда CSV или Excel с колонками <b>fio</b>, <b>phone</b> и, если есть, <b>город</b>, или выберите файл.{' '}
                             <span className="inline-block align-middle">
@@ -938,6 +1054,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                                 key={b.id}
                                 batch={b}
                                 isTez={isTez}
+                                goalText={isActivation ? 'добрали' : ''}
                                 mark={row.mark}
                                 paused={row.paused}
                                 busy={focusBusy}
@@ -1019,7 +1136,8 @@ export const DialListDepartmentCard = ({ apiBaseUrl, authHeaders, departmentId, 
    потом в отдел, где режим включён целиком, он получит его «как у отдела». Рядом с
    линией — ставка (users.rate), если сервер её отдаёт. */
 export const DialListOperatorsPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentEnabled, canEdit = true, showToast, profile = PROFILE_REMOTE_CC }) => {
-    const isTez = normalizeProfile(profile) === PROFILE_TEZ;
+    // Движок автообзвона — Тез и «Активация водителей»: операторов включают лично.
+    const isTez = isAutodialProfile(profile);
     const [users, setUsers] = useState(null);
     const [error, setError] = useState('');
     const [busyId, setBusyId] = useState(null);

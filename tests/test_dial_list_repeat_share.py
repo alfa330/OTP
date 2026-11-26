@@ -53,7 +53,10 @@ class RepeatQuotaTests(unittest.TestCase):
                         self.assertLessEqual(got * 100, (min(others, size - got) + got) * share)
 
     def test_share_defaults_by_profile(self):
-        self.assertEqual(S.REPEAT_SHARE_DEFAULTS, {S.PROFILE_REMOTE_CC: 20, S.PROFILE_TEZ: 100})
+        # «Активация водителей» (26.11.2026) — движок Тез, свои сроки перезвона: доля не ограничена.
+        self.assertEqual(S.REPEAT_SHARE_DEFAULTS, {S.PROFILE_REMOTE_CC: 20, S.PROFILE_TEZ: 100,
+                                                   S.PROFILE_ACTIVATION: 100})
+        self.assertEqual(S.repeat_share_of(None, 'activation'), 100)
         self.assertEqual(S.repeat_share_of(None, 'remote_cc'), 20)
         self.assertEqual(S.repeat_share_of(None, 'tez'), 100)
         self.assertEqual(S.repeat_share_of(None, None), 20)
