@@ -73,8 +73,11 @@ class SectionNameTests(unittest.TestCase):
 class SuccessesTabTests(unittest.TestCase):
     def test_tab_is_tez_only_and_renders_the_panel(self):
         self.assertIn("{ value: 'successes', label: 'Успешки'", VIEW)
-        self.assertIn(".filter((t) => tez || t.value !== 'successes')", VIEW)
-        screen = _block(VIEW, "{tab === 'successes' && tez && (", "/>")
+        # Только у Тез: с 26.11.2026 на движке автообзвона есть и «Активация водителей» (tez — движок), у неё
+        # успешек ОП нет — вкладку решает tezOnly.
+        self.assertIn("const tezOnly = sectionProfile === PROFILE_TEZ;", VIEW)
+        self.assertIn(".filter((t) => tezOnly || t.value !== 'successes')", VIEW)
+        screen = _block(VIEW, "{tab === 'successes' && tezOnly && (", "/>")
         self.assertIn("<TezSuccessesPanel", screen)
         self.assertIn("key={selected.department_id}", screen)
         self.assertIn("month={successMonth}", screen)
