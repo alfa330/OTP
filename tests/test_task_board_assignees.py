@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Люди доски (владелец 24.11.2026): у каждой доски своя привязка исполнителей.
+"""Исполнители и участники доски (владелец 26.11.2026): «у каждой доски свои
+исполнители, их можно выбирать, а остальные как участники».
 
-«По каждой доске должна быть своя привязка», «выбрать всех либо конкретных людей» —
-всех одной задачей, без потолка в десять, — и «если человека нет в данном проекте,
-зачем выводить его в исполнителях»: люди доски — весь её состав (отдельную отметку
-исполнителей владелец убрал в тот же день); доска без людей — как раньше.
+Задачу доски поручают только её исполнителям (task_project_members.is_executor) —
+всем одной задачей, без потолка в десять, или поштучно; участник доски видит её
+задачи, но исполнителем не становится. Доска без людей — как раньше; доска с
+людьми, но без исполнителей, задачу не принимает.
 
 Правила гоняем исполнением, без базы: настоящие методы Database (AST'ом из склейки,
 как в test_task_projects.py) на подставленном курсоре, настоящая сверка «кому вправе
-поручить» и настоящая рассылка из tasks/routes.py. Что значит SQL — люди доски и
-сверка правила — в tests/test_task_board_assignees_postgres.py.
+поручить» и настоящая рассылка из tasks/routes.py. Что значит SQL — исполнители
+доски и сверка правила — в tests/test_task_board_assignees_postgres.py.
 """
 import ast
 import concurrent.futures
@@ -43,10 +44,13 @@ NAMES = [
     "get_task_extra_assignable_ids",
 ]
 
-# Люди выдуманы: 1 — постановщик, 2..19 — состав доски 10, 70..81 — состав доски 20,
+# Люди выдуманы: 1 — постановщик, 2..19 — исполнители доски 10, 60..61 — её участники,
+# 70..81 — исполнители доски 20, 62 — единственный человек доски 35 (участник),
 # 50+ — посторонние. Доска 30 — без людей.
 EXECUTORS = set(range(2, 20))
+PARTICIPANTS_10 = {60, 61}
 TEAM_20 = set(range(70, 82))
+WATCHER_35 = 62
 OUTSIDER, OTHER = 50, 51
 
 
@@ -100,13 +104,15 @@ FakeDatabase = _build_database()
 
 
 class _ExecutorCursor:
-    """Курсор поверх «состава доски»: люди доски, доступ к ней, состав задачи.
+    """Курсор поверх «состава доски»: исполнители, участники, доступ к ней, состав задачи.
 
-    members_by_project: {доска: {человек, ...}}."""
+    executors_by_project: {доска: {исполнитель, ...}};
+    participants_by_project: {доска: {участник, ...}} — в составе, но не исполнители."""
 
-    def __init__(self, members_by_project=None, task_projects_by_id=None, access=None, crews=None,
-                 archived=()):
-        self.members_by_project = members_by_project or {}
+    def __init__(self, executors_by_project=None, task_projects_by_id=None, access=None, crews=None,
+                 archived=(), participants_by_project=None):
+        self.executors_by_project = executors_by_project or {}
+        self.participants_by_project = participants_by_project or {}
         self.task_projects_by_id = task_projects_by_id or {}
         self.access = access or {}            # (project_id, user_id) -> 'member' | 'board'
         self.crews = crews or {}              # task_id -> [user_id, ...]
@@ -117,14 +123,18 @@ class _ExecutorCursor:
     def execute(self, query, params=None):
         sql = " ".join(query.split())
         self.queries.append((sql, params))
-        if sql.startswith("SELECT pm.user_id FROM task_project_members pm"):
-            self._rows = [(person_id,) for person_id in sorted(self.members_by_project.get(params[0], ()))]
+        if sql.startswith("SELECT pm.user_id, pm.is_executor FROM task_project_members pm"):
+            executors = self.executors_by_project.get(params[0], set())
+            participants = self.participants_by_project.get(params[0], set())
+            self._rows = sorted([(person_id, True) for person_id in executors]
+                                + [(person_id, False) for person_id in participants])
         elif sql.startswith("SELECT project_id FROM tasks"):
             project_id = self.task_projects_by_id.get(params[0])
             self._rows = [(project_id,)] if params[0] in self.task_projects_by_id else []
         elif sql.startswith("SELECT p.is_archived, pm.access_level FROM task_projects p"):
             user_id, project_id = params
-            known = set(self.members_by_project) | {pid for pid in self.task_projects_by_id.values() if pid}
+            known = (set(self.executors_by_project) | set(self.participants_by_project)
+                     | {pid for pid in self.task_projects_by_id.values() if pid})
             self._rows = ([(project_id in self.archived, self.access.get((project_id, user_id)))]
                           if project_id in known else [])
         elif sql.startswith("SELECT user_id FROM task_assignees WHERE task_id"):
@@ -144,23 +154,39 @@ class AssigneeRuleTests(unittest.TestCase):
 
     def setUp(self):
         self.db = FakeDatabase()
-        # Доски 10 и 20 — со своим составом, 30 — без людей.
-        self.cursor = _ExecutorCursor({10: set(EXECUTORS), 20: set(TEAM_20), 30: set()})
+        # Доска 10 — исполнители и двое участников, 20 — только исполнители,
+        # 30 — без людей, 35 — люди есть, исполнителей нет.
+        self.cursor = _ExecutorCursor(
+            {10: set(EXECUTORS), 20: set(TEAM_20), 30: set()},
+            participants_by_project={10: set(PARTICIPANTS_10), 35: {WATCHER_35}},
+        )
 
     def _check(self, project_id, ids, current=(), recheck_all=False):
         self.db._require_task_project_assignees_tx(self.cursor, project_id, ids, current, recheck_all=recheck_all)
 
-    def test_board_takes_only_its_roster(self):
-        """«Если человека нет в данном проекте, зачем выводить его в исполнителях»."""
+    def test_board_takes_only_its_executors(self):
+        """«У каждой доски свои исполнители… а остальные как участники»."""
         self._check(20, [70, 71])
         with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
             self._check(20, [70, OUTSIDER])
-        # «Все» из состава — больше десяти одной задачей.
+        # Участник доски — в её составе, но исполнителем его не сделать.
+        with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
+            self._check(10, [2, 60])
+        with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
+            self._check(10, [61])
+        # «Все» исполнители — больше десяти одной задачей.
         self._check(20, sorted(TEAM_20))
 
     def test_board_without_people_and_no_board_assign_as_before(self):
         self._check(30, [OUTSIDER, OTHER])
         self._check(None, [OUTSIDER])
+
+    def test_board_with_people_but_no_executors_takes_nobody(self):
+        """Люди есть, исполнителей нет — «как раньше» не включается: участники остаются участниками."""
+        with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
+            self._check(35, [WATCHER_35])
+        with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
+            self._check(35, [OUTSIDER])
 
     def test_everyone_on_the_board_lifts_the_ceiling_of_ten(self):
         """«Все» — восемнадцать исполнителей одной задачей: потолок десяти на них не действует."""
@@ -177,18 +203,21 @@ class AssigneeRuleTests(unittest.TestCase):
         self._check(None, eleven[:10])
 
     def test_old_crew_does_not_lock_the_task(self):
-        """Поставили до привязки (или человека сняли с доски) — правка темы проходит."""
-        old_crew = [OUTSIDER, OTHER, 2]
+        """Поставили до привязки (или человека сделали участником) — правка темы проходит."""
+        old_crew = [OUTSIDER, OTHER, 2, 60]
         self._check(10, old_crew, current=old_crew)
         # Убрать человека из такой задачи тоже можно — новых в составе нет.
         self._check(10, [OUTSIDER, 2], current=old_crew)
-        # А добавить постороннего — нельзя.
+        # А добавить постороннего или участника — нельзя.
         with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
             self._check(10, old_crew + [52], current=old_crew)
+        with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
+            self._check(10, [2, 61], current=[2])
 
-    def test_task_for_everyone_keeps_editing_after_the_board_shrinks(self):
+    def test_task_for_everyone_keeps_editing_after_executors_become_participants(self):
         everyone = sorted(EXECUTORS)
-        self.cursor.members_by_project[10] = {2, 3}
+        self.cursor.executors_by_project[10] = {2, 3}
+        self.cursor.participants_by_project[10] = set(EXECUTORS) - {2, 3}
         self._check(10, everyone, current=everyone)           # правка без смены состава
         self._check(10, everyone[:-1], current=everyone)      # убрали одного
         with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
@@ -197,6 +226,9 @@ class AssigneeRuleTests(unittest.TestCase):
     def test_moving_to_a_bound_board_checks_the_whole_crew(self):
         with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
             self._check(10, [2, OUTSIDER], current=[2, OUTSIDER], recheck_all=True)
+        # Участник новой доски при переносе тоже не проходит.
+        with self.assertRaisesRegex(ValueError, "ASSIGNEE_NOT_PROJECT_EXECUTOR"):
+            self._check(10, [2, 60], current=[2, 60], recheck_all=True)
         self._check(10, [2, 3], current=[2, 3], recheck_all=True)
 
     def test_moving_a_big_crew_to_a_free_board_is_not_a_new_crew(self):
@@ -208,15 +240,18 @@ class AssigneeRuleTests(unittest.TestCase):
         self._check(10, [2, OUTSIDER], current=[OUTSIDER, 2])
         self.assertEqual(self.cursor.queries, [])
 
-    def test_board_people_query_skips_fired_and_needs_a_board(self):
-        self.assertEqual(self.db._task_project_assignable_ids_tx(self.cursor, None), set())
+    def test_executors_query_skips_fired_and_tells_no_people_from_no_executors(self):
+        self.assertIsNone(self.db._task_project_assignable_ids_tx(self.cursor, None))
         self.assertEqual(self.cursor.queries, [])
-        # Весь состав доски; без людей — пусто.
+        # Только исполнители; участники — нет.
         self.assertEqual(self.db._task_project_assignable_ids_tx(self.cursor, 10), EXECUTORS)
         self.assertEqual(self.db._task_project_assignable_ids_tx(self.cursor, 20), TEAM_20)
-        self.assertEqual(self.db._task_project_assignable_ids_tx(self.cursor, 30), set())
+        # Без людей — None («как раньше»), люди без исполнителей — пустое множество.
+        self.assertIsNone(self.db._task_project_assignable_ids_tx(self.cursor, 30))
+        self.assertEqual(self.db._task_project_assignable_ids_tx(self.cursor, 35), set())
         sql, params = self.cursor.queries[0]
         self.assertIn("COALESCE(u.status, 'working') <> 'fired'", sql)
+        self.assertIn("pm.is_executor", sql)
         self.assertEqual(params, (10,))
 
     def test_normalizer_ceiling_is_a_parameter(self):
@@ -247,9 +282,14 @@ class ExtraAssignableTests(unittest.TestCase):
         return db
 
     def test_board_executors_only_for_who_may_post_there(self):
-        cursor = _ExecutorCursor({10: {2, 3}}, access={(10, 40): "board"})
+        # 4 — участник доски: в обход списка получателей его не пускают.
+        cursor = _ExecutorCursor({10: {2, 3}}, access={(10, 40): "board"}, participants_by_project={10: {4}})
         db = self._db(cursor)
         self.assertEqual(db.get_task_extra_assignable_ids(40, "sv", project_id=10), {2, 3})
+        # Доска без исполнителей ничего сверх получателей не даёт.
+        cursor.executors_by_project[10] = set()
+        self.assertEqual(db.get_task_extra_assignable_ids(40, "sv", project_id=10), set())
+        cursor.executors_by_project[10] = {2, 3}
         # Не в составе доски — обхода нет; админ раздела ставит на любую доску.
         self.assertEqual(db.get_task_extra_assignable_ids(41, "sv", project_id=10), set())
         self.assertEqual(db.get_task_extra_assignable_ids(41, "admin", project_id=10), {2, 3})
@@ -257,10 +297,19 @@ class ExtraAssignableTests(unittest.TestCase):
         cursor.archived.add(10)
         self.assertEqual(db.get_task_extra_assignable_ids(40, "sv", project_id=10), set())
 
+    def test_board_without_people_adds_nothing_and_does_not_fail(self):
+        """Доска без людей — «как раньше»: сверх получателей ничего, и выборка None не роняет ручку."""
+        cursor = _ExecutorCursor({10: {2}, 30: set()}, task_projects_by_id={79: 30}, crews={79: [5]})
+        db = self._db(cursor)
+        self.assertEqual(db.get_task_extra_assignable_ids(41, "admin", project_id=30), set())
+        # Правка задачи этой доски: нынешний состав остаётся, людей доски нет.
+        self.assertEqual(db.get_task_extra_assignable_ids(41, "admin", task_id=79), {5})
+
     def test_edit_keeps_the_current_crew_and_takes_the_task_board(self):
-        """Снятый с исполнителей доски человек правку задачи не запирает (находка разбора)."""
+        """Человек, которого сделали участником доски, правку задачи не запирает (находка разбора)."""
         cursor = _ExecutorCursor({10: {2}}, task_projects_by_id={77: 10, 78: None},
-                                 access={(10, 40): "board"}, crews={77: [9, 2], 78: [5]})
+                                 access={(10, 40): "board"}, crews={77: [9, 2], 78: [5]},
+                                 participants_by_project={10: {9}})
         db = self._db(cursor)
         self.assertEqual(db.get_task_extra_assignable_ids(40, "sv", task_id=77), {9, 2})
         self.assertEqual(db.get_task_extra_assignable_ids(40, "sv", task_id=78), {5})
@@ -271,7 +320,7 @@ class ExtraAssignableTests(unittest.TestCase):
 class ModuleTests(unittest.TestCase):
     def test_refusal_has_a_russian_text(self):
         text = task_projects.error_message("ASSIGNEE_NOT_PROJECT_EXECUTOR")
-        self.assertIn("состава", text)
+        self.assertIn("исполнителям", text)
 
 
 def _outside_scope_function():
@@ -426,12 +475,75 @@ class WiringTests(unittest.TestCase):
     def test_board_list_carries_the_department_code_and_the_rule_is_explained(self):
         # Код отдела людей доски — маркетолога для «Продакшна» форма узнаёт и вне получателей.
         self.assertIn('"department_code": row[8],', DATABASE_SOURCE)
-        self.assertIn("Поручить задачу доски можно только людям из её состава.", PROJECTS_SHEET)
+        # Роль в составе уходит в ответ, исполнители — первыми.
+        self.assertIn('"is_executor": bool(row[9]),', DATABASE_SOURCE)
+        self.assertIn("CASE WHEN pm.is_executor THEN 0 ELSE 1 END", DATABASE_SOURCE)
+        # Под «i» у состава — по строке на каждую роль сегмента.
+        for line in ("'Исполнитель — ему ставят задачи доски.", "'Участник — видит задачи доски"):
+            self.assertIn(line, PROJECTS_SHEET)
+        self.assertIn("{ value: ROLE_EXECUTOR, label: 'Исполнитель' }", PROJECTS_SHEET)
+        self.assertIn("{ value: ROLE_PARTICIPANT, label: 'Участник' }", PROJECTS_SHEET)
+
+    def test_projects_sheet_saves_the_role_and_new_people_are_participants(self):
+        # Роль уходит в запрос сохранения у каждого человека (не только в черновике окна).
+        self.assertIn(
+            "      members: draft.members.map((person) => ({\n"
+            "        user_id: person.id,\n"
+            "        access_level: person.access_level,\n"
+            "        is_executor: Boolean(person.is_executor),\n"
+            "      })),",
+            PROJECTS_SHEET,
+        )
+        new_member = PROJECTS_SHEET[PROJECTS_SHEET.index("const newMember = (person) => ({"):]
+        new_member = new_member[:new_member.index("});")]
+        self.assertIn("is_executor: false,", new_member)
+        self.assertIn("addDepartmentStaff = () => patch({\n    members: [...draft.members, ...departmentStaff.map(newMember)],",
+                      PROJECTS_SHEET)
+        # Доска с людьми, но без исполнителей, не сохраняется — и окно само доводит до ошибки внизу.
+        self.assertIn("const membersProblem = boardMembersIssue(draft.members, draft.isArchived);", PROJECTS_SHEET)
+        self.assertIn("if (!name || codeProblem || membersProblem || sectionsIssue(draft.sections)) {", PROJECTS_SHEET)
+        self.assertIn("document.querySelector('[data-project-issue=\"members\"]')", PROJECTS_SHEET)
+        self.assertIn("?.scrollIntoView({ block: 'center', behavior: 'smooth' });", PROJECTS_SHEET)
+        self.assertIn("data-project-issue={issues.members ? 'members' : undefined}", PROJECTS_SHEET)
+        # Порядок строк и подпись доски — общими функциями (их поведение — task_board_assignees.test.mjs).
+        self.assertIn("const draftMembersOf = (project) => orderBoardMembers(", PROJECTS_SHEET)
+        self.assertIn("const { facts, missingExecutors } = projectListFacts(project);", PROJECTS_SHEET)
+
+    def test_pinned_quick_form_offers_board_executors(self):
+        """Закреплённая задача (находка разбора 26.11): быстрая форма — тоже только исполнители доски."""
+        start = TASKS_VIEW.index("export const PinnedTaskWidget = React.memo(({")
+        widget = TASKS_VIEW[start:]
+        self.assertIn("axios.get(`${apiBaseUrl}/api/tasks/projects`, { headers: buildNoteHeaders() })", widget)
+        self.assertIn("const bound = project && hasBoardPeople(project) ? project : null;", widget)
+        # Связанная задача — из прежнего состава только исполнители доски.
+        self.assertIn("if (bound && quickFormMode === 'create') {", widget)
+        self.assertIn("assigneeIds: keepAssigneesForProject(prev.assigneeIds, bound)", widget)
+        self.assertIn("const byId = new Map(boardAssignees(quickBoard).map((person) => [String(person.id), person]));", widget)
+        self.assertIn("isLoading={isTaskRecipientsLoading || quickBoardLoading}", widget)
+        self.assertIn("const quickNoExecutors = boardWithoutExecutors(quickBoard);", widget)
+
+    def test_existing_people_become_executors_once(self):
+        """Разовый перенос: с 24.11 исполнителями был весь состав — выкладка этого не меняет."""
+        schema = (ROOT / "db" / "schema.py").read_text(encoding="utf-8")
+        start = schema.index("('task_board_executors_2611',)")
+        block = schema[start:start + 400]
+        self.assertIn("if cursor.fetchone():", block)
+        self.assertIn("UPDATE task_project_members SET is_executor = TRUE WHERE NOT is_executor", block)
+        # Перенос — после колонки, иначе на свежей базе ему нечего обновлять.
+        self.assertLess(schema.index("ADD COLUMN IF NOT EXISTS is_executor BOOLEAN NOT NULL DEFAULT FALSE"), start)
+        self.assertLess(schema.index("CREATE TABLE IF NOT EXISTS app_one_time_jobs"), start)
 
     def test_composer_offers_everyone_or_specific_people(self):
         start = TASKS_VIEW.index("const TaskComposerForm = ({")
         block = TASKS_VIEW[start:TASKS_VIEW.index("const TaskRow = React.memo", start)]
         self.assertIn("const boardPeople = useMemo(() => boardAssignees(selectedProject), [selectedProject]);", block)
+        # Привязка — по людям доски, а не по исполнителям: доска без исполнителей
+        # не возвращается к «как раньше», а говорит, что поручать некому.
+        self.assertIn("const hasBinding = hasBoardPeople(selectedProject);", block)
+        self.assertIn("const noExecutors = boardWithoutExecutors(selectedProject);", block)
+        self.assertIn("'У доски нет исполнителей'", block)
+        # Пустое поле не открывается: выбирать в нём некого.
+        self.assertIn("disabled={disabled || (noExecutors && !assigneeIds.length)}", block)
         self.assertIn("onClick={() => pickScope('all')}", block)
         self.assertIn("Конкретные люди", block)
         self.assertIn("<AllAssigneesSummary people={allPeople} />", block)

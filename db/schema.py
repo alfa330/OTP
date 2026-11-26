@@ -3539,9 +3539,10 @@ class SchemaMixin:
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
-            # Состав доски. member — участник: видит все задачи проекта; board —
-            # доступ к доске: ставит задачи в проект, а видит свои и те, где он
-            # наблюдатель. Права на действия ни один уровень не даёт.
+            # Состав доски, уровень видимости: member — видит все задачи доски;
+            # board — «видит только свои»: ставит задачи в проект, а видит свои и
+            # те, где он наблюдатель. Права на действия ни один уровень не даёт.
+            # Роль (исполнитель или участник) — отдельно, в is_executor ниже.
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS task_project_members (
                     project_id INTEGER NOT NULL REFERENCES task_projects(id) ON DELETE CASCADE,
@@ -3558,15 +3559,26 @@ class SchemaMixin:
                 CREATE INDEX IF NOT EXISTS idx_task_project_members_user
                 ON task_project_members(user_id, project_id);
             """)
-            # Отметка «исполнитель доски» (24.11.2026) жила полдня: владелец решил, что
-            # исполнители задачи доски — весь её состав, отдельно выбирать не нужно
-            # (task_projects.py). Код колонку не читает и не пишет; оставлена, чтобы
-            # стенды совпадали с продом, где она уже есть, — удалять данные не стали.
+            # Роль в составе (владелец 26.11.2026: «у каждой доски свои исполнители, а
+            # остальные как участники»): TRUE — исполнитель, ему ставят задачи доски;
+            # FALSE — участник. Видимость решает access_level, роль — эта колонка,
+            # они независимы (task_projects.py). Новый в составе — участник.
             # Добавление колонки с постоянным DEFAULT таблицу не переписывает.
             cursor.execute("""
                 ALTER TABLE task_project_members
                 ADD COLUMN IF NOT EXISTS is_executor BOOLEAN NOT NULL DEFAULT FALSE;
             """)
+            # С 24.11.2026 исполнителями задачи доски был весь её состав (колонку код
+            # тогда не читал). Чтобы выкладка ничего не поменяла в постановке задач,
+            # нынешние люди досок становятся исполнителями — ОДИН раз: на каждом старте
+            # это вернуло бы в исполнители тех, кого админ уже сделал участниками.
+            # Лишних переводят в участники в окне «Проекты».
+            cursor.execute("""
+                INSERT INTO app_one_time_jobs (job_key) VALUES (%s)
+                ON CONFLICT (job_key) DO NOTHING RETURNING job_key
+            """, ('task_board_executors_2611',))
+            if cursor.fetchone():
+                cursor.execute("UPDATE task_project_members SET is_executor = TRUE WHERE NOT is_executor")
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id INTEGER REFERENCES task_projects(id) ON DELETE SET NULL;")
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_number INTEGER;")
             # Один номер — одна задача проекта. Индекс же держит и фильтр доски

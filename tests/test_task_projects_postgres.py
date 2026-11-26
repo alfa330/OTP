@@ -50,6 +50,7 @@ BASE_DDL = '''
     CREATE TABLE task_projects (id integer PRIMARY KEY, code text NOT NULL);
     CREATE TABLE task_project_members (project_id integer NOT NULL, user_id integer NOT NULL,
                                        access_level text NOT NULL, added_by integer,
+                                       is_executor boolean NOT NULL DEFAULT FALSE,
                                        PRIMARY KEY (project_id, user_id));
     CREATE TABLE task_watchers (task_id integer NOT NULL, user_id integer NOT NULL, PRIMARY KEY (task_id, user_id));
     CREATE TABLE task_key_aliases (code text NOT NULL, number integer NOT NULL, task_id integer NOT NULL,

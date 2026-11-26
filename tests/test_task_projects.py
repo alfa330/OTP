@@ -161,13 +161,40 @@ class ProjectModuleTests(unittest.TestCase):
                 {"user_id": 6, "access_level": "board"},
                 {"user_id": 5, "access_level": "board"},
             ]),
-            [(5, "board"), (6, "board")],
+            [(5, "board", None), (6, "board", None)],
         )
-        self.assertEqual(task_projects.normalize_members([7]), [(7, "member")])
+        self.assertEqual(task_projects.normalize_members([7]), [(7, "member", None)])
         with self.assertRaises(ValueError):
             task_projects.normalize_members([{"user_id": 5, "access_level": "admin"}])
         with self.assertRaises(ValueError):
             task_projects.normalize_members("5,6")
+
+    def test_members_carry_the_role_only_when_it_was_sent(self):
+        """Исполнитель или участник (26.11.2026); без поля — роль не трогаем (None)."""
+        self.assertEqual(
+            task_projects.normalize_members([
+                {"user_id": 5, "access_level": "member", "is_executor": True},
+                {"user_id": 6, "access_level": "board", "is_executor": False},
+                {"user_id": 7, "access_level": "member"},
+                {"user_id": 8, "is_executor": None},
+            ]),
+            [(5, "member", True), (6, "board", False), (7, "member", None), (8, "member", None)],
+        )
+        # Последняя строка побеждает целиком — и уровень, и роль.
+        self.assertEqual(
+            task_projects.normalize_members([
+                {"user_id": 5, "is_executor": True},
+                {"user_id": 5, "access_level": "board", "is_executor": False},
+            ]),
+            [(5, "board", False)],
+        )
+        # Строка «false» или единица — не роль: иначе она молча сделала бы человека исполнителем.
+        for bad in ("false", "true", 1, 0, "1"):
+            with self.assertRaises(ValueError):
+                task_projects.normalize_members([{"user_id": 5, "is_executor": bad}])
+        # True как id — это не человек № 1.
+        with self.assertRaises(ValueError):
+            task_projects.normalize_members([{"user_id": True}])
 
     def test_every_project_error_code_has_a_russian_text(self):
         """Код ошибки без текста уехал бы человеку английской строкой кода."""

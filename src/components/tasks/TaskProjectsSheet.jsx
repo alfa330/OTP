@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { ChevronDown, ChevronRight, ChevronUp, Plus, X } from 'lucide-react';
 import {
+  IosMenu,
   IosModal,
   IosSegmented,
   iosBtnPrimary,
@@ -11,20 +12,35 @@ import {
   iosInput,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import InfoHint from '../common/InfoHint';
-import { PROJECT_CODE_RE, projectCodeIssue } from './taskProjects';
+import InfoHint, { InfoHintLines } from '../common/InfoHint';
+import {
+  PROJECT_CODE_RE,
+  boardMembersIssue,
+  orderBoardMembers,
+  pluralRu,
+  projectCodeIssue,
+  projectListFacts,
+  withBoardRoles,
+} from './taskProjects';
 
 /*
  * Окно «Проекты» раздела «Задачи» (задача #401): доски отделов, их ключи и кто
  * их видит. Открывает его тот, кто в разделе и так видит всё (админ, не
  * возглавляющий отдел, и супер-админ), — сервер проверяет это сам.
  *
- * Список → проект. Состав доски — одна лента людей, у каждого уровень сегментом:
- *   Участник — видит все задачи проекта (сотрудник маркетинга — кроме задач
- *              своего руководителя, где сам не участвует: решает сервер);
- *   Доска    — ставит задачи в проект и видит свои и те, где он наблюдатель.
- * Задачу доски поручают только людям из её состава (владелец 24.11.2026): отдельный
- * список «Исполнители доски» жил полдня и убран — «отдельно выбирать не нужно».
+ * Список → проект. Состав доски — одна лента людей, у каждого роль сегментом
+ * (владелец 26.11.2026: «у каждой доски свои исполнители, их можно выбирать, а
+ * остальные как участники»):
+ *   Исполнитель — ему ставят задачи доски; в форме задачи выбирают только их;
+ *   Участник    — видит задачи доски и ставит их, но исполнителем не выбирается.
+ * Новый в составе — участник: исполнителей выбирают осознанно. 24.11.2026 они
+ * были отдельным списком под составом — его убрали («отдельно выбирать не
+ * нужно»); теперь роль живёт в той же строке, что и человек.
+ * Видимость — отдельно от роли, в меню «···» строки: «видит все задачи доски»
+ * (уровень member; сотрудник маркетинга — кроме задач своего руководителя, где сам
+ * не участвует: решает сервер) или «только свои» (уровень board — свои и те, где
+ * он наблюдатель). На проде на 24.11.2026 «только свои» не стояло ни у кого, поэтому
+ * в строке — роль, а редкая отметка видимости — в меню и в подписи под именем.
  * Разделы доски («регулируемый набор разделов» из постановки) — свой список у
  * каждой доски: переименовать на месте, переставить стрелками, убрать.
  * Сохраняется целиком одним запросом: состав и разделы уходят полными списками.
@@ -41,18 +57,21 @@ let sectionDraftSeq = 0;
 // Ключ строки раздела в черновике: у нового раздела id ещё нет.
 const sectionDraftKey = () => `new-${++sectionDraftSeq}`;
 
-const ACCESS_OPTIONS = [
-  { value: 'member', label: 'Участник' },
-  { value: 'board', label: 'Доска' },
+const ROLE_EXECUTOR = 'executor';
+const ROLE_PARTICIPANT = 'participant';
+const ROLE_OPTIONS = [
+  { value: ROLE_EXECUTOR, label: 'Исполнитель' },
+  { value: ROLE_PARTICIPANT, label: 'Участник' },
 ];
 
-const pluralRu = (count, one, few, many) => {
-  const mod10 = count % 10;
-  const mod100 = count % 100;
-  if (mod10 === 1 && mod100 !== 11) return one;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
-  return many;
-};
+/* Под «i» у состава — зачем роль и по строке на вариант (правило владельца для
+   выбора сегментами), плюс отметка видимости из меню строки. */
+const MEMBERS_HINT_LINES = [
+  'Исполнитель — ему ставят задачи доски. При постановке задачи исполнителя выбирают только из них: всех сразу или конкретных людей.',
+  'Участник — видит задачи доски и может их ставить, но исполнителем его не выбрать.',
+  'Только свои задачи — отметка в меню «···» у человека: на доске он видит лишь задачи, где он постановщик, исполнитель или наблюдатель. Без неё видны все задачи доски, а сотруднику маркетинга — кроме задач своего руководителя, где он сам не участвует.',
+  'Брать, сдавать и принимать задачу по-прежнему могут только её исполнители и поручитель.',
+];
 
 const errorText = (error, fallback) => error?.response?.data?.error || fallback;
 
@@ -64,6 +83,19 @@ const initials = (name) => String(name || '?')
   .join('')
   .toUpperCase();
 
+/* Состав в черновике — исполнители сверху (orderBoardMembers): порядок ставится
+   один раз, при открытии, и смена роли строку с места не двигает. Роли —
+   withBoardRoles: старый сервер их не присылает, и тогда исполнители все, как у него. */
+const draftMembersOf = (project) => orderBoardMembers(withBoardRoles(project?.members)
+  .map((person) => ({
+    id: Number(person.id),
+    name: person.name,
+    role: person.role,
+    department: person.department,
+    access_level: person.access_level === 'board' ? 'board' : 'member',
+    is_executor: person.is_executor,
+  })));
+
 const draftOf = (project) => ({
   id: project?.id ?? null,
   code: project?.code || '',
@@ -73,13 +105,7 @@ const draftOf = (project) => ({
   name: project?.name || '',
   departmentId: project?.department_id ? String(project.department_id) : '',
   isArchived: Boolean(project?.is_archived),
-  members: (Array.isArray(project?.members) ? project.members : []).map((person) => ({
-    id: Number(person.id),
-    name: person.name,
-    role: person.role,
-    department: person.department,
-    access_level: person.access_level === 'board' ? 'board' : 'member',
-  })),
+  members: draftMembersOf(project),
   sections: (Array.isArray(project?.sections) ? project.sections : []).map((section) => ({
     key: `id-${section.id}`,
     id: Number(section.id),
@@ -123,18 +149,8 @@ const ProjectList = ({ projects, onOpen, onCreate }) => (
     </div>
     <ul className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
       {projects.map((project) => {
-        const members = Array.isArray(project.members) ? project.members : [];
-        const memberCount = members.filter((person) => person.access_level !== 'board').length;
-        const boardCount = members.length - memberCount;
-        const taskCount = Number(project.task_count || 0);
-        const sectionCount = Array.isArray(project.sections) ? project.sections.length : 0;
-        const facts = [
-          project.department_name || 'Без отдела',
-          memberCount ? `${memberCount} ${pluralRu(memberCount, 'участник', 'участника', 'участников')}` : 'нет участников',
-          boardCount ? `${boardCount} с доступом к доске` : '',
-          sectionCount ? `${sectionCount} ${pluralRu(sectionCount, 'раздел', 'раздела', 'разделов')}` : '',
-          taskCount ? `${taskCount} ${pluralRu(taskCount, 'задача', 'задачи', 'задач')}` : '',
-        ].filter(Boolean);
+        // Люди есть, а исполнителей нет — главное о доске: задачи ей не поставить.
+        const { facts, missingExecutors } = projectListFacts(project);
         return (
           <li key={project.id}>
             <button
@@ -147,7 +163,10 @@ const ProjectList = ({ projects, onOpen, onCreate }) => (
                 <span className={`block truncate text-[13.5px] font-semibold ${project.is_archived ? 'text-slate-400' : 'text-slate-800'}`}>
                   {project.name}
                 </span>
-                <span className="block truncate text-[12px] text-slate-500">{facts.join(' · ')}</span>
+                <span className="block truncate text-[12px] text-slate-500">
+                  {facts.join(' · ')}
+                  {missingExecutors && <span className="text-rose-600"> · нет исполнителей</span>}
+                </span>
               </span>
               {project.is_archived && <span className="shrink-0 text-[11.5px] font-medium text-slate-400">Архив</span>}
               <ChevronRight size={16} className="shrink-0 text-slate-300" />
@@ -159,36 +178,69 @@ const ProjectList = ({ projects, onOpen, onCreate }) => (
   </div>
 );
 
-const MemberRow = ({ person, roleLabels, onLevel, onRemove, disabled }) => (
-  <li className="flex items-center gap-3 px-3.5 py-2">
-    <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-500">
-      {initials(person.name)}
-    </span>
-    <span className="min-w-0 grow basis-0">
-      <span className="block truncate text-[13.5px] font-medium text-slate-800">{person.name}</span>
-      <span className="block truncate text-[12px] text-slate-500">
-        {[roleLabels?.[person.role], person.department].filter(Boolean).join(' · ') || '—'}
+/* Строка человека в составе: роль — сегментом прямо в строке (её и выбирают),
+   видимость и «Убрать с доски» — в меню «···»: отметка «только свои» редкая, а
+   постоянный второй переключатель в каждой строке был бы шумом. Видна она и так —
+   в подписи под именем. На узком экране роль встаёт под имя, иначе имени не
+   остаётся места. */
+const MemberRow = ({ person, roleLabels, onRole, onLevel, onRemove, disabled }) => {
+  const ownOnly = person.access_level === 'board';
+  // «Только свои» — сразу за должностью: длинное название отдела обрезается,
+  // а отметка видимости при этом оставалась бы за многоточием.
+  const facts = [
+    roleLabels?.[person.role],
+    ownOnly ? 'видит только свои задачи' : '',
+    person.department,
+  ].filter(Boolean);
+  return (
+    <li className="tb-member flex items-center gap-3 px-3.5 py-2">
+      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-500">
+        {initials(person.name)}
       </span>
-    </span>
-    <IosSegmented
-      size="xs"
-      value={person.access_level}
-      options={ACCESS_OPTIONS}
-      onChange={(level) => { if (!disabled) onLevel(person.id, level); }}
-      ariaLabel={`Доступ: ${person.name}`}
-    />
-    <button
-      type="button"
-      onClick={() => onRemove(person.id)}
-      disabled={disabled}
-      className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
-      aria-label={`Убрать: ${person.name}`}
-      title="Убрать с доски"
-    >
-      <X size={15} />
-    </button>
-  </li>
-);
+      <div className="min-w-0 grow basis-0 sm:flex sm:items-center sm:gap-3">
+        <span className="block min-w-0 sm:grow sm:basis-0">
+          <span className="block truncate text-[13.5px] font-medium text-slate-800">{person.name}</span>
+          <span className="block truncate text-[12px] text-slate-500">{facts.join(' · ') || '—'}</span>
+        </span>
+        <span className="mt-1.5 flex sm:mt-0 sm:shrink-0">
+          <IosSegmented
+            size="xs"
+            value={person.is_executor ? ROLE_EXECUTOR : ROLE_PARTICIPANT}
+            options={ROLE_OPTIONS}
+            onChange={(role) => { if (!disabled) onRole(person.id, role === ROLE_EXECUTOR); }}
+            ariaLabel={`Роль на доске: ${person.name}`}
+          />
+        </span>
+      </div>
+      <IosMenu
+        label={`Ещё: ${person.name}`}
+        disabled={disabled}
+        items={[
+          {
+            key: 'all',
+            label: 'Видит все задачи доски',
+            checked: !ownOnly,
+            onSelect: () => onLevel(person.id, 'member'),
+          },
+          {
+            key: 'own',
+            label: 'Видит только свои задачи',
+            checked: ownOnly,
+            onSelect: () => onLevel(person.id, 'board'),
+          },
+          {
+            key: 'remove',
+            label: 'Убрать с доски',
+            icon: X,
+            danger: true,
+            separatorBefore: true,
+            onSelect: () => onRemove(person.id),
+          },
+        ]}
+      />
+    </li>
+  );
+};
 
 const SectionRow = ({ section, index, total, onRename, onMove, onRemove, disabled }) => (
   <li className="flex items-center gap-1.5 px-2.5 py-1">
@@ -269,22 +321,27 @@ const ProjectEditor = ({ draft, setDraft, isCreate, issues, people, roleLabels, 
   ], [departments]);
 
   const patch = (next) => setDraft((prev) => ({ ...prev, ...next }));
+  /* Новый в составе — участник: исполнителей выбирают сами («их можно будет
+     выбирать, а остальные как участники»), иначе случайно добавленный попал бы
+     в «Все» при постановке задачи. */
+  const newMember = (person) => ({
+    id: Number(person.id),
+    name: person.name,
+    role: person.role,
+    department: person.department || '',
+    access_level: 'member',
+    is_executor: false,
+  });
   const addMember = (value) => {
     const person = peopleById.get(Number(value));
     if (!person || memberIds.has(Number(person.id))) return;
-    patch({
-      members: [...draft.members, {
-        id: Number(person.id),
-        name: person.name,
-        role: person.role,
-        department: person.department || '',
-        access_level: 'member',
-      }],
-    });
+    patch({ members: [...draft.members, newMember(person)] });
   };
-  const setLevel = (personId, level) => patch({
-    members: draft.members.map((person) => (person.id === personId ? { ...person, access_level: level } : person)),
+  const updateMember = (personId, changes) => patch({
+    members: draft.members.map((person) => (person.id === personId ? { ...person, ...changes } : person)),
   });
+  const setLevel = (personId, level) => updateMember(personId, { access_level: level });
+  const setRole = (personId, isExecutor) => updateMember(personId, { is_executor: isExecutor });
   const removeMember = (personId) => patch({ members: draft.members.filter((person) => person.id !== personId) });
 
   /* Сотрудники отдела доски, которых ещё нет в составе: одной кнопкой — участниками.
@@ -294,13 +351,7 @@ const ProjectEditor = ({ draft, setDraft, isCreate, issues, people, roleLabels, 
       && !memberIds.has(Number(person.id)))
     : []), [draft.departmentId, people, memberIds]);
   const addDepartmentStaff = () => patch({
-    members: [...draft.members, ...departmentStaff.map((person) => ({
-      id: Number(person.id),
-      name: person.name,
-      role: person.role,
-      department: person.department || '',
-      access_level: 'member',
-    }))],
+    members: [...draft.members, ...departmentStaff.map(newMember)],
   });
 
   const renameSection = (key, name) => patch({
@@ -377,13 +428,12 @@ const ProjectEditor = ({ draft, setDraft, isCreate, issues, people, roleLabels, 
         </div>
       </section>
 
-      <section className="space-y-1.5">
+      <section className="space-y-1.5" data-project-issue={issues.members ? 'members' : undefined}>
         <div className="flex items-center gap-1.5">
           <span className={iosGroupLabel}>Состав доски</span>
-          <InfoHint
-            side="left"
-            text="Участник видит все задачи проекта; сотрудник маркетинга — кроме задач своего руководителя, в которых сам не участвует. «Доска» — ставит задачи в проект и видит свои и те, где его добавили наблюдателем. Поручить задачу доски можно только людям из её состава. Работать с задачей — брать, сдавать, принимать — по-прежнему могут только её исполнители и поручитель."
-          />
+          <InfoHint side="left">
+            <InfoHintLines lines={MEMBERS_HINT_LINES} />
+          </InfoHint>
         </div>
         <div className={`${iosCard} overflow-hidden`}>
           <div className="p-3">
@@ -417,6 +467,7 @@ const ProjectEditor = ({ draft, setDraft, isCreate, issues, people, roleLabels, 
                   key={person.id}
                   person={{ ...person, department: person.department || peopleById.get(person.id)?.department || '' }}
                   roleLabels={roleLabels}
+                  onRole={setRole}
                   onLevel={setLevel}
                   onRemove={removeMember}
                   disabled={saving}
@@ -425,10 +476,11 @@ const ProjectEditor = ({ draft, setDraft, isCreate, issues, people, roleLabels, 
             </ul>
           ) : (
             <p className="border-t border-slate-100 px-4 py-6 text-center text-[12.5px] text-slate-500">
-              Пока задачи проекта видят только их участники и админы раздела.
+              Пока людей нет — задачу этой доски поручают как раньше, а видят её только постановщик, исполнители и админы раздела.
             </p>
           )}
         </div>
+        {issues.members && <span className="block px-1 text-[12px] text-rose-600">{issues.members}</span>}
       </section>
 
       <section className="space-y-1.5">
@@ -560,6 +612,8 @@ const TaskProjectsSheet = ({
     if (codeProblem) found.code = codeProblem;
     if (!issuesShown) return found;
     if (!String(draft.name || '').trim()) found.name = 'Укажите название';
+    const memberProblem = boardMembersIssue(draft.members, draft.isArchived);
+    if (memberProblem) found.members = memberProblem;
     const sectionProblem = sectionsIssue(draft.sections);
     if (sectionProblem) found.sections = sectionProblem;
     return found;
@@ -586,12 +640,27 @@ const TaskProjectsSheet = ({
       { code: draft.code, projectId: draft.id, refusal: codeRefusal, strict: true },
       projects
     );
-    if (!name || codeProblem || sectionsIssue(draft.sections)) return;
+    const membersProblem = boardMembersIssue(draft.members, draft.isArchived);
+    if (!name || codeProblem || membersProblem || sectionsIssue(draft.sections)) {
+      // Название и ключ — наверху окна, их видно и так; до состава внизу длинного
+      // окна прокручиваем, иначе «Сохранить» молча ничего не делал бы.
+      if (name && !codeProblem && membersProblem) {
+        requestAnimationFrame(() => {
+          document.querySelector('[data-project-issue="members"]')
+            ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        });
+      }
+      return;
+    }
     const codeChanged = !isCreate && draft.code !== draft.originalCode;
     const payload = {
       name,
       department_id: draft.departmentId ? Number(draft.departmentId) : null,
-      members: draft.members.map((person) => ({ user_id: person.id, access_level: person.access_level })),
+      members: draft.members.map((person) => ({
+        user_id: person.id,
+        access_level: person.access_level,
+        is_executor: Boolean(person.is_executor),
+      })),
       sections: draft.sections.map((section) => (
         section.id ? { id: section.id, name: section.name.trim() } : { name: section.name.trim() }
       )),

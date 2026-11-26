@@ -56,6 +56,7 @@ BASE_DDL = f'''
                                 department_id integer, is_archived boolean NOT NULL DEFAULT FALSE);
     CREATE TABLE task_project_members (project_id integer NOT NULL, user_id integer NOT NULL,
                                        access_level text NOT NULL, added_by integer,
+                                       is_executor boolean NOT NULL DEFAULT FALSE,
                                        PRIMARY KEY (project_id, user_id));
     CREATE TABLE task_project_sections (id integer PRIMARY KEY, project_id integer NOT NULL,
                                         name text NOT NULL, position integer NOT NULL DEFAULT 0);

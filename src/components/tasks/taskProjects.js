@@ -5,8 +5,10 @@
  * проекта, и по ключу HR-125 сразу видно, чья она. Глобальный номер задачи при
  * этом остаётся — на него ссылаются Telegram, CLI и старые ссылки.
  *
- * Кто что видит, решает сервер (task_projects.py): участник проекта видит все
- * его задачи, доступ «доска» — свои и те, где человек наблюдатель. Здесь —
+ * Кто что видит, решает сервер (task_projects.py): человек в составе доски видит
+ * все её задачи, а с отметкой «только свои» — свои и те, где он наблюдатель.
+ * Кому ставят задачи доски, решает роль в составе: исполнитель или участник
+ * (26.11.2026). Здесь —
  * только правила экрана: что уходит в запрос, какая доска выбрана на входе,
  * какой проект подставить в форму. Вынесено модулем, чтобы гонять тестами
  * (tests/task_projects.test.mjs): ошибка в них выглядит как «раздел открылся
@@ -148,9 +150,10 @@ export const findProject = (projects, projectId) => {
 };
 
 /**
- * Кого можно позвать наблюдателем: тех, у кого к доске доступ «доска». Участник
- * проекта и так видит все его задачи — звать его наблюдателем незачем, а
- * исполнители и постановщик видят задачу по своей роли.
+ * Кого можно позвать наблюдателем: тех, кто видит на доске только свои задачи
+ * (уровень board — и исполнителя, и участника). Кто видит все задачи доски, тот
+ * увидит и эту — звать его наблюдателем незачем, а исполнители задачи и
+ * постановщик видят её по своей роли.
  */
 export const watcherCandidates = (project, excludeIds = []) => {
   const excluded = new Set((excludeIds || []).map((id) => String(id)));
@@ -164,27 +167,106 @@ export const keepWatchersForProject = (watcherIds, project) => {
   return (Array.isArray(watcherIds) ? watcherIds : []).filter((id) => allowed.has(String(id)));
 };
 
-/* ─── Люди доски для постановки (владелец 24.11.2026) ───
-   «По каждой доске должна быть своя привязка» и «если человека нет в данном
-   проекте, зачем выводить его в исполнителях». Задачу доски поручают только
-   людям из её состава, любого уровня; отдельную отметку исполнителей владелец
-   убрал («отдельно выбирать не нужно»). Доска совсем без людей — как раньше, все,
-   кому вы вправе поручать: иначе на неё не поставить ни одной задачи. Сервер
-   держит то же правило (task_projects.py, _task_project_assignable_ids_tx). */
+/* ─── Исполнители и участники доски (владелец 26.11.2026) ───
+   «У каждой доски свои исполнители, их можно выбирать, а остальные как
+   участники». В составе доски у каждого роль: исполнитель — ему ставят задачи
+   доски; участник — видит её задачи и ставит их, но исполнителем его не выбрать.
+   Доска совсем без людей — как раньше, все, кому вы вправе поручать: иначе на неё
+   не поставить ни одной задачи. Доска с людьми, но без исполнителей, задачу не
+   примет — поручать некому. Сервер держит то же правило (task_projects.py,
+   _task_project_assignable_ids_tx). */
 
 const byName = (left, right) => String(left?.name || '').localeCompare(String(right?.name || ''), 'ru');
 
-/** Кому ставят задачи доски: её состав по имени. Пусто — у доски нет людей. */
-export const boardAssignees = (project) => (Array.isArray(project?.members) ? project.members : [])
-  .filter((person) => Number(person?.id) > 0)
-  .slice()
-  .sort(byName);
-
-/** Поручить задачу доски можно только её людям. */
-export const hasBoardAssignees = (project) => boardAssignees(project).length > 0;
+const boardMembers = (project) => (Array.isArray(project?.members) ? project.members : [])
+  .filter((person) => Number(person?.id) > 0);
 
 /**
- * Кого ставит «Все»: каждого из людей доски, кроме постановщика. Себя
+ * Состав с ролью у каждого. Сервер до 26.11.2026 роли не присылает — тогда, как и
+ * было у него, исполнители доски — весь её состав. Сайт (Pages) выкладывается
+ * раньше сервера: без этого в окне между ними все доски показали бы «нет
+ * исполнителей», и задачу доски нельзя было бы поставить никому.
+ */
+export const withBoardRoles = (members) => {
+  const list = Array.isArray(members) ? members : [];
+  const rolesKnown = list.some((person) => typeof person?.is_executor === 'boolean');
+  return list.map((person) => ({ ...person, is_executor: rolesKnown ? Boolean(person?.is_executor) : true }));
+};
+
+/** У доски есть люди: тогда поручают только её исполнителям, а без людей — как раньше. */
+export const hasBoardPeople = (project) => boardMembers(project).length > 0;
+
+/** Кому ставят задачи доски: её исполнители по имени. */
+export const boardAssignees = (project) => withBoardRoles(boardMembers(project))
+  .filter((person) => person.is_executor)
+  .sort(byName);
+
+/** У доски есть кому поручить её задачи. */
+export const hasBoardAssignees = (project) => boardAssignees(project).length > 0;
+
+/** У доски есть люди, но нет исполнителей — её задачу поручить некому. */
+export const boardWithoutExecutors = (project) => hasBoardPeople(project) && !hasBoardAssignees(project);
+
+/** Сколько в составе исполнителей и участников — для строки доски в окне «Проекты». */
+export const boardRoleCounts = (members) => {
+  const list = withBoardRoles((Array.isArray(members) ? members : []).filter((person) => Number(person?.id) > 0));
+  const executors = list.filter((person) => person.is_executor).length;
+  return { executors, participants: list.length - executors };
+};
+
+/**
+ * Состав в окне «Проекты»: исполнители сверху, дальше участники, внутри по имени.
+ * Порядок ставится один раз, при открытии доски: смена роли строку с места не
+ * двигает, иначе она уезжала бы из-под курсора.
+ */
+export const orderBoardMembers = (members) => (Array.isArray(members) ? members : [])
+  .slice()
+  .sort((left, right) => Number(Boolean(right?.is_executor)) - Number(Boolean(left?.is_executor))
+    || byName(left, right));
+
+export const pluralRu = (count, one, few, many) => {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+};
+
+/**
+ * Подпись доски в списке окна «Проекты»: отдел, исполнители, участники, разделы,
+ * задачи. missingExecutors — люди у доски есть, а исполнителей нет (и она не в
+ * архиве): это главное, что о ней надо знать, — экран говорит это красным.
+ */
+export const projectListFacts = (project) => {
+  const { executors, participants } = boardRoleCounts(project?.members);
+  const taskCount = Number(project?.task_count || 0);
+  const sectionCount = Array.isArray(project?.sections) ? project.sections.length : 0;
+  const facts = [
+    project?.department_name || 'Без отдела',
+    executors
+      ? `${executors} ${pluralRu(executors, 'исполнитель', 'исполнителя', 'исполнителей')}`
+      : (participants ? '' : 'без состава'),
+    participants ? `${participants} ${pluralRu(participants, 'участник', 'участника', 'участников')}` : '',
+    sectionCount ? `${sectionCount} ${pluralRu(sectionCount, 'раздел', 'раздела', 'разделов')}` : '',
+    taskCount ? `${taskCount} ${pluralRu(taskCount, 'задача', 'задачи', 'задач')}` : '',
+  ].filter(Boolean);
+  return { facts, missingExecutors: !executors && participants > 0 && !project?.is_archived };
+};
+
+/**
+ * Что не так с составом в окне «Проекты»: люди у доски есть, а исполнителей нет —
+ * её задачи некому поручить, участники исполнителями не становятся. Доску без
+ * людей (поручают как раньше) и архивную (новых задач в неё не ставят) это не
+ * касается. '' — всё в порядке.
+ */
+export const boardMembersIssue = (members, isArchived = false) => {
+  const { executors, participants } = boardRoleCounts(members);
+  if (isArchived || executors || !participants) return '';
+  return 'Выберите хотя бы одного исполнителя — задачи доски ставят только исполнителям';
+};
+
+/**
+ * Кого ставит «Все»: каждого из исполнителей доски, кроме постановщика. Себя
  * исполнителем делают кнопкой «Себе»: задача, где постановщик среди исполнителей,
  * считается его собственной инициативой. allowedIds — сужение (у «Продакшна»
  * исполнители только из маркетинга); null — без сужения.
@@ -193,18 +275,18 @@ export const allBoardAssigneeIds = (project, { currentUserId = 0, allowedIds = n
   .map((person) => String(person.id))
   .filter((id) => id !== String(currentUserId || '') && (!allowedIds || allowedIds.has(id)));
 
-/** Исполнители задачи, которые остаются при смене доски: только люди новой доски. */
+/** Исполнители задачи, которые остаются при смене доски: только исполнители новой доски. */
 export const keepAssigneesForProject = (assigneeIds, project) => {
   const list = Array.isArray(assigneeIds) ? assigneeIds.map(String) : [];
-  if (!hasBoardAssignees(project)) return list;
+  if (!hasBoardPeople(project)) return list;
   const allowed = new Set(boardAssignees(project).map((person) => String(person.id)));
   return list.filter((id) => allowed.has(id));
 };
 
 /**
- * Задача поставлена всем людям доски: в составе каждый из «Все» и никого сверх
- * них (кроме самого постановщика). Так форма правки узнаёт, какой сегмент
- * показать. Выбор «Все» есть, только когда людей у доски хотя бы двое.
+ * Задача поставлена всем исполнителям доски: в составе каждый из «Все» и никого
+ * сверх них (кроме самого постановщика). Так форма правки узнаёт, какой сегмент
+ * показать. Выбор «Все» есть, только когда исполнителей у доски хотя бы двое.
  */
 export const isAllBoardAssigneesSelection = (assigneeIds, project, { currentUserId = 0, allowedIds = null } = {}) => {
   const everyone = allBoardAssigneeIds(project, { currentUserId, allowedIds });
@@ -217,10 +299,10 @@ export const isAllBoardAssigneesSelection = (assigneeIds, project, { currentUser
 /**
  * Исполнители после смены доски — для выбора человеком и для доски, которую
  * форма подставила сама. «Все» остаётся «всеми» уже новой доски; у доски без
- * выбора «Все» форма возвращается к выбору людей с чистым полем (люди чужой доски
- * могли быть и не из тех, кому вы ставите задачи). Выбранные поштучно остаются,
- * если они люди новой доски, а у доски без людей — если они среди тех, кому вы
- * вправе поручать (recipientIds; null — не сверяем).
+ * выбора «Все» форма возвращается к выбору людей с чистым полем (исполнители
+ * чужой доски могли быть и не из тех, кому вы ставите задачи). Выбранные поштучно
+ * остаются, если они исполнители новой доски, а у доски без людей — если они
+ * среди тех, кому вы вправе поручать (recipientIds; null — не сверяем).
  */
 export const assigneesAfterProjectChange = (values, project, {
   currentUserId = 0, allowedIds = null, recipientIds = null,
@@ -230,13 +312,13 @@ export const assigneesAfterProjectChange = (values, project, {
   if (values?.assignAll) {
     const everyone = allBoardAssigneeIds(project, { currentUserId, allowedIds });
     if (everyone.length >= 2) {
-      // «Себе» переживает смену доски, если вы из людей и новой доски.
+      // «Себе» переживает смену доски, если вы и на новой доске исполнитель.
       const keepMe = current.includes(me) && boardAssignees(project).some((person) => String(person.id) === me);
       return { assignAll: true, assigneeIds: keepMe ? [...everyone, me] : everyone };
     }
     return { assignAll: false, assigneeIds: [] };
   }
-  if (hasBoardAssignees(project) || !recipientIds) {
+  if (hasBoardPeople(project) || !recipientIds) {
     return { assignAll: false, assigneeIds: keepAssigneesForProject(current, project) };
   }
   return { assignAll: false, assigneeIds: current.filter((id) => recipientIds.has(id)) };
