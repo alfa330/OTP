@@ -103,7 +103,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'hh/1.4.0'
+VERSION = 'hh/1.4.1'
 log = logging.getLogger('cdr_bridge.hh_bridge')
 
 PUSH_PATH = '/api/hiring/hh/agent/push'
@@ -280,6 +280,24 @@ def counts_fingerprint(payload):
                        'unread': counts.get('totalUnreadCandidatesByEmployerState')}, sort_keys=True)
 
 
+def _digits(value):
+    return re.sub(r'\D', '', str(value)) if isinstance(value, (str, int)) and not isinstance(value, bool) else ''
+
+
+def phone_text(item):
+    """Телефон hh → полный номер строкой или None. В выдаче откликов formatted — уже весь номер («+7 (701) 234-56-78»),
+    а на странице резюме (проба 26.11) — только местная часть: formatted «123-45-67», код страны и города — рядом, в
+    country и city. Местную часть без кода портал не примет — номер собирается из трёх частей."""
+    if not isinstance(item, dict):
+        return None
+    for key in ('formatted', 'raw'):
+        if len(_digits(item.get(key))) >= 10:
+            return _clip(item.get(key), 40)
+    local = next((_digits(item.get(key)) for key in ('number', 'formatted', 'raw') if len(_digits(item.get(key))) >= 5), '')
+    digits = _digits(item.get('country')) + _digits(item.get('city')) + local
+    return '+' + digits if local and 10 <= len(digits) <= 15 else None
+
+
 def _first(resume, field):
     """Поле резюме из выдачи откликов: [{"string": "…"}] → значение."""
     values = resume.get(field)
@@ -320,7 +338,7 @@ def items_from_page(payload, vacancy):
             'last_name': _first(resume, 'lastName'),
             'first_name': _first(resume, 'firstName'),
             'middle_name': _first(resume, 'middleName'),
-            'phone': phone.get('formatted') or phone.get('raw') or None,
+            'phone': phone_text(phone),
             'city': area.get('trl') or None,
             'resume_hash': attributes.get('hash'),
         })
@@ -532,16 +550,18 @@ def contacts_from_state(state):
     resume = (state or {}).get('resume') if isinstance(state, dict) else None
     if not isinstance(resume, dict):
         return None
-    names = {key: _clip(_value(resume.get(field)), 80)
-             for key, field in (('last_name', 'lastName'), ('first_name', 'firstName'), ('middle_name', 'middleName'))}
+    def name(field):
+        value = _value(resume.get(field))
+        if isinstance(value, list):   # в JSON резюме (/shards/resume) имя — [{"string": "…"}]
+            value = _strings(value)[0] if _strings(value) else None
+        return _clip(value, 80)
+
+    names = {key: name(field) for key, field in (('last_name', 'lastName'), ('first_name', 'firstName'),
+                                                  ('middle_name', 'middleName'))}
     phones = []
     for item in _value(resume.get('phone')) or []:
-        if not isinstance(item, dict):
-            continue
-        text = item.get('formatted') or item.get('raw') or ''.join(
-            str(item.get(part) or '') for part in ('country', 'city', 'number'))
-        text = _clip(text, 40)
-        if text and re.search(r'\d{6}', re.sub(r'\D', '', text)):
+        text = phone_text(item)
+        if text and text not in phones:
             phones.append(text)
     email = _value(resume.get('email'))
     email = _clip(email, 120) if isinstance(email, str) and '@' in email else None

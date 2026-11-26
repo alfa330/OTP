@@ -583,7 +583,9 @@ def base_resume_page(resume_hash, opened=False):
                                   'viewStatus': 'OPENED' if opened else 'DENIED_NO_FA'},
         'firstName': wrapped('Анна' if opened else None, 'field'), 'lastName': wrapped('Иванова' if opened else None, 'field'),
         'middleName': wrapped(None, 'field'),
-        'phone': wrapped([{'city': '707', 'raw': None, 'country': '7', 'number': '1234567', 'formatted': '77071234567'}]
+        # Форма — как у живой страницы 26.11: в formatted только местная часть, код страны и города — рядом.
+        'phone': wrapped([{'city': '707', 'raw': None, 'type': 'cell', 'number': None, 'comment': None, 'country': '7',
+                           'verified': True, 'formatted': '123-45-67', 'needVerification': None, 'canVerify': False}]
                          if opened else None, 'field'),
         'email': wrapped('anna@example.kz' if opened else None, 'field'),
         'birthday': wrapped('1999-12-17', 'field'),
@@ -645,9 +647,28 @@ class HhBaseBridgeTests(unittest.TestCase):
         self.assertEqual(hh_bridge.access_from_state(closed), 'closed')
         opened = hh_bridge.initial_state(base_resume_page('d' * 38, opened=True))
         self.assertEqual(hh_bridge.contacts_from_state(opened), {'last_name': 'Иванова', 'first_name': 'Анна',
-                                                                 'middle_name': None, 'phones': ['77071234567'],
+                                                                 'middle_name': None, 'phones': ['+77071234567'],
                                                                  'email': 'anna@example.kz'})
         self.assertEqual(hh_bridge.access_from_state(opened), 'opened')
+
+    def test_phone_is_assembled_from_country_city_and_local_part(self):
+        """Живой случай 26.11: кандидат открыт, а в карточку шло «нет казахстанского телефона» — мост отдавал только
+        местные 7 цифр. Полный номер в formatted (выдача откликов) — как есть; мусор — None."""
+        phone = hh_bridge.phone_text
+        self.assertEqual(phone({'country': '7', 'city': '707', 'formatted': '123-45-67', 'number': None}), '+77071234567')
+        self.assertEqual(phone({'country': '7', 'city': '701', 'number': '1234567', 'formatted': None}), '+77011234567')
+        self.assertEqual(phone({'formatted': '+7 (701) 555-00-01', 'raw': '7701555'}), '+7 (701) 555-00-01')
+        self.assertEqual(phone({'raw': '77015550001'}), '77015550001')
+        for bad in ({'country': '7', 'city': None, 'formatted': None}, {'formatted': '12-34'}, None, 'строка',
+                    {'country': True, 'city': '707', 'formatted': '123'}):
+            self.assertIsNone(phone(bad), bad)
+        state = {'resume': {'firstName': [{'string': 'Анна'}], 'lastName': {'value': [{'string': 'Иванова'}], 'type': 'list'},
+                            'phone': {'value': [{'country': '7', 'city': '707', 'formatted': '123-45-67'},
+                                                {'country': '7', 'city': '707', 'formatted': '123 45 67'}], 'type': 'list'}}}
+        contacts = hh_bridge.contacts_from_state(state)
+        self.assertEqual((contacts['first_name'], contacts['last_name'], contacts['phones']), ('Анна', 'Иванова', ['+77071234567']))
+        rules_phone = __import__('hiring.rules', fromlist=['normalize_phone']).normalize_phone
+        self.assertEqual(rules_phone(contacts['phones'][0]), '+77071234567')
 
     def test_tasks_search_resume_and_contacts(self):
         bridge = self.bridge()
@@ -668,7 +689,7 @@ class HhBaseBridgeTests(unittest.TestCase):
         self.assertEqual(searches[0], {'text': 'оператор', 'area': '160', 'search_period': '3', 'order_by': 'publication_time'})
         done = {item['id']: item for payload in self.portal.task_payloads for item in payload['done']}
         self.assertEqual((done['1']['ok'], done['1']['total'], done['1']['pages'], len(done['1']['items'])), (True, 6472, 3, 60))
-        self.assertEqual(done['2']['contacts']['phones'], ['77071234567'])
+        self.assertEqual(done['2']['contacts']['phones'], ['+77071234567'])
         self.assertEqual((done['2']['access'], done['2']['reason']), ('opened', 'contacts'))
         self.assertNotIn('contacts', done['3'])                      # при просмотре контакты не берутся
         self.assertEqual(done['3']['resume']['languages'], [{'title': 'Казахский', 'degree': 'b2'}])
