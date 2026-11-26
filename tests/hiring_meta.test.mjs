@@ -15,8 +15,20 @@ import {
     hhMoney, hhPeriod, hhResumeSummary, hhSpan,
     HH_KEYWORDS_MAX, hhAddKeywords, hhBaseExperience, hhBaseLine, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseTone,
     hhSearchBody, HH_RESUME_PARAM, hhResumeFromSearch, hhResumeLink, hhBaseName, hhBaseSubline, hhBaseFunnelState,
-    boardCardDay,
+    boardCardDay, hhBaseCanReject,
 } from '../src/components/hiring/hiringMeta.js';
+
+test('hh base «Не подходит»: new for anyone, taking for the one taking and the lead, never taken or rejected', () => {
+    assert.equal(hhBaseCanReject({ status: 'new' }, 10), true);
+    assert.equal(hhBaseCanReject({ status: 'new', known: { is_closed: false } }, 10), true);
+    assert.equal(hhBaseCanReject({ status: 'taking', status_by: 10 }, 10), true);
+    assert.equal(hhBaseCanReject({ status: 'taking', status_by: '10' }, 10), true);
+    assert.equal(hhBaseCanReject({ status: 'taking', status_by: 11 }, 10), false);
+    assert.equal(hhBaseCanReject({ status: 'taking', status_by: 11 }, 10, true), true);    // руководитель
+    assert.equal(hhBaseCanReject({ status: 'taken', status_by: 10 }, 10, true), false);
+    assert.equal(hhBaseCanReject({ status: 'rejected' }, 10, true), false);
+    assert.equal(hhBaseCanReject(null, 10), false);
+});
 
 test('board card date: received for the pool, the day of taking for cards in work', () => {
     const card = { received_at: '2026-11-20T09:15:00', taken_at: '2026-11-26T11:46:00' };

@@ -341,6 +341,14 @@ export const hhBaseFunnelState = (known) => {
     return { tone, text: [stage, sub, number].filter(Boolean).join(' · ') };
 };
 
+/** Можно ли отметить «Не подходит» (владелец 26.11.2026: «кнопка не подошел почему то отображается не у всех
+ *  карточек»): нового — любому, кого берут — тому, кто берёт, и руководителю; взятого ведут в воронке, отклонённого — нет. */
+export const hhBaseCanReject = (item, meId, manage = false) => {
+    if (!item) return false;
+    if (item.status === 'new') return true;
+    return item.status === 'taking' && (Boolean(manage) || (meId != null && Number(item.status_by) === Number(meId)));
+};
+
 /** Состояние кандидата словом и цветом точки — одно, самое важное. */
 export const hhBaseState = (item, meId) => {
     if (!item) return null;

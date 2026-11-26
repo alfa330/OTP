@@ -8,7 +8,7 @@ import { runSseStream } from '../common/sseClient';
 import { HhResume } from './HhResume';
 import { Empty, Loading, Notice } from './hiringUi';
 import {
-    errorOf, hhAddKeywords, hhBaseExperience, hhBaseName, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseSubline,
+    errorOf, hhAddKeywords, hhBaseCanReject, hhBaseExperience, hhBaseName, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseSubline,
     hhBaseTone, hhResumeLink, hhSearchBody, longTime, plural,
 } from './hiringMeta';
 
@@ -365,7 +365,8 @@ const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCar
                 Открыть карточку{cardNo ? ` №${cardNo}` : ''}
             </button>);
         }
-        if (item.status === 'new') {
+        // «Не подходит» — и у того, кого сам берёшь (владелец 26.11.2026): ожидание контактов тогда снимается.
+        if (hhBaseCanReject(item, meId, caps.manage)) {
             buttons.push(<button key="reject" type="button" className={iosBtnSecondary} disabled={busy} onClick={() => setStatus('rejected')}>Не подходит</button>);
         }
         if (item.status === 'rejected' || (item.status === 'taking' && (mineTaking || caps.manage))) {
