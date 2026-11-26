@@ -673,6 +673,239 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
 };
 
 
+/* Пункты меню — общие у IosMenu и IosMenuPopover: один вид на весь портал.
+   disabled — пункт виден, но погашен (например, «Переместить вверх» у первой
+   строки таблицы): спрятанный пункт заставляет искать, куда он делся.
+   keepFocus — нажатие не уводит фокус с того, что было в фокусе до меню:
+   меню у таблицы в редакторе работает с выделением в тексте, и потерять
+   фокус значило бы потерять это выделение до того, как пункт сработает. */
+export const IosMenuItems = ({ items, onPick, keepFocus = false, activeKey = null }) => items.map((item) => {
+    const { key, label: text, icon: Icon, danger, hint, separatorBefore, checked, disabled, segments } = item;
+    const active = activeKey != null && key === activeKey;
+    /* Пункт-ряд: подпись слева, справа несколько кнопок-значков (segments:
+       [{ key, label, icon, onSelect, checked?, disabled? }]). Для связанных
+       действий, которые иначе заняли бы по строке каждое: «Переместить ↑ ↓»,
+       «Положение ⫷ ≡ ⫸». Выбранная кнопка — голубая, как выбор на всём сайте. */
+    if (segments) {
+        return (
+            <React.Fragment key={key}>
+                {separatorBefore && <div className="my-1.5 h-px bg-slate-200/70" />}
+                <div className="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-1 text-left text-[13.5px] text-slate-800">
+                    {Icon && <Icon size={15} className="text-slate-400" />}
+                    <span className="min-w-0 flex-1 truncate">{text}</span>
+                    <div className="flex shrink-0 items-center gap-0.5">
+                        {segments.map((segment) => {
+                            const SegmentIcon = segment.icon;
+                            return (
+                                <button
+                                    key={segment.key}
+                                    type="button"
+                                    title={segment.label}
+                                    aria-label={segment.label}
+                                    aria-pressed={segment.checked === undefined ? undefined : Boolean(segment.checked)}
+                                    disabled={segment.disabled}
+                                    onMouseDown={keepFocus ? (e) => e.preventDefault() : undefined}
+                                    onClick={() => onPick(segment)}
+                                    className={`grid h-7 w-7 place-items-center rounded-lg transition disabled:pointer-events-none disabled:opacity-30 ${
+                                        segment.checked ? 'bg-blue-50 text-blue-600' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                                    }`}
+                                >
+                                    {SegmentIcon && <SegmentIcon size={15} />}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            </React.Fragment>
+        );
+    }
+    return (
+        <React.Fragment key={key}>
+            {separatorBefore && <div className="my-1.5 h-px bg-slate-200/70" />}
+            <button
+                type="button"
+                role={checked === undefined ? 'menuitem' : 'menuitemradio'}
+                aria-checked={checked === undefined ? undefined : checked}
+                disabled={disabled}
+                onMouseDown={keepFocus ? (e) => e.preventDefault() : undefined}
+                onClick={() => onPick(item)}
+                className={`flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[13.5px] transition disabled:pointer-events-none disabled:opacity-40 ${
+                    danger
+                        ? `text-rose-600 hover:bg-rose-50${active ? ' bg-rose-50' : ''}`
+                        : `text-slate-800 hover:bg-slate-100${active ? ' bg-slate-100' : ''}`
+                }`}
+            >
+                {Icon && <Icon size={15} className={danger ? 'text-rose-500' : 'text-slate-400'} />}
+                <span className="min-w-0 flex-1 truncate">{text}</span>
+                {hint && <span className="shrink-0 text-[11.5px] text-slate-400">{hint}</span>}
+                {checked && (
+                    <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true" className="shrink-0 text-blue-600">
+                        <path d="M5 10l3 3 7-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                )}
+            </button>
+        </React.Fragment>
+    );
+});
+
+const MENU_WIDTH = 232;
+const menuHeight = (count, separators) => count * 40 + separators * 13 + 12;
+
+/* То же меню, но открытое от любого элемента на странице, а не от своей
+ * кнопки «···». Нужно там, где точку входа рисует не React: ручки строк и
+ * столбцов таблицы в редакторе статьи — это виджеты ProseMirror внутри ячеек.
+ *
+ * anchor — элемент, от которого меню открывается; меню встаёт под ним (или
+ * над ним, если снизу не хватает места). Закрывается как IosMenu: щелчком
+ * мимо, Escape, прокруткой и сменой размера окна — «приклеенное» меню над
+ * уехавшей строкой показывало бы на чужую строку. */
+export const IosMenuPopover = ({ open, anchor, items = [], onClose, label = 'Действия', align = 'left', side = 'bottom', keepFocus = false }) => {
+    const [coords, setCoords] = React.useState(null);
+    // Пункт, выбранный стрелками (ключ), — фокус при keepFocus остаётся там,
+    // откуда меню открыли, поэтому «выбранный» пункт меню держит само.
+    const [activeKey, setActiveKey] = React.useState(null);
+    const popRef = React.useRef(null);
+    const shown = items.filter(Boolean);
+    const separators = shown.filter((item) => item.separatorBefore).length;
+    const shownRef = React.useRef(shown);
+    shownRef.current = shown;
+    const activeRef = React.useRef(activeKey);
+    activeRef.current = activeKey;
+
+    React.useEffect(() => { setActiveKey(null); }, [open, anchor]);
+
+    const recompute = React.useCallback(() => {
+        const r = anchor?.getBoundingClientRect?.();
+        if (!r || (!r.width && !r.height)) {
+            setCoords(null);
+            return;
+        }
+        const height = menuHeight(shown.length, separators);
+        /* side="right" — сбоку от точки, как контекстное меню: для ручки строки
+           меню над ней или под ней закрывало бы соседние строки и панель
+           инструментов, а сбоку ложится на саму таблицу. */
+        if (side === 'right') {
+            setCoords({
+                width: MENU_WIDTH,
+                left: Math.max(8, Math.min(window.innerWidth - MENU_WIDTH - 8, Math.round(r.right + 6))),
+                top: Math.max(8, Math.min(window.innerHeight - height - 8, Math.round(r.top - 6))),
+                bottom: undefined,
+            });
+            return;
+        }
+        const spaceBelow = window.innerHeight - r.bottom;
+        const openUp = spaceBelow < height + 16 && r.top > spaceBelow;
+        setCoords({
+            width: MENU_WIDTH,
+            left: align === 'right'
+                ? Math.max(8, Math.round(r.right - MENU_WIDTH))
+                : Math.max(8, Math.min(window.innerWidth - MENU_WIDTH - 8, Math.round(r.left))),
+            top: openUp ? undefined : Math.round(r.bottom + 6),
+            bottom: openUp ? Math.round(window.innerHeight - r.top + 6) : undefined,
+        });
+    }, [anchor, align, side, shown.length, separators]);
+
+    useIsoLayoutEffect(() => {
+        if (open) recompute();
+        else setCoords(null);
+    }, [open, recompute]);
+
+    /* onClose(reason, event): 'pick' — выбран пункт, 'escape', 'key' — нажата
+       другая клавиша (только при keepFocus), 'outside' — щелчок мимо,
+       'scroll'. Причина нужна тому, кто открыл меню от выделения: закрыть
+       его щелчком по другому месту и закрыть клавишей — разные намерения. */
+    React.useEffect(() => {
+        if (!open) return undefined;
+        const onDoc = (e) => {
+            if (popRef.current?.contains(e.target) || anchor?.contains?.(e.target)) return;
+            onClose?.('outside', e);
+        };
+        const onKey = (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                onClose?.('escape', e);
+                return;
+            }
+            /* Стрелки — по пунктам, Enter или пробел — нажать выбранный. Без
+               выбранного пункта Enter меню просто закрывает: при keepFocus он
+               иначе ушёл бы в редактор и разрезал абзац под меню. */
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                e.stopPropagation();
+                // Пункты-ряды (segments) — только мышью: у них не одно действие.
+                const enabled = shownRef.current.filter((item) => !item.disabled && !item.segments);
+                if (!enabled.length) return;
+                const at = enabled.findIndex((item) => item.key === activeRef.current);
+                const step = e.key === 'ArrowDown' ? 1 : -1;
+                const next = at < 0 ? (step > 0 ? 0 : enabled.length - 1) : (at + step + enabled.length) % enabled.length;
+                setActiveKey(enabled[next].key);
+                return;
+            }
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                const item = shownRef.current.find((entry) => entry.key === activeRef.current
+                    && !entry.disabled && !entry.segments);
+                if (!item) {
+                    onClose?.('escape', e);
+                    return;
+                }
+                onClose?.('pick', e);
+                item.onSelect?.();
+                return;
+            }
+            /* При keepFocus клавиши уходят не в меню, а туда, где остался
+               фокус (в редактор), — и печатать «сквозь» открытое меню нельзя:
+               меню осталось бы висеть над уже изменённым текстом. */
+            if (keepFocus && !['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) onClose?.('key', e);
+        };
+        const onScroll = (e) => {
+            if (popRef.current?.contains(e.target)) return;
+            onClose?.('scroll', e);
+        };
+        const onResize = (e) => onClose?.('scroll', e);
+        document.addEventListener('mousedown', onDoc);
+        document.addEventListener('keydown', onKey, true);
+        window.addEventListener('scroll', onScroll, true);
+        window.addEventListener('resize', onResize);
+        return () => {
+            document.removeEventListener('mousedown', onDoc);
+            document.removeEventListener('keydown', onKey, true);
+            window.removeEventListener('scroll', onScroll, true);
+            window.removeEventListener('resize', onResize);
+        };
+    }, [open, anchor, onClose, keepFocus]);
+
+    if (!open || !coords || !shown.length) return null;
+
+    return createPortal(
+        <div
+            ref={popRef}
+            role="menu"
+            aria-label={label}
+            style={{
+                position: 'fixed',
+                left: coords.left,
+                width: coords.width,
+                top: coords.top,
+                bottom: coords.bottom,
+                zIndex: 99999,
+                fontFamily: APPLE_FONT,
+            }}
+            className="overflow-hidden rounded-2xl bg-white/95 p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.18)] ring-1 ring-slate-200/80 backdrop-blur-xl motion-safe:animate-popover-in"
+        >
+            <IosMenuItems
+                items={shown}
+                keepFocus={keepFocus}
+                activeKey={activeKey}
+                onPick={(item) => { onClose?.('pick'); item.onSelect?.(); }}
+            />
+        </div>,
+        document.body,
+    );
+};
+
 /**
  * Меню действий за «тремя точками» — как в macOS/iOS.
  *
@@ -686,7 +919,7 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
  * с overflow-hidden, и вложенное меню она бы обрезала. Механика позиционирования
  * повторяет CustomSelect — общий приём раздела, а не второй способ делать то же.
  *
- * items: [{ key, label, icon, onSelect, danger?, hint?, separatorBefore?, checked? }]
+ * items: [{ key, label, icon, onSelect, danger?, hint?, separatorBefore?, checked?, disabled?, segments? }]
  *
  * checked — меню выбора одного из нескольких (тема чатов): у пунктов с этим
  * полем роль menuitemradio, у выбранного синяя галочка справа.
@@ -803,31 +1036,7 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
                     }}
                     className="overflow-hidden rounded-2xl bg-white/95 p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.18)] ring-1 ring-slate-200/80 backdrop-blur-xl motion-safe:animate-popover-in"
                 >
-                    {shown.map(({ key, label: text, icon: Icon, onSelect, danger, hint, separatorBefore, checked }) => (
-                        <React.Fragment key={key}>
-                            {separatorBefore && <div className="my-1.5 h-px bg-slate-200/70" />}
-                            <button
-                                type="button"
-                                role={checked === undefined ? 'menuitem' : 'menuitemradio'}
-                                aria-checked={checked === undefined ? undefined : checked}
-                                onClick={() => { setOpen(false); onSelect?.(); }}
-                                className={`flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[13.5px] transition ${
-                                    danger
-                                        ? 'text-rose-600 hover:bg-rose-50'
-                                        : 'text-slate-800 hover:bg-slate-100'
-                                }`}
-                            >
-                                {Icon && <Icon size={15} className={danger ? 'text-rose-500' : 'text-slate-400'} />}
-                                <span className="min-w-0 flex-1 truncate">{text}</span>
-                                {hint && <span className="shrink-0 text-[11.5px] text-slate-400">{hint}</span>}
-                                {checked && (
-                                    <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true" className="shrink-0 text-blue-600">
-                                        <path d="M5 10l3 3 7-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                    </svg>
-                                )}
-                            </button>
-                        </React.Fragment>
-                    ))}
+                    <IosMenuItems items={shown} onPick={(item) => { setOpen(false); item.onSelect?.(); }} />
                 </div>,
                 document.body,
             )}

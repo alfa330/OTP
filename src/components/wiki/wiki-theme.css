@@ -646,7 +646,8 @@
 }
 
 .wiki-table-scroll > table,
-.wiki-prose .tableWrapper > table {
+.wiki-prose .tableWrapper > table,
+.wiki-prose .wiki-table-frame > table {
     margin: 0;
 }
 
@@ -666,17 +667,24 @@
     background: rgba(15, 23, 42, 0.35);
 }
 
-/* Шапка таблицы набрана как ПОДПИСЬ, а не как обычная ячейка: разрядка и
-   верхний регистр отделяют её от данных надёжнее, чем полутон заливки, —
-   и остаются видны на печати, где фон не печатается вовсе. */
+/* Шапка таблицы — полужирная на светлой заливке, как в Документах и
+   Таблицах, и регистр в ней тот, что набрал автор.
+   Раньше шапка была «подписью»: прописные, разрядка, серый и жирный по
+   умолчанию. Форматирование в ней не проявлялось: «Жирный» ничего не менял
+   (и так жирный), строчные было не набрать — автор печатал «Город» и видел
+   «ГОРОД». От данных шапку отличают вес и заливка; на печати, где фон не
+   печатается, — вес. Подписью шапка осталась только в разборе звонков
+   (call_qa/ai-markup.css): там таблицы пишет ИИ, а не автор. */
 .wiki-prose th {
     background: var(--wiki-surface-alt);
-    font-size: 0.8125rem;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-    color: var(--wiki-ink-soft);
+    font-weight: 600;
+    color: var(--wiki-ink);
     white-space: nowrap;
+}
+
+/* «Жирный» в шапке — заметно жирнее самой шапки. */
+.wiki-prose th :is(strong, b) {
+    font-weight: 800;
 }
 
 /* Чередование строк. На таблице в десять строк глаз теряет строку при
@@ -684,6 +692,433 @@
    Полоса держит строку целиком, и это дешевле, чем вертикальные линии. */
 .wiki-prose tbody tr:nth-child(even) > td {
     background: rgba(248, 250, 252, 0.75);
+}
+
+/* Ячейка без пустот абзаца. Редактор кладёт текст ячейки в <p>, а у абзаца
+   статьи отступы по 0.75rem сверху и снизу — строка таблицы из одного слова
+   выходила в 64 пикселя высотой, и таблица на десять строк занимала экран.
+   Отступ остаётся только МЕЖДУ абзацами одной ячейки.
+   :not() — ради служебных элементов редактора внутри ячейки (ручка строки
+   первой, маркеры границ столбца и строки последними): они не текст, и
+   правило «первый и последний без отступа» не должно на них спотыкаться —
+   иначе высота строки прыгала бы от наведения мыши. */
+.wiki-prose :is(th, td) > :not(.wiki-table-grip, .column-resize-handle, .wiki-row-resize-handle) {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.wiki-prose :is(th, td) > :not(.wiki-table-grip, .column-resize-handle, .wiki-row-resize-handle)
+    + :not(.wiki-table-grip, .column-resize-handle, .wiki-row-resize-handle) {
+    margin-top: 0.5rem;
+}
+
+.wiki-prose :is(th, td) p {
+    line-height: 1.55;
+}
+
+/* Заголовок внутри ячейки — крупнее и жирнее текста ячейки, но без
+   оформления раздела статьи: метка слева, черта снизу и отступы раздела
+   превращали его в ячейке в обломок вёрстки. */
+.wiki-prose :is(td, th) :is(h1, h2, h3, h4) {
+    padding: 0;
+    border: 0;
+    line-height: 1.3;
+}
+
+.wiki-prose :is(td, th) h1 { font-size: 1.25rem; }
+.wiki-prose :is(td, th) h2 { font-size: 1.125rem; }
+.wiki-prose :is(td, th) h3 { font-size: 1rem; }
+.wiki-prose :is(td, th) h4 { font-size: 0.9375rem; }
+
+.wiki-prose :is(td, th) h1::before {
+    display: none;
+}
+
+/* Список в ячейке — с отступом под маркер, но без пустот статьи вокруг. */
+.wiki-prose :is(td, th) :is(ul, ol) {
+    padding-left: 1.25rem;
+}
+
+.wiki-prose :is(td, th) li {
+    margin: 0.125rem 0;
+}
+
+/* Абзац внутри пункта списка или цитаты в ячейке — без отступов статьи:
+   иначе текст пункта опускался ниже текста соседних ячеек строки. */
+.wiki-prose :is(td, th) :is(li, blockquote) > p {
+    margin: 0;
+}
+
+/* Ширины столбцов задал автор (перетащил границу) — таблица держит их точно.
+   Признак — класс wiki-table-fixed (WikiTable, fixedLayout), а не «ширины
+   есть у всех столбцов»: ширины у всех бывают и у вставленной из Google
+   Таблиц таблицы, и у старых статей, и их вид без ведома автора меняться не
+   должен.
+   Без fixed браузер раскладывает по содержимому, заданная ширина работает
+   лишь как нижняя граница, и суженный автором столбец у читателя снова
+   распахивался. min-width снимается по той же причине: «не уже колонки
+   текста» растягивало такую таблицу у читателя на всю ширину, и столбцы
+   расходились пропорционально — не теми ширинами, что видел автор. Шапке в
+   такой таблице разрешён перенос: в узком столбце nowrap выпустил бы её текст
+   за границу ячейки. */
+.wiki-prose table.wiki-table-fixed {
+    table-layout: fixed;
+    min-width: 0;
+}
+
+.wiki-prose table.wiki-table-fixed th {
+    white-space: normal;
+}
+
+/* Положение таблицы по ширине статьи (WikiTable, align): у левого края — как
+   было всегда, по центру или у правого края. Работает, только пока таблица уже
+   колонки текста; в редакторе ту же роль играет рамка .wiki-table-frame. */
+.wiki-prose table.wiki-table-center {
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.wiki-prose table.wiki-table-right {
+    margin-left: auto;
+    margin-right: 0;
+}
+
+/* ── Таблица в редакторе ──────────────────────────────────────────────────
+   Всё ниже — только для ProseMirror: читатель этих элементов не получает. */
+
+.wiki-prose.ProseMirror :is(th, td) {
+    position: relative;
+}
+
+/* Поля вокруг таблицы под ручки (слева и сверху) и под «+» (справа и снизу).
+   Отрицательные внешние отступы возвращают таблицу на её место: край таблицы
+   стоит там же, где край текста, а поля ложатся на внутренний отступ карточки
+   редактора. Поля — именно у обёртки прокрутки: всё, что за её краем,
+   обрезалось бы. Слева и справа их хватает, чтобы ручки и «+» не ложились на
+   кольцо фокуса самого редактора (оно на 2–4 пикселя за краем текста). */
+.wiki-prose.ProseMirror .tableWrapper {
+    padding: 1.25rem 1.25rem 1.375rem 1.5rem;
+    margin: 0 -1.25rem 0 -1.5rem;
+}
+
+/* Таблица в ячейке другой таблицы: отрицательные поля вылезали бы из ячейки. */
+.wiki-prose.ProseMirror :is(td, th) .tableWrapper {
+    margin-left: 0;
+    margin-right: 0;
+}
+
+/* Рамка ровно по таблице: «+» встают по её краю, а не по краю колонки текста. */
+.wiki-prose .wiki-table-frame {
+    position: relative;
+    width: max-content;
+}
+
+.wiki-prose .wiki-table-frame--center {
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.wiki-prose .wiki-table-frame--right {
+    margin-left: auto;
+}
+
+/* Выделенные ячейки. Без этого правила выделение нескольких ячеек было
+   невидимым: ProseMirror прячет обычное выделение браузера и вешает на
+   ячейки класс selectedCell, а стиля у класса не было — человек тянул мышью
+   по ячейкам и не видел, что выделил, перед «объединить» или «удалить». */
+.wiki-prose .selectedCell::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    background: rgba(59, 130, 246, 0.14);
+    pointer-events: none;
+}
+
+/* При выделении ячеек ProseMirror прячет системное выделение текста классом
+   ProseMirror-hideselection, но правило тёмной темы для ::selection сильнее
+   его по специфичности — и поверх голубых ячеек проступала ещё и синяя
+   плашка текста последней ячейки. Здесь специфичность выше обоих. */
+.wiki-prose.ProseMirror-hideselection ::selection {
+    background: transparent;
+}
+
+/* Граница столбца, за которую можно тянуть. Маркер ставит prosemirror-tables
+   при наведении на край ячейки; без стиля он был пустым div'ом, курсор не
+   менялся, и о том, что ширину столбца вообще можно менять, не догадывался
+   никто. */
+.wiki-prose .column-resize-handle {
+    position: absolute;
+    top: -1px;
+    bottom: -1px;
+    right: -2px;
+    width: 3px;
+    z-index: 3;
+    background: var(--wiki-accent);
+    pointer-events: none;
+}
+
+.wiki-prose.ProseMirror.resize-cursor {
+    cursor: col-resize;
+}
+
+/* Граница строки, за которую тянут высоту (WikiTableTools.js) — то же, что
+   граница столбца, только по горизонтали: линия по низу ячеек строки и
+   курсор «вверх-вниз». */
+.wiki-prose .wiki-row-resize-handle {
+    position: absolute;
+    left: -1px;
+    right: -1px;
+    bottom: -2px;
+    height: 3px;
+    z-index: 3;
+    background: var(--wiki-accent);
+    pointer-events: none;
+}
+
+.wiki-prose.ProseMirror.wiki-row-resize-cursor {
+    cursor: row-resize;
+}
+
+/* Строку тянут: высота — из декорации, переменной (см. startRowDrag). */
+.wiki-prose tr.wiki-row-dragging {
+    height: var(--wiki-row-drag-height) !important;
+}
+
+/* Ручки строк и столбцов (WikiTableTools.js). Видны только у таблицы
+   с курсором и только пока редактор в фокусе — в остальное время это шум. */
+.wiki-prose .wiki-table-grip {
+    position: absolute;
+    z-index: 4;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: var(--wiki-surface);
+    color: var(--wiki-ink-mute);
+    box-shadow: 0 0 0 1px var(--wiki-line), 0 1px 2px rgba(15, 23, 42, 0.06);
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease, background-color 0.12s ease, color 0.12s ease;
+}
+
+.wiki-prose .wiki-table-grip svg {
+    display: block;
+}
+
+/* Мишень шире самой ручки: попасть в полоску 12 пикселей мышью — уже работа. */
+.wiki-prose .wiki-table-grip::before {
+    content: '';
+    position: absolute;
+    inset: -5px;
+}
+
+.wiki-prose .wiki-table-grip--row {
+    left: -19px;
+    top: 50%;
+    width: 12px;
+    height: 22px;
+    transform: translateY(-50%);
+}
+
+.wiki-prose .wiki-table-grip--column {
+    top: -14px;
+    left: 50%;
+    width: 22px;
+    height: 12px;
+    transform: translateX(-50%);
+}
+
+.wiki-prose.ProseMirror-focused .wiki-table--active .wiki-table-grip {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.wiki-prose .wiki-table-grip:hover {
+    background: var(--wiki-line-soft);
+    color: var(--wiki-ink-soft);
+}
+
+/* Угловая ручка (WikiTableView.js): нажатие — меню таблицы, перетаскивание —
+   перенос таблицы. Есть у каждой таблицы, видна у таблицы с курсором и при
+   наведении на таблицу: взять и перенести таблицу можно, не щёлкая в неё. */
+.wiki-prose .wiki-table-handle {
+    position: absolute;
+    z-index: 4;
+    top: -20px;
+    left: -23px;
+    width: 20px;
+    height: 20px;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    /* Главная ручка таблицы — её должно быть видно с первого взгляда, а не
+       искать: синяя, как кнопки действий портала, с белыми точками. Серая
+       ручка сливалась с фоном страницы (замечание владельца 26.11). Синий здесь
+       не шум: ручка появляется только у таблицы под мышью или с курсором. */
+    background: #2563eb;
+    color: #fff;
+    box-shadow: 0 1px 3px rgba(37, 99, 235, 0.35);
+    cursor: grab;
+    /* Палец на ручке тянет таблицу, а не прокручивает страницу. */
+    touch-action: none;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease, background-color 0.12s ease, color 0.12s ease;
+}
+
+.wiki-prose .wiki-table-handle svg {
+    display: block;
+}
+
+.wiki-prose .wiki-table-handle::before {
+    content: '';
+    position: absolute;
+    inset: -4px;
+}
+
+.wiki-prose.ProseMirror-focused .wiki-table--active > .wiki-table-frame > .wiki-table-handle,
+.wiki-prose.ProseMirror .tableWrapper:hover > .wiki-table-frame > .wiki-table-handle {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.wiki-prose .wiki-table-handle:hover {
+    background: #1d4ed8;
+    color: #fff;
+}
+
+/* Выбранная ручка — та, чья строка (столбец, таблица) сейчас выделена. */
+.wiki-prose :is(.wiki-table--sel-rows, .wiki-table--sel-table) .selectedCell > .wiki-table-grip--row,
+.wiki-prose :is(.wiki-table--sel-columns, .wiki-table--sel-table) .selectedCell > .wiki-table-grip--column,
+.wiki-prose .wiki-table--sel-table > .wiki-table-frame > .wiki-table-handle {
+    background: #1d4ed8;
+    color: #fff;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25);
+}
+
+/* Таблицу тянут: на месте — бледная, курсор «держу» везде, маркеры границ
+   столбцов и строк не мигают под пролетающим указателем. */
+.wiki-prose .tableWrapper.is-moving {
+    opacity: 0.4;
+}
+
+body.wiki-table-dragging,
+body.wiki-table-dragging * {
+    cursor: grabbing !important;
+}
+
+body.wiki-table-dragging .wiki-prose :is(.column-resize-handle, .wiki-row-resize-handle) {
+    display: none;
+}
+
+/* Уменьшенная копия таблицы под курсором (WikiTableView.ghost): её «держат».
+   Синяя обводка — чтобы копия не сливалась с белой страницей под ней.
+   Бледнеет, пока указатель над самой таблицей и переносить некуда. */
+.wiki-table-ghost {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 161;
+    overflow: hidden;
+    border-radius: 10px;
+    background: var(--wiki-surface);
+    box-shadow: 0 0 0 2px #2563eb, 0 12px 32px rgba(15, 23, 42, 0.22);
+    opacity: 0.94;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+}
+
+.wiki-table-ghost.is-idle {
+    opacity: 0.55;
+}
+
+.wiki-table-ghost > .wiki-prose {
+    transform-origin: top left;
+}
+
+/* Таблицу тянут вбок: где она встанет по ширине (у края или по центру). */
+.wiki-table-align-preview {
+    position: fixed;
+    z-index: 159;
+    display: none;
+    border: 2px dashed #2563eb;
+    border-radius: 8px;
+    background: rgba(37, 99, 235, 0.06);
+    pointer-events: none;
+}
+
+/* Линия «таблица встанет сюда» — поверх страницы, по ширине текста статьи.
+   С ⌥ (Alt) таблица копируется — линия пунктиром. */
+.wiki-table-drop-line {
+    position: fixed;
+    z-index: 160;
+    display: none;
+    height: 3px;
+    border-radius: 2px;
+    background: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16);
+    pointer-events: none;
+}
+
+.wiki-table-drop-line.is-copy {
+    background: repeating-linear-gradient(90deg, #2563eb 0 8px, transparent 8px 13px);
+    box-shadow: none;
+}
+
+/* «+» под таблицей и справа (WikiTableView.js). Видны у таблицы с курсором и
+   при наведении на любую таблицу. */
+.wiki-prose .wiki-table-add {
+    position: absolute;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: var(--wiki-surface-alt);
+    color: var(--wiki-ink-mute);
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.wiki-prose .wiki-table-add svg {
+    display: block;
+}
+
+.wiki-prose .wiki-table-add--row {
+    left: 0;
+    right: 0;
+    top: calc(100% + 6px);
+    height: 12px;
+}
+
+.wiki-prose .wiki-table-add--column {
+    top: 0;
+    bottom: 0;
+    left: calc(100% + 6px);
+    width: 12px;
+}
+
+/* Прямые потомки: у таблицы, вложенной в ячейку, — свои «+», и загораться
+   вместе с внешней таблицей им незачем. */
+.wiki-prose.ProseMirror-focused .wiki-table--active > .wiki-table-frame > .wiki-table-add,
+.wiki-prose.ProseMirror .tableWrapper:hover > .wiki-table-frame > .wiki-table-add {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.wiki-prose .wiki-table-add:hover {
+    background: var(--wiki-accent-soft);
+    color: var(--wiki-accent);
 }
 
 /* Выделения из редактора: 251 <mark data-color> в контенте. */

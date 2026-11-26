@@ -1031,3 +1031,23 @@ body.mobile-shell .wiki-m-office-actions > button {
     /* tertiarySystemFill — та же заливка, что у круглых кнопок раздела. */
     background: rgba(118, 118, 128, 0.12);
 }
+
+/* ── Таблица статьи ─────────────────────────────────────────────────────────
+   mobile-shell.css делает прокручиваемым ЛЮБОЙ блок, у которого таблица —
+   прямой ребёнок (*:has(> table) { overflow-x: auto }). В редакторе таким
+   блоком теперь стала рамка .wiki-table-frame (WikiTableView.js), и правило
+   обрезало бы всё, что вынесено за край таблицы: ручки строк и столбцов и
+   кнопки «+». Прокручивается здесь обёртка .tableWrapper — рамке прокрутка
+   не нужна. */
+body.mobile-shell .wiki-scope .wiki-prose .wiki-table-frame {
+    max-width: none;
+    overflow: visible;
+}
+
+/* Там же ячейкам любой таблицы запрещён перенос (nowrap): таблица на телефоне
+   просто листается вбок. Но у таблицы с заданными автором ширинами столбцов
+   (wiki-table-fixed, table-layout: fixed — wiki-theme.css) столбец не раздвигается под
+   текст, и без переноса текст вылезал бы поверх соседней ячейки. */
+body.mobile-shell .wiki-scope .wiki-prose table.wiki-table-fixed :is(th, td) {
+    white-space: normal;
+}

@@ -673,6 +673,10 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         nodes.forEach((node, index) => {
             const text = (node.textContent || '').trim();
             if (!text) return;
+            /* Заголовок в ячейке таблицы — это оформление текста ячейки, а не
+               раздел статьи: в «Содержании» он висел бы пунктом посреди
+               разделов, и по нему прыгали бы в середину таблицы. */
+            if (node.closest('td, th')) return;
             if (!node.id) node.id = `wiki-h-${index}`;
             entries.push({ id: node.id, text, level: Number(node.tagName.slice(1)) });
         });

@@ -16,11 +16,11 @@ import Highlight from '@tiptap/extension-highlight';
 // В TipTap 3 у этих пакетов нет default-экспорта, а таблицы приезжают одним
 // набором — отдельные extension-table-row/cell/header больше не нужны.
 import { Color, TextStyle } from '@tiptap/extension-text-style';
-import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table';
+import { TableCell, TableHeader } from '@tiptap/extension-table';
 import {
     AlignCenter, AlignLeft, AlignRight, Blocks, Bold, Clapperboard, Code, FileSymlink, Heading1, Heading2,
     Heading3, Gamepad2, Highlighter, Italic, Link2, List, ListOrdered, Loader2, Quote, Redo2,
-    Image as ImageIcon, Save, Strikethrough, Table as TableIcon,
+    Image as ImageIcon, Save, Strikethrough,
     Underline as UnderlineIcon, Undo2, Upload,
 } from 'lucide-react';
 import {
@@ -46,6 +46,9 @@ import { buildRelativeArticleLink, linkAttrsForSaving } from './articleLink';
 import useStableCallback from './useStableCallback';
 import WikiAiDraft from './WikiAiDraft';
 import WikiTableMenu from './WikiTableMenu';
+import WikiTableInsert from './WikiTableInsert';
+import WikiTableView from './WikiTableView';
+import { WikiTable, WikiTableRow, WikiTableTools, restoreGripCursor } from './WikiTableTools';
 import WikiBlockMenu from './WikiBlockMenu';
 import { BLOCK_MENU, WikiBlock, WikiListVariant } from './WikiBlockNode';
 // Стили оформительских блоков. Импорт нужен и здесь, и в WikiArticle.jsx:
@@ -345,6 +348,25 @@ export default function WikiEditor({
         });
     });
 
+    /* Меню таблицы, открытое ручкой строки, столбца или угла ({ kind, from,
+       to, tablePos, anchor }). Ручки рисует WikiTableTools внутри редактора, а
+       меню — React: повторное нажатие на ту же ручку меню закрывает. */
+    const [tableMenu, setTableMenu] = useState(null);
+    const tableMenuRef = useRef(null);
+    tableMenuRef.current = tableMenu;
+    const openTableMenu = useStableCallback((payload) => {
+        if (tableMenuRef.current && tableMenuRef.current.anchor === payload.anchor) {
+            // Повторное нажатие на ту же ручку закрывает меню — как Esc: выделение
+            // ручкой снимается, курсор возвращается на место.
+            setTableMenu(null);
+            // eslint-disable-next-line no-use-before-define
+            restoreGripCursor(editor?.view);
+            return;
+        }
+        setTableMenu(payload);
+    });
+    const closeTableMenu = useCallback(() => setTableMenu(null), []);
+
     const editor = useEditor({
         extensions: [
             StarterKit.configure({ heading: { levels: [1, 2, 3, 4] } }),
@@ -368,10 +390,18 @@ export default function WikiEditor({
             TextStyle,
             Color,
             Highlight.configure({ multicolor: true }),
-            Table.configure({ resizable: true }),
-            TableRow,
+            /* Таблица со своим видом узла (WikiTableView): кнопки «+» под
+               таблицей и справа. cellMinWidth — предел, до которого сужается
+               столбец при перетаскивании границы: уже́ 40 пикселей в ячейку не
+               влезает и одна цифра с отступами. */
+            WikiTable.configure({ resizable: true, cellMinWidth: 40, View: WikiTableView }),
+            // Строка с высотой: её нижнюю границу можно тянуть, как границу столбца.
+            WikiTableRow,
             TableHeader,
             TableCell,
+            /* Ручки строк и столбцов, вставка таблиц из буфера, заморозка
+               ширин столбцов (WikiTableTools.js). Меню ручек — WikiTableMenu. */
+            WikiTableTools.configure({ onGrip: (payload) => openTableMenu(payload) }),
             /* Кнопка тренажёра. Расширение подключено ВСЕГДА, а не только у
                статей-тренажёров: тип статьи можно сменить обратно, и без узла в
                схеме уже вставленная кнопка при открытии редактора превратилась
@@ -1242,13 +1272,8 @@ export default function WikiEditor({
                                     onClick={() => setPickerOpen(true)}>
                             <FileSymlink size={15} />
                         </ToolButton>
-                        <ToolButton
-                            title="Таблица 3×3 — строки и столбцы добавляются панелью у таблицы"
-                            onClick={() => editor.chain().focus()
-                                .insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
-                        >
-                            <TableIcon size={15} />
-                        </ToolButton>
+                        {/* Таблица — с выбором размера сеткой (WikiTableInsert). */}
+                        <WikiTableInsert editor={editor} />
                         <label
                             title="Картинка"
                             className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100"
@@ -1400,10 +1425,14 @@ export default function WikiEditor({
                             </label>
                         )}
                         <EditorContent editor={editor} />
-                        {/* Панель команд таблицы: всплывает у той таблицы, в
-                            которой стоит курсор. Живёт рядом с EditorContent,
-                            потому что позиционируется от родителя редактора. */}
-                        <WikiTableMenu editor={editor} />
+                        {/* Меню ручек таблицы и панель «Объединить / Разбить»
+                            для выделенных мышью ячеек (WikiTableMenu.jsx). */}
+                        <WikiTableMenu
+                            editor={editor}
+                            menu={tableMenu}
+                            onClose={closeTableMenu}
+                            showToast={showToast}
+                        />
                         {/* Панель оформительского блока — там же и по той же
                             причине: команды («тон», «столбцы», «нумеровать»)
                             имеют смысл только внутри блока, и в постоянном
