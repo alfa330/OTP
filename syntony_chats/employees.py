@@ -13,6 +13,10 @@
   их больше не трогает (split_c2d_daily_metrics), а цифры Chat2Desk, записанные раньше,
   заменяются первым же прогоном. Дальше строка переписывается, лишь когда поменялись сами данные
   (syntony_employee_metric_marks), — ручная правка СВ не откатывается каждые 10 минут.
+  Сутки, где у сотрудника нет чатов, во время ответа не идут (решение владельца 26.11.2026,
+  day_reply_time): первый ответ у Syntony считается по дню начала диалога, а чат — по дню
+  ответа, и «ответил назавтра» давало строку «0 чатов, ответ 25 ч», которая в простом среднем
+  месяца поднимала время ответа человека в разы.
 
 * **Статусы** — интервалы /operator-statuses (statuses.py) переносятся в отрезки статусов дня
   (operator_status_segments) тем же путём, что готовые интервалы Binotel: часы, перерывы, тренинг,
@@ -118,11 +122,24 @@ def average_reply(totals):
     return round(float(totals.get('first_sum') or 0.0) / first_n, 2) if first_n > 0 else None
 
 
+def day_reply_time(totals):
+    """«Время ответа» сотрудника за сутки → средний первый ответ, только если в эти сутки у него
+    есть чаты; нет чатов — None.
+
+    Первый ответ Syntony (как во вкладке «Чатники») считается по дню, когда водитель начал
+    диалог, а чат засчитывается в день ответа. Ответил назавтра, а в день диалога чатов не было —
+    у человека вставала строка «0 чатов, время ответа 25 ч». Месячное время ответа в «Учёте
+    часов» — простое среднее дневных, и одна такая строка поднимала его в разы (24.11.2026 у
+    двоих чатников 530 → 4242 с и 993 → 10 891 с). Решение владельца 26.11.2026: такие сутки во
+    время ответа не идут."""
+    return average_reply(totals) if int(totals.get('chats') or 0) > 0 else None
+
+
 FIELDS_ALL = tuple(sorted(C2D_REPLACED_FIELDS))
 FIELDS_CHATS = ('chats_count',)
 
 
-def metric_writes(totals, marks, existing, roster):
+def metric_writes(totals, marks, existing, roster, reply_without_chats=()):
     """Кому и что записать за одни сутки → [(id, итоги, колонки)] по возрастанию id.
 
     totals — {id: итоги биллинга}; marks — {id: что записано из Syntony раньше}; existing —
@@ -130,20 +147,24 @@ def metric_writes(totals, marks, existing, roster):
     ручные). Пишется чатнику СЗоВ, если сутки у него из Syntony ещё не писались — тогда цифры
     Chat2Desk заменяются (в том числе нулями), а у строки, где СВ руками поставил время ответа,
     переписываются только чаты (руками их не ставят), — или если итоги с прошлой записи
-    поменялись. Не чатник СЗоВ — не трогается.
+    поменялись. Не чатник СЗоВ — не трогается. Чатов в сутках нет и строки нет — заводить её
+    незачем: время ответа таким суткам не пишется (day_reply_time). reply_without_chats — id,
+    у кого в эти сутки не ручная строка с временем ответа при нуле чатов (записана до правила
+    26.11.2026): она переписывается один раз и при прежних итогах.
     """
     if not isinstance(existing, dict):
         existing = {operator_id: False for operator_id in (existing or ())}
+    stale = set(reply_without_chats or ())
     out = []
     for operator_id in sorted((set(totals) | set(marks) | set(existing)) & set(roster)):
         target = totals.get(operator_id) or ZERO
         mark = marks.get(operator_id)
         fields = FIELDS_ALL
         if mark is not None:
-            if same_totals(mark, target):
+            if same_totals(mark, target) and operator_id not in stale:
                 continue
         elif operator_id not in existing:
-            if not target['chats'] and not target['first_n']:
+            if not target['chats']:
                 continue
         elif existing[operator_id]:
             fields = FIELDS_CHATS
@@ -162,7 +183,7 @@ def metric_item(day, operator_id, totals, fields=FIELDS_ALL):
         'first_reply_count': int(totals['first_n']),
     }
     if 'avg_response_time_seconds' in fields:
-        item['avg_response_time_seconds'] = average_reply(totals)
+        item['avg_response_time_seconds'] = day_reply_time(totals)
     else:
         item['manual_reply_time_kept'] = True
     return item
@@ -229,20 +250,24 @@ def _metric_marks(cursor, day_from, day_to):
 
 
 def _existing_metric_rows(cursor, day_from, day_to, roster):
-    """{сутки: {id: ручная ли строка}}. Ручная — последней её писала правка дня в «Учёте часов»:
-    в теле время ответа или переводы, но нет ни чатов, ни источника (Chat2Desk, отчёт, оценки
-    всегда кладут их)."""
+    """→ ({сутки: {id: ручная ли строка}}, {сутки: {id не ручных строк с временем ответа при нуле
+    чатов}}). Ручная — последней её писала правка дня в «Учёте часов»: в теле время ответа или
+    переводы, но нет ни чатов, ни источника (Chat2Desk, отчёт, оценки всегда кладут их). Время
+    ответа при нуле чатов — след записи до правила day_reply_time (26.11.2026)."""
     cursor.execute("""
         SELECT day, operator_id,
                (NOT (raw_payload ? 'chats_count') AND NOT (raw_payload ? 'source')
-                AND (raw_payload ? 'avg_response_time_seconds' OR raw_payload ? 'transfer_chat_count'))
+                AND (raw_payload ? 'avg_response_time_seconds' OR raw_payload ? 'transfer_chat_count')),
+               (COALESCE(chats_count, 0) = 0 AND avg_response_time_seconds IS NOT NULL)
           FROM chat_manager_daily_metrics
          WHERE day BETWEEN %s AND %s AND operator_id = ANY(%s)
     """, (day_from, day_to, sorted(roster)))
-    out = {}
-    for day, operator_id, manual in cursor.fetchall():
-        out.setdefault(day, {})[int(operator_id)] = bool(manual)
-    return out
+    existing, reply_without_chats = {}, {}
+    for day, operator_id, manual, reply_only in cursor.fetchall():
+        existing.setdefault(day, {})[int(operator_id)] = bool(manual)
+        if reply_only and not manual:
+            reply_without_chats.setdefault(day, set()).add(int(operator_id))
+    return existing, reply_without_chats
 
 
 def _unmatched_totals(cursor, day_from, day_to):
@@ -293,13 +318,14 @@ def refresh_metrics(db, ctx, *, first_day, now, load_totals=_load_totals):
         totals = load_totals(cursor, days[0], days[-1], first_day)
         unmatched = _unmatched_totals(cursor, days[0], days[-1])
         marks = _metric_marks(cursor, days[0], days[-1])
-        existing = _existing_metric_rows(cursor, days[0], days[-1], roster)
+        existing, reply_without_chats = _existing_metric_rows(cursor, days[0], days[-1], roster)
     merge_unmatched(totals, unmatched, ctx.resolve, roster)
     results = []
     for day in days:
         day_totals = {operator_id: item for (total_day, operator_id), item in totals.items()
                       if total_day == day}
-        writes = metric_writes(day_totals, marks.get(day) or {}, existing.get(day) or {}, roster)
+        writes = metric_writes(day_totals, marks.get(day) or {}, existing.get(day) or {}, roster,
+                               reply_without_chats.get(day) or ())
         if not writes:
             continue
         for fields in sorted({fields for _id, _item, fields in writes}):

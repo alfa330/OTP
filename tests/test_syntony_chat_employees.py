@@ -267,6 +267,33 @@ def test_metric_item_carries_reply_time_key_only_when_it_is_written():
     assert employees.average_reply({'first_sum': 100.0, 'first_n': 3}) == 33.33
 
 
+# Решение владельца 26.11.2026: первый ответ у Syntony — по дню начала диалога, чат — по дню ответа.
+# «Ответил назавтра» давало строку «0 чатов, время ответа 25 ч», а месячное время ответа — простое
+# среднее дневных — росло в разы (24.11: 530 → 4242 с). Сутки без чатов во время ответа не идут.
+LATE = {'chats': 0, 'first_sum': 90074.0, 'first_n': 1}
+
+
+def test_day_without_chats_gets_no_reply_time_and_no_new_row():
+    assert employees.day_reply_time(LATE) is None
+    assert employees.day_reply_time({'chats': 2, 'first_sum': 90.0, 'first_n': 2}) == 45.0
+    assert employees.day_reply_time(employees.ZERO) is None
+    assert employees.metric_item(DAY, 102, LATE)['avg_response_time_seconds'] is None
+    # Строки нет и чатов нет — заводить её ради времени ответа незачем.
+    assert employees.metric_writes({102: LATE}, {}, {}, ROSTER_IDS) == []
+    # Строка есть (Chat2Desk) — заменяется как раньше: чатов 0, времени ответа нет.
+    assert employees.metric_writes({102: LATE}, {}, {102: False}, ROSTER_IDS) == [(102, LATE, ALL)]
+
+
+def test_reply_time_written_before_the_rule_is_cleared_once():
+    marks = {102: dict(LATE)}
+    # Итоги те же, но строка ещё держит время ответа при нуле чатов — переписать, один раз.
+    assert employees.metric_writes({102: LATE}, marks, {102: False}, ROSTER_IDS, {102}) == [
+        (102, LATE, ALL)]
+    assert employees.metric_writes({102: LATE}, marks, {102: False}, ROSTER_IDS) == []
+    # Не чатник СЗоВ — не трогается и так.
+    assert employees.metric_writes({102: LATE}, marks, {102: False}, {101}, {102}) == []
+
+
 def test_unmatched_replies_are_matched_again_by_todays_roster():
     totals = {(DAY, 101): {'chats': 2, 'first_sum': 60.0, 'first_n': 1}}
     unmatched = {(DAY, 'Пётр Петров'): {'chats': 3, 'first_sum': 90.0, 'first_n': 2},
@@ -619,10 +646,12 @@ def test_metrics_replace_chat2desk_once_and_keep_manual_edits(pg, monkeypatch):
     _seed_billing(pg)
     monkeypatch.delenv('CHAT_BILLING_C2D_KEEP_CHANNEL_IDS', raising=False)
     first = employees.refresh_metrics(pg, Ctx, first_day=FIRST_DAY, now=NOW)
-    assert first == [{'day': '2026-11-20', 'written': 4}]
+    assert first == [{'day': '2026-11-20', 'written': 3}]
     metrics = _metrics(pg)
     assert metrics[101] == (3, 75.0, 5)          # переводы Chat2Desk остаются
-    assert metrics[102] == (0, 30.0, 0)          # строка заведена: был первый ответ
+    # 102 ответил на диалог 23:50 уже после полуночи: чатов в эти сутки нет, первый ответ есть —
+    # строка не заводится, время ответа таким суткам не пишется (решение 26.11).
+    assert 102 not in metrics
     assert metrics[103] == (0, None, 1)          # цифры Chat2Desk сняты
     # 105: ответ досопоставлен по ФИО нынешним справочником; время ответа СВ поставил руками —
     # оно остаётся, переписаны только чаты.
@@ -657,6 +686,37 @@ def test_metrics_replace_chat2desk_once_and_keep_manual_edits(pg, monkeypatch):
         {'day': '2026-11-20', 'written': 1}]
     assert _metrics(pg)[101] == (4, 60.0, 5)
     assert employees.forget_marks(pg, DAY, []) == 0
+
+
+@needs_pg
+def test_reply_time_without_chats_written_before_the_rule_is_cleared(pg, monkeypatch):
+    """Строки, которые прогон записал до правила 26.11 (на проде — 24.11 у двоих чатников),
+    чинятся следующим прогоном сами, хотя итоги Syntony не менялись; ручная правка СВ стоит."""
+    _seed_billing(pg)
+    monkeypatch.delenv('CHAT_BILLING_C2D_KEEP_CHANNEL_IDS', raising=False)
+    pg.run("""
+        INSERT INTO chat_manager_daily_metrics (operator_id, day, chats_count,
+            avg_response_time_seconds, transfer_chat_count, raw_payload) VALUES
+            (102, '2026-11-20', 0, 30, 0,
+             '{"day": "2026-11-20", "operator_id": 102, "chats_count": 0, "source": "syntony",
+               "first_reply_count": 1, "avg_response_time_seconds": 30}')
+    """)
+    pg.run("""INSERT INTO syntony_employee_metric_marks (day, operator_id, chats, first_sum, first_n)
+              VALUES ('2026-11-20', 102, 0, 30, 1)""")
+    with pg._get_cursor() as cur:
+        existing, reply_without_chats = employees._existing_metric_rows(cur, DAY, DAY, ROSTER_IDS)
+    # 105 — ручная строка СВ (0 чатов и время ответа): её правило не трогает.
+    assert existing[DAY] == {101: False, 102: False, 103: False, 105: True}
+    assert reply_without_chats == {DAY: {102}}
+
+    assert employees.refresh_metrics(pg, Ctx, first_day=FIRST_DAY, now=NOW) == [
+        {'day': '2026-11-20', 'written': 4}]
+    metrics = _metrics(pg)
+    assert metrics[102] == (0, None, 0)
+    assert metrics[105] == (1, 25.0, 0)
+    # Починили — дальше сутки молчат.
+    assert employees.refresh_metrics(pg, Ctx, first_day=FIRST_DAY, now=NOW) == []
+    assert _metrics(pg)[102] == (0, None, 0)
 
 
 def _seed_statuses(db):
