@@ -295,6 +295,22 @@ export const hhBaseLine = (item) => [
     hhMoney(item?.salary) || null,
 ].filter(Boolean).join(' · ');
 
+/** Подпись карточки «Базы hh» (владелец 26.11.2026: «чтобы в карточках отображались имена кандидатов, а не вакансия»):
+ *  имя с hh или из карточки воронки; hh прячет имя до открытия контактов — «Имя скрыто». Ответ сервера без поля name
+ *  (сервер ещё прежний) — по-прежнему должность из резюме. */
+export const hhBaseName = (item) => {
+    if (!item || !Object.prototype.hasOwnProperty.call(item, 'name')) {
+        return { text: item?.title || 'Без должности', hidden: false };
+    }
+    return item.name ? { text: item.name, hidden: false } : { text: 'Имя скрыто', hidden: true };
+};
+
+/** Строка под именем: должность из резюме, возраст, город, зарплата — «Оператор call-центра · 26 лет · Алматы». */
+export const hhBaseSubline = (item) => {
+    if (!item || !Object.prototype.hasOwnProperty.call(item, 'name')) return hhBaseLine(item);
+    return [item.title, hhBaseLine(item)].filter(Boolean).join(' · ');
+};
+
 /** Опыт на карточке: «Опыт 3 года 2 мес. · Продавец-консультант, ТОО Ромашка». */
 export const hhBaseExperience = (item) => {
     const last = (item?.experience || [])[0];

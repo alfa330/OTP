@@ -103,7 +103,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'hh/1.4.1'
+VERSION = 'hh/1.4.2'
 log = logging.getLogger('cdr_bridge.hh_bridge')
 
 PUSH_PATH = '/api/hiring/hh/agent/push'
@@ -483,8 +483,25 @@ def _access(status, opened=False):
     return None
 
 
+def _search_name(raw):
+    """Имя кандидата из выдачи поиска: hh показывает его только у резюме, чьи контакты доступны без списания или уже
+    открыты (проба 26.11: 3 из 20, у закрытых — пусто). → {last_name, first_name, middle_name} или None."""
+    names = {key: _clip(_from_list(raw, field), 80)
+             for key, field in (('last_name', 'lastName'), ('first_name', 'firstName'), ('middle_name', 'middleName'))}
+    return names if names['last_name'] or names['first_name'] else None
+
+
+def names_only(contacts):
+    """Из разобранных контактов — только ФИО (телефон и почта порталу нужны лишь после «Взять в работу»)."""
+    if not isinstance(contacts, dict):
+        return None
+    names = {key: contacts.get(key) for key in ('last_name', 'first_name', 'middle_name')}
+    return names if names['last_name'] or names['first_name'] else None
+
+
 def found_from_search(raw):
-    """Резюме из выдачи поиска по базе → краткая карточка для портала или None. Имени и контактов в выдаче нет."""
+    """Резюме из выдачи поиска по базе → краткая карточка для портала или None. Контактов в выдаче портал не берёт; имя —
+    если hh его показал (владелец 26.11.2026: «чтобы в карточках отображались имена кандидатов, а не вакансия»)."""
     if not isinstance(raw, dict):
         return None
     attributes = raw.get('_attributes') if isinstance(raw.get('_attributes'), dict) else {}
@@ -527,6 +544,7 @@ def found_from_search(raw):
         'topic': ({'vacancy_id': str(topic.get('vacancyId') or ''), 'topic_id': str(topic.get('topicId') or ''),
                    'type': _clip(topic.get('initialTopicType'), 40), 'at': _clip(topic.get('creationTime'), 40)}
                   if topic else None),
+        'name': _search_name(raw),
     }
 
 
@@ -1151,13 +1169,17 @@ class HhBridge:
         return {'kind': 'search', 'total': total, 'pages': read, 'items': items}
 
     def _run_resume(self, task):
-        if task.get('reason') == 'score':
-            # Фоновое чтение для балла ИИ — не залпом: пауза человека, переходящего к следующему резюме выдачи.
+        if task.get('reason') in ('score', 'name'):
+            # Фоновое чтение (для балла ИИ, за именем) — не залпом: пауза человека, переходящего к следующему резюме.
             self.site.sleep(random.uniform(*BACKGROUND_RESUME_PAUSE_SECONDS))
         resume, contacts, access = self.site.base_resume(task.get('hash'))
         result = {'kind': 'resume', 'hash': task.get('hash'), 'reason': task.get('reason'), 'resume': resume,
                   'access': access}
-        # Контакты — только когда их ждут после «Взять в работу»: в остальных случаях они порталу не нужны.
+        # Имя — при любом чтении, если hh его показал: карточка «Базы hh» подписывается именем (владелец 26.11.2026).
+        name = names_only(contacts)
+        if name:
+            result['name'] = name
+        # Телефон и почта — только когда их ждут после «Взять в работу»: в остальных случаях они порталу не нужны.
         if task.get('reason') == 'contacts':
             result['contacts'] = contacts
         return result

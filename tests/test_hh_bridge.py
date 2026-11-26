@@ -550,8 +550,13 @@ class HhBridgeTests(unittest.TestCase):
 # ─── Поиск по базе резюме (hh/1.4.0, владелец 25.11.2026) ─────────────────────
 
 def search_item(n, *, updated=1795550400000, status='DENIED_NO_FA', topic=None):
-    """Резюме в выдаче поиска по базе — форма как у живой страницы 25.11.2026 (имён и контактов там нет)."""
+    """Резюме в выдаче поиска по базе — форма как у живой страницы 25.11.2026. У закрытых имени и контактов нет; у
+    доступных без списания hh отдаёт и ФИО, и телефон (проба 26.11: 3 из 20)."""
+    free = status == 'AVAILABLE_WITHOUT_SPEND'
     return {
+        'firstName': [{'string': 'Айгерим'}] if free else None, 'lastName': [{'string': 'Стендова'}] if free else None,
+        'middleName': [None] if free else None,
+        'phone': [{'city': '707', 'country': '7', 'formatted': '123-45-67', 'raw': None, 'number': None}] if free else None,
         '_attributes': {'hash': '%038x' % (0xc0000 + n), 'id': str(900000000 + n), 'updated': updated,
                         'permission': 'view_without_contacts'},
         'title': [{'string': 'Оператор call-центра'}], 'age': [{'string': 20 + n}], 'gender': [{'string': 'female'}],
@@ -635,7 +640,10 @@ class HhBaseBridgeTests(unittest.TestCase):
             'skills': ['Телефонные переговоры', 'Навыки продаж'], 'job_status': 'active_search', 'online': True,
             'last_activity_at': '2026-11-25T09:30:00.500+03:00', 'updated_at': '2026-11-24T20:00:00+00:00', 'access': 'free',
             'topic': {'vacancy_id': '138923446', 'topic_id': '5000000777', 'type': 'INVITATION_BY_EMPLOYER',
-                      'at': '2026-11-25T09:40:00.100+03:00'}})
+                      'at': '2026-11-25T09:40:00.100+03:00'},
+            # Имя — раз hh его показал (контакты без списания); телефона в краткой карточке для портала нет.
+            'name': {'last_name': 'Стендова', 'first_name': 'Айгерим', 'middle_name': None}})
+        self.assertIsNone(hh_bridge.found_from_search(search_item(2))['name'])       # закрытые — имени нет
         self.assertIsNone(hh_bridge.found_from_search({'_attributes': {'hash': 'чужой'}}))
         items, total = hh_bridge.search_from_state(hh_bridge.initial_state(search_page([search_item(2), {'x': 1}])))
         self.assertEqual((len(items), total, items[0]['access']), (1, 6472, 'closed'))
@@ -691,13 +699,29 @@ class HhBaseBridgeTests(unittest.TestCase):
         self.assertEqual((done['1']['ok'], done['1']['total'], done['1']['pages'], len(done['1']['items'])), (True, 6472, 3, 60))
         self.assertEqual(done['2']['contacts']['phones'], ['+77071234567'])
         self.assertEqual((done['2']['access'], done['2']['reason']), ('opened', 'contacts'))
+        self.assertEqual(done['2']['name'], {'last_name': 'Иванова', 'first_name': 'Анна', 'middle_name': None})
         self.assertNotIn('contacts', done['3'])                      # при просмотре контакты не берутся
+        self.assertNotIn('name', done['3'])                          # контакты закрыты — hh имени не показал
         self.assertEqual(done['3']['resume']['languages'], [{'title': 'Казахский', 'degree': 'b2'}])
         self.assertEqual((done['4']['ok'], done['4']['error']), (False, 'неверный хеш резюме'))
         resumes = [path for path, _params in self.http.calls if path.startswith('/resume/')]
         self.assertEqual(resumes, ['/resume/' + taken, '/resume/' + viewed])
         self.assertEqual(self.portal.task_payloads[0]['done'], [])       # первым заходом — просто ждать заданий
         self.assertEqual(self.portal.task_payloads[0]['wait'], 0)
+
+    def test_view_of_open_resume_sends_name_but_no_phone(self):
+        """Рекрутер открыл резюме, чьи контакты hh уже показывает: порталу уходит имя (подпись карточки), но не телефон
+        и не почта — они нужны только после «Взять в работу»."""
+        bridge = self.bridge()
+        seen = '%038x' % 0xc0005
+        self.opened.add(seen)
+        self.portal.tasks = [{'id': '7', 'kind': 'resume', 'hash': seen, 'reason': 'view'}]
+        self.assertEqual(bridge.tasks_round(0), 1)
+        done = {item['id']: item for payload in self.portal.task_payloads for item in payload['done']}
+        self.assertEqual(done['7']['name'], {'last_name': 'Иванова', 'first_name': 'Анна', 'middle_name': None})
+        self.assertNotIn('contacts', done['7'])
+        self.assertNotIn('123-45-67', json.dumps(done['7'], ensure_ascii=False))
+        self.assertNotIn('anna@example.kz', json.dumps(done['7'], ensure_ascii=False))
 
     def test_tasks_not_run_while_login_lost_and_gone_resume(self):
         bridge = self.bridge()

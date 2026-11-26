@@ -8,9 +8,11 @@ import { runSseStream } from '../common/sseClient';
 import { HhResume } from './HhResume';
 import { Empty, Loading, Notice } from './hiringUi';
 import {
-    errorOf, hhAddKeywords, hhBaseExperience, hhBaseLine, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseTone,
-    hhResumeLink, hhSearchBody, longTime, plural,
+    errorOf, hhAddKeywords, hhBaseExperience, hhBaseName, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseSubline,
+    hhBaseTone, hhResumeLink, hhSearchBody, longTime, plural,
 } from './hiringMeta';
+
+const HIDDEN_NAME_HINT = 'hh покажет имя вместе с контактами';
 
 /*
  * «База hh» — поиск кандидатов в базе резюме hh.kz (владелец 25.11.2026: «поиск кандидатов по конкретной вакансии (для
@@ -174,15 +176,17 @@ const VacancyTile = ({ vacancy, active, onClick }) => {
 
 const ResumeCard = ({ item, meId, onOpen }) => {
     const experience = hhBaseExperience(item);
+    const name = hhBaseName(item);
     return (
         <button type="button" onClick={() => onOpen(item.id)}
                 className={`${iosCard} flex min-w-0 flex-col gap-2 p-4 text-left transition hover:ring-blue-200`}>
-            {/* Кружок балла и название — сеткой: на телефоне оболочка ставит «flex items-start» с flex-1 столбиком. */}
+            {/* Кружок балла и имя — сеткой: на телефоне оболочка ставит «flex items-start» с flex-1 столбиком. */}
             <div className="grid items-start gap-3" style={ROW}>
                 <ScoreRing item={item} />
                 <div className="min-w-0">
-                    <div className="truncate text-[15px] font-semibold text-slate-900">{item.title || 'Без должности'}</div>
-                    <div className="truncate text-[12.5px] text-slate-500">{hhBaseLine(item)}</div>
+                    <div className={`truncate text-[15px] font-semibold ${name.hidden ? 'text-slate-400' : 'text-slate-900'}`}
+                         title={name.hidden ? HIDDEN_NAME_HINT : undefined}>{name.text}</div>
+                    <div className="truncate text-[12.5px] text-slate-500">{hhBaseSubline(item)}</div>
                 </div>
             </div>
             {experience && <div className="line-clamp-1 text-[12.5px] text-slate-600">{experience}</div>}
@@ -369,7 +373,7 @@ const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCar
 
     return (
         <IosModal open={Boolean(id)} onClose={onClose} maxWidth="max-w-2xl" sizeKey={item ? 'ready' : 'loading'}
-                  title={item?.title || 'Резюме'} subtitle={item ? hhBaseLine(item) : ''} footer={footer}
+                  title={item ? hhBaseName(item).text : 'Резюме'} subtitle={item ? hhBaseSubline(item) : ''} footer={footer}
                   headerActions={item ? (
                       <button type="button" onClick={copyLink} aria-label="Скопировать ссылку на резюме"
                               title="Скопировать ссылку на это резюме — её можно отправить коллеге" className={iosBtnGhost}>

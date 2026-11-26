@@ -3625,6 +3625,38 @@ def test_hh_base_live_pokes_on_commit(base):
         listener.close()
 
 
+def test_hh_base_names_on_cards(base):
+    """Подпись карточки — имя кандидата, а не должность (владелец 26.11.2026). hh показывает его только у резюме с
+    контактами без списания: такое приходит с именем прямо из поиска; найденным без имени (мост до hh/1.4.2) мост
+    дочитывает страницу резюме фоновым заданием name; закрытым — нет; hh имени так и не показал — неделю не трогаем."""
+    enable_search(base)
+    named = base_found(1, access='free', name={'last_name': 'Стендова', 'first_name': 'Айгерим', 'middle_name': None})
+    search_and_find(base, [named, base_found(2), base_found(3, access='free'), base_found(4, access='free')])
+    assert {row['hash']: row['name'] for row in base_rows(base)} == {
+        base_hash(1): 'Стендова Айгерим', base_hash(2): None, base_hash(3): None, base_hash(4): None}
+    with base['db']._get_cursor() as cur:
+        cur.execute("UPDATE hiring_hh_resumes SET score = 40")      # не сильные — фоновых чтений для балла нет
+    base['clock'].now = BASE_NOW + timedelta(minutes=2)
+    tasks = [t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume']
+    assert [(t['hash'], t['reason']) for t in tasks] == [(base_hash(3), 'name')]       # фоновое — по одному за заход
+    # Сдав результат, мост тем же запросом забирает следующее фоновое — резюме 4.
+    tasks = [t for t in base_tasks(base, [{'id': tasks[0]['id'], 'ok': True, 'kind': 'resume', 'reason': 'name',
+                                            'access': 'free', 'resume': {'title': 'Оператор'},
+                                            'name': {'last_name': 'Иванова', 'first_name': 'Анна'}}])['tasks']
+             if t['kind'] == 'resume']
+    assert [(t['hash'], t['reason']) for t in tasks] == [(base_hash(4), 'name')]
+    base_tasks(base, [{'id': tasks[0]['id'], 'ok': True, 'kind': 'resume', 'reason': 'name', 'access': 'free',
+                       'resume': {'title': 'Оператор'}}])                                  # hh имени не показал
+    assert {row['hash']: row['name'] for row in base_rows(base)} == {
+        base_hash(1): 'Стендова Айгерим', base_hash(2): None, base_hash(3): 'Иванова Анна', base_hash(4): None}
+    base['clock'].now = BASE_NOW + timedelta(minutes=4)
+    assert [t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume'] == []          # закрытым и прочитанным — нет
+    # Повторный поиск с тем же резюме без имени (прежний мост) имени не стирает.
+    with base['db']._get_cursor() as cur:
+        queries.hh_resume_save_found(cur, HH_OPERATOR, hh_base.clean_found(base_found(1, access='free')), BASE_NOW)
+    assert {row['hash']: row['name'] for row in base_rows(base)}[base_hash(1)] == 'Стендова Айгерим'
+
+
 def test_hh_base_take_locks_every_row_of_the_resume(base):
     """Один кандидат найден поиском двух вакансий: второй рекрутер, нажавший «Взять» в другой вакансии, получает
     «уже берёт» — строки резюме под замком разом."""
@@ -3779,6 +3811,7 @@ def test_hh_base_take_waits_for_contacts_then_card_in_work(base):
     assert base_rows(base) == []
     taken = service.hh_base_list(ctx_of(base, REC1), HH_OPERATOR, view='taken')['items']
     assert taken[0]['known']['card_id'] == item['card_id'] and taken[0]['known']['recruiter_name'] == 'Первый Рекрутер'
+    assert taken[0]['name'] == 'Иванова Анна'          # имя из контактов — подпись карточки «Базы hh»
 
 
 def test_hh_base_take_known_candidates(base):

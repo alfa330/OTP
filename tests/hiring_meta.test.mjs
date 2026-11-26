@@ -14,7 +14,7 @@ import {
     HH_NO_ICORE, hhIcoreOptions, hhIcoreValue, hhSettingsBody, hhVacancyMeta,
     hhMoney, hhPeriod, hhResumeSummary, hhSpan,
     HH_KEYWORDS_MAX, hhAddKeywords, hhBaseExperience, hhBaseLine, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseTone,
-    hhSearchBody, HH_RESUME_PARAM, hhResumeFromSearch, hhResumeLink,
+    hhSearchBody, HH_RESUME_PARAM, hhResumeFromSearch, hhResumeLink, hhBaseName, hhBaseSubline,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('hh.kz resume in the card: money, spans, periods and a one-line summary', () => {
@@ -421,6 +421,20 @@ test('hh base search: card lines, score colour, who needs hh for contacts, state
         'Найдено на hh 6\u00a0472 · новых 12 · 25 ноября, 11:00');
     assert.equal(hhBaseSearchLine({ enabled: true, last_run_at: '2026-11-25T14:00:00', last_total: null, last_new: 0 }),
         'новых нет · 25 ноября, 14:00');
+});
+
+test('hh base card caption: candidate name, not the resume title; hidden name until contacts are open', () => {
+    const base = { title: 'Оператор call-центра', age: 26, area: 'Алматы' };
+    assert.deepEqual(hhBaseName({ ...base, name: 'Иванова Анна' }), { text: 'Иванова Анна', hidden: false });
+    assert.equal(hhBaseSubline({ ...base, name: 'Иванова Анна' }), 'Оператор call-центра · 26 лет · Алматы');
+    assert.deepEqual(hhBaseName({ ...base, name: null }), { text: 'Имя скрыто', hidden: true });
+    assert.equal(hhBaseSubline({ ...base, name: null }), 'Оператор call-центра · 26 лет · Алматы');
+    // Сервер ещё прежний (поля name нет) — как было: должность в заголовке, под ней возраст и город.
+    assert.deepEqual(hhBaseName(base), { text: 'Оператор call-центра', hidden: false });
+    assert.equal(hhBaseSubline(base), '26 лет · Алматы');
+    assert.deepEqual(hhBaseName({ name: null }), { text: 'Имя скрыто', hidden: true });
+    assert.equal(hhBaseSubline({ name: 'Анна' }), '');
+    assert.deepEqual(hhBaseName(null), { text: 'Без должности', hidden: false });
 });
 
 test('hh base search settings: keywords from the field and the request body', () => {

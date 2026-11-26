@@ -764,6 +764,13 @@ class HiringService:
                     queries.hh_task_add(cursor, 'resume', 'score', now, priority=hh_base.PRIORITY['score'],
                                         resume_hash=row['resume_hash'])
                     added += 1
+            # Имя у найденных до hh/1.4.2, чьё имя hh показывает (контакты без списания или открыты), — тем же темпом.
+            names_left = hh_base.AUTO_NAME_PER_DAY - queries.hh_tasks_created_since(cursor, 'name', midnight)
+            if names_left > 0:
+                for row in queries.hh_resumes_unnamed_open(cursor, min(names_left, 3), now - hh_base.NAME_RETRY):
+                    queries.hh_task_add(cursor, 'resume', 'name', now, priority=hh_base.PRIORITY['name'],
+                                        resume_hash=row['resume_hash'])
+                    added += 1
         return added
 
     @staticmethod
@@ -883,7 +890,10 @@ class HiringService:
         resume_hash = task['resume_hash']
         resume = hh.clean_resume(result.get('resume'))
         access_state = result.get('access') if result.get('access') in hh_base.ACCESS else None
-        queries.hh_resume_save_full(cursor, resume_hash, resume, access_state, now)
+        # Имя — если hh его показал (мост с hh/1.4.2 шлёт его при любом чтении; раньше — только в контактах).
+        name = hh_base.clean_name(result.get('name')) or (hh_base.clean_name(result.get('contacts'))
+                                                          if task['reason'] == 'contacts' else None)
+        queries.hh_resume_save_full(cursor, resume_hash, resume, access_state, now, full_name=name)
         if result.get('reason') not in (None, task['reason']):
             # Мост читал резюме по прежней причине (для балла), а задание тем временем стало срочнее («Взять в работу») и
             # ушло ему снова: резюме берём, а задание закроет результат с нынешней причиной.
@@ -965,6 +975,9 @@ class HiringService:
         item = {
             'id': row['id'], 'hh_vacancy_id': str(row['hh_vacancy_id']), 'hash': row['resume_hash'],
             'url': hh_base.resume_url(row['resume_hash']),
+            # Подпись карточки (владелец 26.11.2026): имя с hh, а кандидат уже в воронке — из его карточки; None — hh
+            # прячет имя до открытия контактов.
+            'name': row.get('full_name') or (known or {}).get('full_name') or None,
             'title': snippet.get('title'), 'age': snippet.get('age'), 'gender': snippet.get('gender'),
             'area': snippet.get('area'), 'salary': snippet.get('salary'),
             'experience_text': hh_base.experience_text(snippet.get('experience_months'))

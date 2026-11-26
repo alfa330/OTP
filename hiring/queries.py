@@ -1186,10 +1186,10 @@ def hh_tasks_take(cursor, now, lease, limit=5):
            FOR UPDATE SKIP LOCKED
     """, (now, now - lease, int(limit)))
     rows = [_jsons(row, 'params') for row in _all(cursor)]
-    # Фоновое чтение резюме для балла — по одному за заход: мост читает его с паузой человека и сразу возвращается за
-    # заданиями — «Взять в работу» и открытое рекрутером резюме не ждут очереди фоновых.
-    background = [row for row in rows if row['reason'] == 'score']
-    rows = [row for row in rows if row['reason'] != 'score'] + background[:1]
+    # Фоновое чтение резюме (для балла, за именем) — по одному за заход: мост читает его с паузой человека и сразу
+    # возвращается за заданиями — «Взять в работу» и открытое рекрутером резюме не ждут очереди фоновых.
+    background = [row for row in rows if row['reason'] in ('score', 'name')]
+    rows = [row for row in rows if row['reason'] not in ('score', 'name')] + background[:1]
     if rows:
         cursor.execute("UPDATE hiring_hh_tasks SET dispatched_at = %s, attempts = attempts + 1 WHERE id = ANY(%s)",
                        (now, [row['id'] for row in rows]))
@@ -1236,7 +1236,7 @@ def hh_tasks_created_since(cursor, reason, since):
 _RESUME_COLUMNS = ("r.id, r.hh_vacancy_id, r.resume_hash, r.resume_id, r.snippet, r.resume, r.resume_at, r.hh_updated_at, "
                    "r.last_activity_at, r.access, r.topic, r.score, r.score_basis, r.score_data, r.scored_at, "
                    "r.score_tries, r.score_error, r.status, r.status_by, r.status_by_name, r.status_at, r.card_id, "
-                   "r.take_outcome, r.contacts_note, r.found_at, r.seen_at")
+                   "r.take_outcome, r.contacts_note, r.found_at, r.seen_at, r.full_name")
 
 
 def _resume_row(row):
@@ -1248,13 +1248,14 @@ def hh_resume_save_found(cursor, hh_vacancy_id, found, now):
     Резюме обновилось на hh — балл ставится заново (свежее резюме — свежий балл). → (id, новое ли)."""
     cursor.execute("""
         INSERT INTO hiring_hh_resumes (hh_vacancy_id, resume_hash, resume_id, snippet, hh_updated_at, last_activity_at,
-                                       access, topic, found_at, seen_at)
-        VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s)
+                                       access, topic, found_at, seen_at, full_name)
+        VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s, %s)
         ON CONFLICT (hh_vacancy_id, resume_hash) DO UPDATE
            SET snippet = EXCLUDED.snippet, resume_id = COALESCE(EXCLUDED.resume_id, hiring_hh_resumes.resume_id),
                last_activity_at = COALESCE(EXCLUDED.last_activity_at, hiring_hh_resumes.last_activity_at),
                access = COALESCE(EXCLUDED.access, hiring_hh_resumes.access),
                topic = COALESCE(EXCLUDED.topic, hiring_hh_resumes.topic),
+               full_name = COALESCE(EXCLUDED.full_name, hiring_hh_resumes.full_name),
                seen_at = EXCLUDED.seen_at,
                score = CASE WHEN EXCLUDED.hh_updated_at > hiring_hh_resumes.hh_updated_at
                                  AND hiring_hh_resumes.status = 'new' THEN NULL ELSE hiring_hh_resumes.score END,
@@ -1264,7 +1265,8 @@ def hh_resume_save_found(cursor, hh_vacancy_id, found, now):
         RETURNING id, (xmax = 0)
     """, (int(hh_vacancy_id), found['hash'], found.get('resume_id'), json.dumps(found['snippet'], ensure_ascii=False),
           found.get('hh_updated_at'), found.get('last_activity_at'), found.get('access'),
-          json.dumps(found['topic'], ensure_ascii=False) if found.get('topic') else None, now, now))
+          json.dumps(found['topic'], ensure_ascii=False) if found.get('topic') else None, now, now,
+          found.get('full_name')))
     row = cursor.fetchone()
     return int(row[0]), bool(row[1])
 
@@ -1282,16 +1284,17 @@ def hh_resumes_by_hash(cursor, resume_hash, lock=False):
     return [_resume_row(row) for row in _all(cursor)]
 
 
-def hh_resume_save_full(cursor, resume_hash, resume, access, now):
-    """Полное резюме со страницы hh — во все строки этого резюме. Балл по краткой карточке ставится заново по полному
-    (hh_resumes_claim_for_score берёт строки с полным резюме и баллом по карточке)."""
+def hh_resume_save_full(cursor, resume_hash, resume, access, now, full_name=None):
+    """Полное резюме со страницы hh (и имя, если hh его показал) — во все строки этого резюме. Балл по краткой карточке
+    ставится заново по полному (hh_resumes_claim_for_score берёт строки с полным резюме и баллом по карточке)."""
     payload = json.dumps(resume, ensure_ascii=False) if resume else None
     cursor.execute("""
         UPDATE hiring_hh_resumes
            SET resume = COALESCE(%s::jsonb, resume), resume_at = %s, access = COALESCE(%s, access),
+               full_name = COALESCE(%s, full_name),
                score_tries = CASE WHEN %s AND score_basis = 'snippet' THEN 0 ELSE score_tries END
          WHERE resume_hash = %s
-    """, (payload, now, access, payload is not None, resume_hash))
+    """, (payload, now, access, full_name, payload is not None, resume_hash))
     return cursor.rowcount
 
 
@@ -1373,6 +1376,22 @@ def hh_resumes_strong_without_full(cursor, min_score, limit):
          ORDER BY best.score DESC
          LIMIT %s
     """, (int(min_score), int(limit)))
+    return _all(cursor)
+
+
+def hh_resumes_unnamed_open(cursor, limit, retry_since):
+    """Резюме, чьё имя hh показывает (контакты без списания или уже открыты), а у нас его нет — найдены мостом до
+    hh/1.4.2. Мост дочитает страницу резюме (hh_base.AUTO_NAME_PER_DAY); прочитанные за имя после retry_since и всё ещё
+    без имени — не трогать (hh имени не показал)."""
+    cursor.execute("""
+        SELECT DISTINCT ON (r.resume_hash) r.resume_hash, r.hh_vacancy_id
+          FROM hiring_hh_resumes r
+         WHERE r.status IN ('new', 'taking') AND r.full_name IS NULL AND r.access IN ('free', 'opened')
+           AND NOT EXISTS (SELECT 1 FROM hiring_hh_tasks t WHERE t.kind = 'resume' AND t.resume_hash = r.resume_hash
+                              AND (t.done_at IS NULL OR (t.reason = 'name' AND t.created_at >= %s)))
+         ORDER BY r.resume_hash, r.id
+         LIMIT %s
+    """, (retry_since, int(limit)))
     return _all(cursor)
 
 

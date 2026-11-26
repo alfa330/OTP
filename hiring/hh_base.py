@@ -59,6 +59,13 @@ PAGE_SIZE = 20
 VIEW_FRESH = timedelta(minutes=10)
 AUTO_FULL_MIN_SCORE = 70
 AUTO_FULL_PER_DAY = 30
+# Имя на карточке (владелец 26.11.2026: «чтобы в карточках отображались имена кандидатов, а не вакансия»): hh показывает
+# его только у резюме с контактами без списания или уже открытыми — новые приходят с именем прямо из поиска, а найденным
+# раньше (мост до hh/1.4.2 имён не брал) мост дочитывает страницу резюме — тем же фоновым темпом, своим суточным пределом.
+# Резюме, где hh имени так и не показал, повторно не читаются неделю.
+AUTO_NAME_PER_DAY = 40
+NAME_RETRY = timedelta(days=7)
+BACKGROUND_REASONS = ('score', 'name')
 
 # Задание ушло мосту, а результата нет (мост перезапустился, связь оборвалась) — через TASK_LEASE оно уходит снова; после
 # TASK_ATTEMPTS попыток считается неудачным.
@@ -66,8 +73,8 @@ TASK_LEASE = timedelta(minutes=5)
 TASK_ATTEMPTS = 3
 TASK_KINDS = ('search', 'resume')
 # Чем меньше, тем раньше мост берёт задание: контакты после «Взять в работу» и резюме, открытое рекрутером, — сразу;
-# поиск — следом; полное резюме для балла — когда больше нечего делать.
-PRIORITY = {'contacts': 1, 'view': 2, 'manual': 3, 'auto': 5, 'score': 7}
+# поиск — следом; полное резюме для балла и имя — когда больше нечего делать.
+PRIORITY = {'contacts': 1, 'view': 2, 'manual': 3, 'auto': 5, 'score': 7, 'name': 8}
 # После «Взять в работу» мост проверяет, открыл ли рекрутер контакты на hh: сразу, потом через минуту, три и десять. Плюс
 # проверка, когда рекрутер возвращается во вкладку iCORE. Дальше — только кнопкой «Проверить контакты».
 CONTACTS_WATCH_SECONDS = (60, 180, 600)
@@ -230,9 +237,17 @@ def _jobs(raw, limit):
     return out
 
 
+def clean_name(raw):
+    """ФИО от моста ({last_name, first_name, middle_name}) → «Фамилия Имя Отчество» или None."""
+    if not isinstance(raw, dict):
+        return None
+    name = ' '.join(part for part in (_text(raw.get(key), 80) for key in ('last_name', 'first_name', 'middle_name')) if part)
+    return name[:200] or None
+
+
 def clean_found(raw):
-    """Резюме из выдачи поиска (краткая карточка) → поля для базы или None (нет хеша — не резюме). Имени и контактов
-    в выдаче нет: hh их не показывает до открытия контактов, а мост их и не берёт."""
+    """Резюме из выдачи поиска (краткая карточка) → поля для базы или None (нет хеша — не резюме). Контактов в выдаче
+    портал не берёт; имя — только если hh его показал (контакты без списания или уже открыты)."""
     if not isinstance(raw, dict):
         return None
     resume_hash = str(raw.get('hash') or '').strip().lower()
@@ -264,7 +279,7 @@ def clean_found(raw):
     return {'hash': resume_hash, 'resume_id': int(resume_id) if resume_id else None, 'snippet': snippet,
             'hh_updated_at': hh.parse_moment(raw.get('updated_at')),
             'last_activity_at': hh.parse_moment(raw.get('last_activity_at')),
-            'access': access, 'topic': topic}
+            'access': access, 'topic': topic, 'full_name': clean_name(raw.get('name'))}
 
 
 def clean_contacts(raw):
@@ -272,8 +287,7 @@ def clean_contacts(raw):
     другого нет — карточку не завести (ключ дубля — телефон), и это видно рекрутеру."""
     if not isinstance(raw, dict):
         return None
-    full_name = ' '.join(part for part in (_text(raw.get(key), 80) for key in ('last_name', 'first_name', 'middle_name'))
-                         if part)
+    full_name = clean_name(raw) or ''
     phones = raw.get('phones') if isinstance(raw.get('phones'), list) else [raw.get('phone')]
     phone = next((normalized for normalized in (rules.normalize_phone(item) for item in phones[:5] if item) if normalized),
                  None)
