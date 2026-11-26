@@ -15,8 +15,29 @@ import {
     hhMoney, hhPeriod, hhResumeSummary, hhSpan,
     HH_KEYWORDS_MAX, hhAddKeywords, hhBaseExperience, hhBaseLine, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseTone,
     hhSearchBody, HH_RESUME_PARAM, hhResumeFromSearch, hhResumeLink, hhBaseName, hhBaseSubline, hhBaseFunnelState,
-    boardCardDay, hhBaseCanReject,
+    boardCardDay, hhBaseCanReject, hhUpdatedLabel, hhBaseTags, hhBaseLastJob,
 } from '../src/components/hiring/hiringMeta.js';
+
+test('hh base card like HeadHunter: «Обновлено …», tags and the last job', () => {
+    assert.equal(hhUpdatedLabel('2026-11-26T09:00:00', '2026-11-26'), 'Обновлено сегодня');
+    assert.equal(hhUpdatedLabel('2026-11-25T23:59:00', '2026-11-26'), 'Обновлено вчера');
+    assert.equal(hhUpdatedLabel('2026-11-03T10:00:00', '2026-11-26'), 'Обновлено 3 ноября');
+    assert.equal(hhUpdatedLabel('2025-12-30T10:00:00', '2026-01-02'), 'Обновлено 30 декабря 2025');
+    assert.equal(hhUpdatedLabel(null, '2026-11-26'), '');
+    assert.deepEqual(hhBaseTags({ online: true, job_status: 'active_search', job_status_label: 'Активно ищет работу', access: 'free',
+        topic: { label: 'откликался' } }), [
+        { text: 'Онлайн', tone: 'green' }, { text: 'Активно ищет работу', tone: 'green' },
+        { text: 'Контакты без списания', tone: 'green' }, { text: 'Откликался', tone: 'slate' }]);
+    assert.deepEqual(hhBaseTags({ job_status: 'not_looking_for_job', job_status_label: 'Не ищет работу', access: 'closed' }),
+        [{ text: 'Не ищет работу', tone: 'slate' }]);
+    assert.deepEqual(hhBaseTags({ access: 'opened' }), [{ text: 'Контакты открыты', tone: 'green' }]);
+    assert.deepEqual(hhBaseTags(null), []);
+    assert.deepEqual(hhBaseLastJob({ experience: [{ company: 'Sulpak', position: 'Продавец-консультант', start: '2023-09-01', end: '2026-10-01' }] }),
+        { company: 'Sulpak', line: 'Продавец-консультант • сен 2023 — окт 2026' });
+    assert.deepEqual(hhBaseLastJob({ experience: [{ company: 'Цон', position: '', start: '2025-05-01', end: null }] }),
+        { company: 'Цон', line: 'май 2025 — сейчас' });
+    assert.equal(hhBaseLastJob({ experience: [] }), null);
+});
 
 test('hh base «Не подходит»: new for anyone, taking for the one taking and the lead, never taken or rejected', () => {
     assert.equal(hhBaseCanReject({ status: 'new' }, 10), true);

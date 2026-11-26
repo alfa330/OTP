@@ -1079,6 +1079,16 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
         response.call_on_close(wa_live.base_hub.release)
         return response
 
+    # Фото кандидата (владелец 26.11.2026: «чтобы подтянулась и аватарка»): на hh превью открывается только под сессией
+    # кабинета — его приносит мост, отдаёт портал. Кэш — у браузера смотрящего, сутки.
+    @hiring_route('/hh/base/photo/<resume_hash>')
+    def hiring_hh_base_photo(resume_hash, ctx):
+        content_type, data, _fetched_at = service.hh_base_photo(ctx, resume_hash)
+        response = Response(data, mimetype=content_type)
+        response.headers['Cache-Control'] = 'private, max-age=86400'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+
     @hiring_route('/hh/base/<vacancy_key>/resumes')
     def hiring_hh_base_resumes(vacancy_key, ctx):
         return jsonify(_json(service.hh_base_list(ctx, vacancy_key, view=request.args.get('view') or 'new',

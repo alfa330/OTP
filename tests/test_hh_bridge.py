@@ -118,7 +118,12 @@ class FakeResponse:
         self._body = body
         self.url = url
         self.headers = headers or {}
-        self.text = text if text is not None else (body if isinstance(body, str) else json.dumps(body or {}))
+        if isinstance(body, bytes):                     # картинка (фото кандидата)
+            self.text = text if text is not None else body.decode('latin-1')
+            self.content = body
+        else:
+            self.text = text if text is not None else (body if isinstance(body, str) else json.dumps(body or {}))
+            self.content = self.text.encode('utf-8')
         self.set_cookies = set_cookies or {}
 
     def json(self):
@@ -549,11 +554,18 @@ class HhBridgeTests(unittest.TestCase):
 
 # ─── Поиск по базе резюме (hh/1.4.0, владелец 25.11.2026) ─────────────────────
 
-def search_item(n, *, updated=1795550400000, status='DENIED_NO_FA', topic=None):
+def search_item(n, *, updated=1795550400000, status='DENIED_NO_FA', topic=None, photo=False):
     """Резюме в выдаче поиска по базе — форма как у живой страницы 25.11.2026. У закрытых имени и контактов нет; у
-    доступных без списания hh отдаёт и ФИО, и телефон (проба 26.11: 3 из 20)."""
+    доступных без списания hh отдаёт и ФИО, и телефон (проба 26.11: 3 из 20). Фото — адреса относительные, с подписью
+    t/h (открываются только под сессией кабинета)."""
     free = status == 'AVAILABLE_WITHOUT_SPEND'
+    photos = [{'id': 7000 + n, 'state': 'processed', 'title': None,
+               'avatar': '/photo/%d.jpeg?t=1795600000&h=avAtar-%d' % (7000 + n, n),
+               'preview': '/photo/%d.jpeg?t=1795600000&h=pRev_%d' % (7100 + n, n),
+               'big': '/photo/%d.jpeg?t=1795600000&h=b%d' % (7200 + n, n),
+               'large': '/photo/%d.jpeg?t=1795600000&h=l%d' % (7300 + n, n)}] if photo else [None]
     return {
+        'photoUrls': photos, 'photoAccess': 'visible' if free else 'can_open',
         'firstName': [{'string': 'Айгерим'}] if free else None, 'lastName': [{'string': 'Стендова'}] if free else None,
         'middleName': [None] if free else None,
         'phone': [{'city': '707', 'country': '7', 'formatted': '123-45-67', 'raw': None, 'number': None}] if free else None,
@@ -642,7 +654,11 @@ class HhBaseBridgeTests(unittest.TestCase):
             'topic': {'vacancy_id': '138923446', 'topic_id': '5000000777', 'type': 'INVITATION_BY_EMPLOYER',
                       'at': '2026-11-25T09:40:00.100+03:00'},
             # Имя — раз hh его показал (контакты без списания); телефона в краткой карточке для портала нет.
-            'name': {'last_name': 'Стендова', 'first_name': 'Айгерим', 'middle_name': None}})
+            'name': {'last_name': 'Стендова', 'first_name': 'Айгерим', 'middle_name': None},
+            'photo_path': None})                                     # фото нет; путь — только мосту, порталу не уходит
+        self.assertEqual(hh_bridge.found_from_search(search_item(5, photo=True))['photo_path'],
+                         '/photo/7105.jpeg?t=1795600000&h=pRev_5')
+        self.assertIsNone(hh_bridge.photo_path([{'preview': 'https://evil.example/photo/1.jpeg', 'avatar': '/photo/../x'}]))
         self.assertIsNone(hh_bridge.found_from_search(search_item(2))['name'])       # закрытые — имени нет
         self.assertIsNone(hh_bridge.found_from_search({'_attributes': {'hash': 'чужой'}}))
         items, total = hh_bridge.search_from_state(hh_bridge.initial_state(search_page([search_item(2), {'x': 1}])))
@@ -708,6 +724,50 @@ class HhBaseBridgeTests(unittest.TestCase):
         self.assertEqual(resumes, ['/resume/' + taken, '/resume/' + viewed])
         self.assertEqual(self.portal.task_payloads[0]['done'], [])       # первым заходом — просто ждать заданий
         self.assertEqual(self.portal.task_payloads[0]['wait'], 0)
+
+    def test_search_brings_photos_once_and_only_to_a_portal_that_takes_them(self):
+        """Фото кандидата (владелец 26.11.2026: «чтобы подтянулась и аватарка»): превью из выдачи мост скачивает сразу за
+        страницей и отдаёт порталу байтами; адрес картинки порталу не уходит. Прежний портал (без photos в задании) — ни
+        одной картинки; уже отданное фото повторно не качается; hh ответил не картинкой — просто без фото."""
+        import base64
+        jpeg = b'\xff\xd8\xff\xe0' + b'\x10' * 64
+        self.pages = {0: [search_item(n, photo=n % 2 == 0) for n in range(20)]}
+        self.http.routes['/photo/*'] = lambda path, params: FakeResponse(200, jpeg, headers={'Content-Type': 'image/jpeg'})
+        bridge = self.bridge()
+        task = {'kind': 'search', 'vacancy_id': OPERATOR, 'pages': 1, 'params': {'text': 'оператор'}}
+
+        def photo_calls():
+            return [path for path, _params in self.http.calls if path.startswith('/photo/')]
+
+        def done(task_id):
+            return next(item for payload in self.portal.task_payloads for item in payload['done'] if item['id'] == task_id)
+
+        self.portal.tasks = [dict(task, id='1')]
+        bridge.tasks_round(0)
+        self.assertEqual(photo_calls(), [])
+        self.assertFalse(any('photo' in item or 'photo_path' in item for item in done('1')['items']))
+        self.portal.tasks = [dict(task, id='2', photos=True)]
+        bridge.tasks_round(0)
+        self.assertEqual(len(photo_calls()), 10)
+        self.assertTrue(all(path.startswith('/photo/71') for path in photo_calls()))          # превью, не 40-пиксельный avatar
+        items = done('2')['items']
+        with_photo = [item for item in items if 'photo' in item]
+        self.assertEqual(len(with_photo), 10)
+        self.assertEqual(with_photo[0]['photo'], {'type': 'image/jpeg', 'data': base64.b64encode(jpeg).decode('ascii')})
+        self.assertFalse(any('photo_path' in item for item in items))
+        # Тот же поиск ещё раз — картинки уже отданы порталу.
+        self.portal.tasks = [dict(task, id='3', photos=True)]
+        bridge.tasks_round(0)
+        self.assertEqual(len(photo_calls()), 10)
+        self.assertFalse(any('photo' in item for item in done('3')['items']))
+        # Новые резюме, а hh вместо картинки отдал страницу — без фото, мост живёт как жил.
+        self.pages = {0: [search_item(100 + n, photo=True) for n in range(3)]}
+        self.http.routes['/photo/*'] = lambda path, params: FakeResponse(403, 'нельзя', headers={'Content-Type': 'text/html'})
+        self.portal.tasks = [dict(task, id='4', photos=True)]
+        bridge.tasks_round(0)
+        self.assertEqual(done('4')['ok'], True)
+        self.assertFalse(any('photo' in item for item in done('4')['items']))
+        self.assertIsNone(bridge.trouble)
 
     def test_view_of_open_resume_sends_name_but_no_phone(self):
         """Рекрутер открыл резюме, чьи контакты hh уже показывает: порталу уходит имя (подпись карточки), но не телефон

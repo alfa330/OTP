@@ -26,6 +26,8 @@ hh подписывает запрос настоящим щелчком мыш�
 сильных по краткой карточке кандидатов и не больше AUTO_FULL_PER_DAY в сутки (просмотр кандидат видит у себя на hh).
 """
 
+import base64
+import binascii
 import re
 from datetime import timedelta
 
@@ -235,6 +237,29 @@ def _jobs(raw, limit):
         if entry['company'] or entry['position']:
             out.append(entry)
     return out
+
+
+PHOTO_MAX_BYTES = 200 * 1024
+_PHOTO_MAGIC = (('image/jpeg', b'\xff\xd8\xff'), ('image/png', b'\x89PNG\r\n\x1a\n'))
+
+
+def clean_photo(raw):
+    """Фото от моста ({type, data: base64}) → (тип, байты) или None. Тип — по самим байтам (JPEG, PNG, WebP), а не по
+    слову моста: отдаётся браузеру как картинка, чужое содержимое под видом фото не пройдёт."""
+    if not isinstance(raw, dict) or not isinstance(raw.get('data'), str):
+        return None
+    try:
+        data = base64.b64decode(raw['data'], validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    if not 0 < len(data) <= PHOTO_MAX_BYTES:
+        return None
+    for content_type, magic in _PHOTO_MAGIC:
+        if data.startswith(magic):
+            return content_type, data
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp', data
+    return None
 
 
 def clean_name(raw):

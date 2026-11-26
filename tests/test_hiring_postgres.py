@@ -3728,6 +3728,41 @@ def test_hh_base_taken_by_another_disappears_and_reject_while_taking(base):
     assert listed(REC2, 'rejected') == [base_hash(1)]                                 # «Не подошли» — общие
 
 
+def test_hh_base_photos_from_search_and_resume_page(base):
+    """Фото кандидата (владелец 26.11.2026: «чтобы подтянулась и аватарка»): портал просит мост приносить фото (photos в
+    заданиях), хранит превью из выдачи и со страницы резюме — одно на резюме, во всех вакансиях; у кандидата — признак
+    «фото есть», картинку отдаёт сам и только тем, кому открыта «База hh»; не картинку под видом фото не сохраняет."""
+    import base64
+    jpeg = b'\xff\xd8\xff\xe0' + b'\x07' * 40
+    enable_search(base)
+    tasks = base_tasks(base)['tasks']
+    search = next(task for task in tasks if task['kind'] == 'search')
+    assert search['photos'] is True
+    photo = {'type': 'image/jpeg', 'data': base64.b64encode(jpeg).decode('ascii')}
+    fake = {'type': 'image/jpeg', 'data': base64.b64encode(b'<script>alert(1)</script>').decode('ascii')}
+    base_tasks(base, [{'id': search['id'], 'ok': True, 'total': 3,
+                       'items': [base_found(1, photo=photo), base_found(2, photo=fake), base_found(3)]}])
+    flags = {row['hash']: row['photo'] for row in base_rows(base)}
+    assert flags == {base_hash(1): True, base_hash(2): False, base_hash(3): False}
+    service = base['service']
+    content_type, data, _at = service.hh_base_photo(ctx_of(base, REC1), base_hash(1))
+    assert (content_type, data) == ('image/jpeg', jpeg)
+    with pytest.raises(HiringError) as caught:
+        service.hh_base_photo(ctx_of(base, REC1), base_hash(3))
+    assert caught.value.status == 404
+    with pytest.raises(HiringError) as caught:
+        service.hh_base_photo(ctx_of(base, STRANGER), base_hash(1))
+    assert caught.value.status == 403
+    # Фото со страницы резюме (найдено до hh/1.5) — когда рекрутер открыл окно.
+    row_id = next(row['id'] for row in base_rows(base) if row['hash'] == base_hash(3))
+    service.hh_base_get(ctx_of(base, REC1), row_id, refresh=True)
+    task = next(t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume')
+    assert (task['reason'], task['photos']) == ('view', True)
+    base_tasks(base, [{'id': task['id'], 'ok': True, 'reason': 'view', 'resume': {'title': 'Оператор'}, 'access': 'closed',
+                       'photo': photo}])
+    assert service.hh_base_get(ctx_of(base, REC1), row_id)['photo'] is True
+
+
 def test_hh_base_take_locks_every_row_of_the_resume(base):
     """Один кандидат найден поиском двух вакансий: второй рекрутер, нажавший «Взять» в другой вакансии, получает
     «уже берёт» — строки резюме под замком разом."""
@@ -3815,7 +3850,7 @@ def test_hh_base_view_refreshes_resume_and_rescores(base):
     item = base['service'].hh_base_get(ctx_of(base, REC1), row_id, refresh=True)
     assert item['refreshing'] is True and item['has_full'] is False and item['resume']['title'] == 'Оператор call-центра'
     tasks = [task for task in base_tasks(base)['tasks'] if task['kind'] == 'resume']
-    assert tasks == [{'id': tasks[0]['id'], 'kind': 'resume', 'hash': base_hash(1), 'reason': 'view'}]
+    assert tasks == [{'id': tasks[0]['id'], 'kind': 'resume', 'hash': base_hash(1), 'reason': 'view', 'photos': True}]
     full = {'title': 'Оператор call-центра', 'languages': [{'title': 'Казахский', 'degree': 'b2'}],
             'experience': [{'company': 'ТОО Ромашка', 'position': 'Оператор', 'description': 'Входящие звонки'}],
             'email': 'скрыто@hh.kz'}

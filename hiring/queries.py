@@ -1236,7 +1236,8 @@ def hh_tasks_created_since(cursor, reason, since):
 _RESUME_COLUMNS = ("r.id, r.hh_vacancy_id, r.resume_hash, r.resume_id, r.snippet, r.resume, r.resume_at, r.hh_updated_at, "
                    "r.last_activity_at, r.access, r.topic, r.score, r.score_basis, r.score_data, r.scored_at, "
                    "r.score_tries, r.score_error, r.status, r.status_by, r.status_by_name, r.status_at, r.card_id, "
-                   "r.take_outcome, r.contacts_note, r.found_at, r.seen_at, r.full_name")
+                   "r.take_outcome, r.contacts_note, r.found_at, r.seen_at, r.full_name, "
+                   "EXISTS (SELECT 1 FROM hiring_hh_photos p WHERE p.resume_hash = r.resume_hash) AS has_photo")
 
 
 def _resume_row(row):
@@ -1296,6 +1297,22 @@ def hh_resume_save_full(cursor, resume_hash, resume, access, now, full_name=None
          WHERE resume_hash = %s
     """, (payload, now, access, full_name, payload is not None, resume_hash))
     return cursor.rowcount
+
+
+def hh_photo_save(cursor, resume_hash, content_type, data, now):
+    """Фото резюме от моста — одно на резюме: новое заменяет прежнее."""
+    cursor.execute("""
+        INSERT INTO hiring_hh_photos (resume_hash, content, content_type, fetched_at) VALUES (%s, %s, %s, %s)
+        ON CONFLICT (resume_hash) DO UPDATE
+           SET content = EXCLUDED.content, content_type = EXCLUDED.content_type, fetched_at = EXCLUDED.fetched_at
+    """, (resume_hash, bytes(data), content_type, now))
+
+
+def hh_photo_get(cursor, resume_hash):
+    """(тип, байты, когда пришло) или None."""
+    cursor.execute("SELECT content_type, content, fetched_at FROM hiring_hh_photos WHERE resume_hash = %s", (resume_hash,))
+    row = cursor.fetchone()
+    return (row[0], bytes(row[1]), row[2]) if row else None
 
 
 def hh_resume_status(cursor, row_id, status, now, *, by=None, by_name=None, card_id=None, take_outcome=None, note=None):

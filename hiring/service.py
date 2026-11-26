@@ -783,10 +783,12 @@ class HiringService:
     def _hh_task_payload(task):
         if task['kind'] == 'search':
             params = task.get('params') or {}
+            # photos — портал принимает фото кандидатов (мост с hh/1.5 приносит превью из выдачи).
             return {'id': str(task['id']), 'kind': 'search', 'vacancy_id': str(task['hh_vacancy_id']),
                     'params': params.get('params') or {}, 'pages': params.get('pages') or hh_base.NEXT_PAGES,
-                    'stop_before': params.get('stop_before')}
-        return {'id': str(task['id']), 'kind': 'resume', 'hash': task['resume_hash'], 'reason': task['reason']}
+                    'stop_before': params.get('stop_before'), 'photos': True}
+        return {'id': str(task['id']), 'kind': 'resume', 'hash': task['resume_hash'], 'reason': task['reason'],
+                'photos': True}
 
     def hh_agent_tasks(self, payload, sleep=None, clock=time.monotonic):
         """Длинный опрос моста (POST /api/hiring/hh/agent/tasks): приносит результаты прошлых заданий и ждёт новых до
@@ -882,6 +884,10 @@ class HiringService:
             _row_id, inserted = queries.hh_resume_save_found(cursor, task['hh_vacancy_id'], item, now)
             found += 1
             new += 1 if inserted else 0
+            # Фото кандидата (владелец 26.11.2026: «чтобы подтянулась и аватарка») — мост приносит превью из выдачи.
+            photo = hh_base.clean_photo(raw.get('photo'))
+            if photo:
+                queries.hh_photo_save(cursor, item['hash'], photo[0], photo[1], now)
         total = result.get('total')
         total = total if isinstance(total, int) and not isinstance(total, bool) and total >= 0 else None
         queries.hh_search_finished(cursor, task['hh_vacancy_id'], now, total=total, found=found, new=new, error=None)
@@ -900,6 +906,9 @@ class HiringService:
         name = hh_base.clean_name(result.get('name')) or (hh_base.clean_name(result.get('contacts'))
                                                           if task['reason'] == 'contacts' else None)
         queries.hh_resume_save_full(cursor, resume_hash, resume, access_state, now, full_name=name)
+        photo = hh_base.clean_photo(result.get('photo'))
+        if photo:
+            queries.hh_photo_save(cursor, resume_hash, photo[0], photo[1], now)
         if result.get('reason') not in (None, task['reason']):
             # Мост читал резюме по прежней причине (для балла), а задание тем временем стало срочнее («Взять в работу») и
             # ушло ему снова: резюме берём, а задание закроет результат с нынешней причиной.
@@ -984,6 +993,8 @@ class HiringService:
             # Подпись карточки (владелец 26.11.2026): имя с hh, а кандидат уже в воронке — из его карточки; None — hh
             # прячет имя до открытия контактов.
             'name': row.get('full_name') or (known or {}).get('full_name') or None,
+            # Фото с hh есть — картинку отдаёт /hh/base/photo/<хеш> (владелец 26.11.2026: «чтобы подтянулась и аватарка»).
+            'photo': bool(row.get('has_photo')),
             'title': snippet.get('title'), 'age': snippet.get('age'), 'gender': snippet.get('gender'),
             'area': snippet.get('area'), 'salary': snippet.get('salary'),
             'experience_text': hh_base.experience_text(snippet.get('experience_months'))
@@ -1055,6 +1066,17 @@ class HiringService:
     def hh_base_live_check(self, ctx):
         """Живой канал вкладки «База hh» (wa_live.py) — тем же, кому открыта вкладка."""
         self._hh_reader(ctx)
+
+    def hh_base_photo(self, ctx, resume_hash):
+        """Фото кандидата «Базы hh» — тем же, кому открыта вкладка. → (тип, байты, когда пришло); нет — 404."""
+        self._hh_reader(ctx)
+        if not hh_base.is_hash(str(resume_hash or '')):
+            raise HiringError('HIRING_NOT_FOUND', 'Фото нет', 404)
+        with self._cursor() as cursor:
+            photo = queries.hh_photo_get(cursor, str(resume_hash))
+        if not photo:
+            raise HiringError('HIRING_NOT_FOUND', 'Фото нет', 404)
+        return photo
 
     def hh_base_take(self, ctx, row_id):
         """«Взять в работу» (владелец 25.11.2026): кандидат закрепляется за рекрутером, мост ждёт, когда тот откроет

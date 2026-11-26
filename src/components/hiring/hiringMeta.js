@@ -320,6 +320,39 @@ export const hhBaseExperience = (item) => {
     return [total, job].filter(Boolean).join(' · ');
 };
 
+/* Карточка «Базы hh» в духе выдачи HeadHunter (владелец 26.11.2026: «в целом стиль надо сделать похожим на сам
+   HeadHunter»): фото слева, имя, «26 лет • Обновлено вчера», зарплата, зелёные метки, строки «Опыт», «Последнее место
+   работы», «Где живёт». */
+
+/** «Обновлено сегодня» / «Обновлено вчера» / «Обновлено 24 ноября» — когда кандидат обновил резюме на hh. */
+export const hhUpdatedLabel = (iso, today = todayIso()) => {
+    const day = String(iso || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return '';
+    if (day === today) return 'Обновлено сегодня';
+    if (day === addDays(today, -1)) return 'Обновлено вчера';
+    const [year, month, date] = day.split('-').map(Number);
+    return `Обновлено ${date} ${MONTHS[month - 1]}${String(year) === today.slice(0, 4) ? '' : ` ${year}`}`;
+};
+
+/** Метки под зарплатой, как на hh: онлайн, статус поиска работы, контакты без списания или открыты, переписка с нами. */
+export const hhBaseTags = (item) => {
+    if (!item) return [];
+    const tags = [];
+    if (item.online) tags.push({ text: 'Онлайн', tone: 'green' });
+    if (item.job_status_label) tags.push({ text: item.job_status_label, tone: item.job_status === 'active_search' ? 'green' : 'slate' });
+    if (item.access === 'free') tags.push({ text: 'Контакты без списания', tone: 'green' });
+    else if (item.access === 'opened') tags.push({ text: 'Контакты открыты', tone: 'green' });
+    if (item.topic?.label) tags.push({ text: `${item.topic.label[0].toUpperCase()}${item.topic.label.slice(1)}`, tone: 'slate' });
+    return tags;
+};
+
+/** Последнее место работы: {company, line: «Продавец-консультант • сен 2023 — окт 2026»} или null. */
+export const hhBaseLastJob = (item) => {
+    const last = (item?.experience || [])[0];
+    if (!last || !(last.company || last.position)) return null;
+    return { company: last.company || '', line: [last.position, hhPeriod(last.start, last.end)].filter(Boolean).join(' • ') };
+};
+
 /** Цвет балла ИИ: от 70 — зелёный, 50–69 — жёлтый, ниже — красный, без балла — серый. */
 export const hhBaseTone = (score) => (score == null ? 'slate' : score >= 70 ? 'green' : score >= 50 ? 'amber' : 'red');
 

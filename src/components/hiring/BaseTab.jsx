@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ExternalLink, Link2, Loader2, Plus, RefreshCw, Search, Settings2, Sparkles, X } from 'lucide-react';
+import { Check, ExternalLink, Link2, Loader2, Plus, RefreshCw, Search, Settings2, Sparkles, UserRound, X } from 'lucide-react';
 import {
     IosHint, IosModal, IosPager, IosSegmented, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
 } from '../ui/ios';
@@ -8,8 +8,9 @@ import { runSseStream } from '../common/sseClient';
 import { HhResume } from './HhResume';
 import { Empty, Loading, Notice } from './hiringUi';
 import {
-    errorOf, hhAddKeywords, hhBaseCanReject, hhBaseExperience, hhBaseName, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseSubline,
-    hhBaseTone, hhResumeLink, hhSearchBody, longTime, plural,
+    errorOf, hhAddKeywords, hhBaseCanReject, hhBaseLastJob, hhBaseName, hhBaseNeedsHh, hhBaseSearchLine,
+    hhBaseState, hhBaseSubline, hhBaseTags, hhBaseTone, hhMoney, hhResumeLink, hhSearchBody, hhUpdatedLabel, initials, longTime,
+    plural,
 } from './hiringMeta';
 
 const HIDDEN_NAME_HINT = 'hh покажет имя вместе с контактами';
@@ -179,25 +180,169 @@ const VacancyTile = ({ vacancy, active, onClick }) => {
     );
 };
 
-const ResumeCard = ({ item, meId, onOpen }) => {
-    const experience = hhBaseExperience(item);
-    const name = hhBaseName(item);
+/* Фото кандидата (владелец 26.11.2026: «чтобы подтянулась и аватарка»): на hh превью открывается только под сессией
+   кабинета — его приносит мост, отдаёт портал (/hh/base/photo/<хеш>, со входом — поэтому через api, а не адресом в img).
+   Загруженное помнится до перезагрузки страницы: список перечитывается живым каналом, картинки — нет. Фото нет — серый
+   квадрат с буквами имени, как пустое фото на hh; зелёная точка — кандидат сейчас на hh. */
+const photoCache = new Map();
+
+const HhPhoto = ({ api, item, size = 'md' }) => {
+    const [src, setSrc] = useState(() => (item.photo ? photoCache.get(item.hash) || null : null));
+    useEffect(() => {
+        if (!item.photo) {
+            setSrc(null);
+            return undefined;
+        }
+        if (photoCache.has(item.hash)) {
+            setSrc(photoCache.get(item.hash));
+            return undefined;
+        }
+        let alive = true;
+        api.blob(`/hh/base/photo/${item.hash}`)
+            .then(({ data }) => {
+                const url = URL.createObjectURL(data);
+                photoCache.set(item.hash, url);
+                if (alive) setSrc(url);
+            })
+            .catch(() => { photoCache.set(item.hash, null); });
+        return () => { alive = false; };
+    }, [api, item.hash, item.photo]);
+    const box = size === 'lg' ? 'h-20 w-20 rounded-[20px]' : 'h-14 w-14 rounded-2xl sm:h-[88px] sm:w-[88px] sm:rounded-[22px]';
+    const letters = item.name ? initials(item.name) : '';
     return (
-        <button type="button" onClick={() => onOpen(item.id)}
-                className={`${iosCard} flex min-w-0 flex-col gap-2 p-4 text-left transition hover:ring-blue-200`}>
-            {/* Кружок балла и имя — сеткой: на телефоне оболочка ставит «flex items-start» с flex-1 столбиком. */}
-            <div className="grid items-start gap-3" style={ROW}>
-                <ScoreRing item={item} />
+        <span className={`relative block shrink-0 ${box}`}>
+            {src ? <img src={src} alt="" className={`h-full w-full object-cover ${box}`} />
+                : (
+                    <span className={`grid h-full w-full place-items-center bg-slate-100 text-slate-400 ${box}`}>
+                        {letters ? <span className="text-[18px] font-medium text-slate-500">{letters}</span> : <UserRound size={size === 'lg' ? 28 : 26} />}
+                    </span>
+                )}
+            {item.online && (
+                <span className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-emerald-500 ring-[3px] ring-white" title="Сейчас на hh" />
+            )}
+        </span>
+    );
+};
+
+/** «Взять в работу» (и с карточки, и из окна): вкладку hh — сразу в щелчке, пустую (иначе браузер её заблокирует), адрес
+ *  резюме — когда сервер закрепил кандидата; отказ (другой рекрутер успел раньше) — вкладка закрывается. */
+const takeResume = (api, item) => {
+    const needsHh = hhBaseNeedsHh(item);
+    let win = null;
+    if (needsHh) {
+        try {
+            win = window.open('about:blank', '_blank');
+            if (win) win.opener = null;
+        } catch (error) {
+            win = null;
+        }
+    }
+    return api.post(`/hh/base/resume/${item.id}/take`)
+        .then(({ data }) => {
+            if (win && !win.closed) win.location.replace(item.url);
+            return { data, needsHh };
+        })
+        .catch((error) => {
+            if (win && !win.closed) win.close();
+            throw error;
+        });
+};
+
+const TAG_TONES = {
+    green: 'bg-emerald-50 text-emerald-700',
+    slate: 'bg-slate-100 text-slate-600',
+};
+
+/* Строка «подпись — значение», как в выдаче hh: подпись серым слева, на телефоне — над значением. */
+const FactRow = ({ label, children }) => (
+    <div className="grid gap-x-6 gap-y-0.5 border-t border-slate-100 py-3 sm:grid-cols-[150px_minmax(0,1fr)]">
+        <div className="text-[13px] text-slate-400">{label}</div>
+        <div className="min-w-0 text-[13.5px] leading-snug text-slate-800">{children}</div>
+    </div>
+);
+
+/* Карточка кандидата в духе выдачи hh (владелец 26.11.2026: «в целом стиль надо сделать похожим на сам HeadHunter»):
+   фото слева, имя ссылкой (у закрытых hh его прячет — «Имя скрыто»), должность, «26 лет • Обновлено вчера», зарплата,
+   зелёные метки; строки «Опыт», «Последнее место работы», «Где живёт», вывод ИИ; внизу — действия, как «Открыть
+   контакты» на hh: «Взять в работу» и «Не подходит». Щелчок по карточке — окно резюме. */
+const ResumeCard = ({ api, item, meId, caps, busy, onOpen, onTake, onReject }) => {
+    const name = hhBaseName(item);
+    const tags = hhBaseTags(item);
+    const lastJob = hhBaseLastJob(item);
+    const inFunnel = Boolean(item.known && !item.known.is_closed);
+    // Точка состояния — только когда есть что сказать (берут, взят, уже в воронке, не подошёл): у нового «ищет работу» и
+    // «контакты без списания» уже стоят метками выше.
+    const state = item.status !== 'new' || inFunnel ? hhBaseState(item, meId) : null;
+    const canTake = item.status === 'new' && caps.take && !inFunnel;
+    const experience = item.experience_text === 'без опыта' ? 'Без опыта' : item.experience_text;
+    const canReject = hhBaseCanReject(item, meId, caps.manage);
+    const meta = [item.age ? `${item.age} ${plural(item.age, 'год', 'года', 'лет')}` : '', hhUpdatedLabel(item.hh_updated_at)]
+        .filter(Boolean);
+    const open = () => onOpen(item.id);
+    return (
+        // Без role="button": внутри — свои кнопки («Взять в работу», «Не подходит»), а кнопка в кнопке — неверная разметка.
+        <article tabIndex={0} onClick={open} aria-label={`${name.text}${item.title ? `, ${item.title}` : ''}`}
+                 onKeyDown={(event) => { if (event.key === 'Enter' && event.target === event.currentTarget) open(); }}
+                 className="min-w-0 cursor-pointer rounded-3xl bg-white p-4 ring-1 ring-slate-200/80 transition hover:ring-slate-300 sm:p-6">
+            {/* Фото и шапка — сеткой: на телефоне оболочка ставит «flex items-start» с flex-1 столбиком. */}
+            <div className="grid items-start gap-4 sm:gap-6" style={ROW}>
+                <HhPhoto api={api} item={item} />
                 <div className="min-w-0">
-                    <div className={`truncate text-[15px] font-semibold ${name.hidden ? 'text-slate-400' : 'text-slate-900'}`}
-                         title={name.hidden ? HIDDEN_NAME_HINT : undefined}>{name.text}</div>
-                    <div className="truncate text-[12.5px] text-slate-500">{hhBaseSubline(item)}</div>
+                    <div className="grid items-start gap-3" style={{ gridTemplateColumns: 'minmax(0, 1fr) auto' }}>
+                        <div className="min-w-0">
+                            <div className={`break-words text-[17px] font-medium leading-snug sm:text-[19px] ${name.hidden ? 'text-slate-400' : 'text-blue-600'}`}
+                                 title={name.hidden ? HIDDEN_NAME_HINT : undefined}>{name.text}</div>
+                            {item.title && <div className="mt-0.5 break-words text-[14px] text-slate-900">{item.title}</div>}
+                        </div>
+                        <ScoreRing item={item} />
+                    </div>
+                    {meta.length > 0 && (
+                        <div className="mt-1.5 text-[13.5px] text-slate-700">
+                            {meta.map((part, index) => (
+                                <React.Fragment key={part}>
+                                    {index > 0 && <span className="mx-1.5 text-slate-300">•</span>}
+                                    <span className={part.startsWith('Обновлено') ? 'text-emerald-600' : ''}>{part}</span>
+                                </React.Fragment>
+                            ))}
+                        </div>
+                    )}
+                    {item.salary && <div className="mt-0.5 text-[14px] font-medium text-slate-900">{hhMoney(item.salary)}</div>}
+                    {tags.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                            {tags.map((tag) => (
+                                <span key={tag.text} className={`rounded-lg px-2 py-1 text-[12.5px] ${TAG_TONES[tag.tone] || TAG_TONES.slate}`}>{tag.text}</span>
+                            ))}
+                        </div>
+                    )}
                 </div>
             </div>
-            {experience && <div className="line-clamp-1 text-[12.5px] text-slate-600">{experience}</div>}
-            {item.verdict && <div className="line-clamp-2 text-[13px] leading-snug text-slate-800">{item.verdict}</div>}
-            <StateDot state={hhBaseState(item, meId)} />
-        </button>
+            <div className="mt-4">
+                {experience && <FactRow label="Опыт">{experience}</FactRow>}
+                {lastJob && (
+                    <FactRow label="Последнее место работы">
+                        {lastJob.company && <div className="font-medium">{lastJob.company}</div>}
+                        {lastJob.line && <div className="text-slate-600">{lastJob.line}</div>}
+                    </FactRow>
+                )}
+                {item.area && <FactRow label="Где живёт">{item.area}</FactRow>}
+                {item.verdict && <FactRow label="Балл ИИ">{item.verdict}</FactRow>}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
+                {canTake && (
+                    <button type="button" disabled={busy} onClick={(event) => { event.stopPropagation(); onTake(item); }}
+                            className="rounded-xl bg-blue-600 px-4 py-2.5 text-[14px] font-medium text-white transition hover:bg-blue-700 disabled:opacity-60">
+                        Взять в работу
+                    </button>
+                )}
+                {canReject && (
+                    <button type="button" disabled={busy} onClick={(event) => { event.stopPropagation(); onReject(item); }}
+                            className="rounded-xl bg-slate-100 px-4 py-2.5 text-[14px] font-medium text-slate-800 transition hover:bg-slate-200 disabled:opacity-60">
+                        Не подходит
+                    </button>
+                )}
+                <span className="ml-auto"><StateDot state={state} /></span>
+            </div>
+        </article>
     );
 };
 
@@ -306,29 +451,16 @@ const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCar
 
     const take = () => {
         if (!item || busy) return;
-        const needsHh = hhBaseNeedsHh(item);
-        // Вкладку hh — сразу в обработчике щелчка (иначе браузер заблокирует всплывающее окно), но пустую: адрес резюме
-        // она получит, когда сервер закрепит кандидата за нами. Другой рекрутер успел раньше — вкладка закрывается, а
-        // окно показывает, кто берёт: контакты открывает человек, и открывать их второму незачем.
-        let win = null;
-        if (needsHh) {
-            try {
-                win = window.open('about:blank', '_blank');
-                if (win) win.opener = null;
-            } catch (error) {
-                win = null;
-            }
-        }
+        // Другой рекрутер успел раньше — вкладка hh закрывается (takeResume), а окно показывает, кто берёт: контакты
+        // открывает человек, и открывать их второму незачем.
         setBusy(true);
-        api.post(`/hh/base/resume/${item.id}/take`)
-            .then(({ data }) => {
-                if (win && !win.closed) win.location.replace(item.url);
+        takeResume(api, item)
+            .then(({ data, needsHh }) => {
                 setItem(data);
                 onChanged();
                 toast(needsHh ? 'Откройте контакты на hh — карточка появится сама' : 'Берём контакты с hh…', 'success');
             })
             .catch((error) => {
-                if (win && !win.closed) win.close();
                 toast(errorOf(error, 'Не получилось взять в работу'), 'error');
                 api.get(`/hh/base/resume/${item.id}`).then(({ data }) => setItem(data)).catch(() => {});
                 onChanged();
@@ -391,7 +523,9 @@ const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCar
             {!item && !loadError && <Loading text="Открываем резюме…" />}
             {item && (
                 <div className="space-y-4">
-                    <div className="grid items-start gap-4 rounded-2xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200/60" style={ROW}>
+                    <div className="grid items-start gap-4 rounded-2xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200/60"
+                         style={{ gridTemplateColumns: 'auto auto minmax(0, 1fr)' }}>
+                        <HhPhoto api={api} item={item} size="lg" />
                         <ScoreRing item={item} size="lg" />
                         <div className="min-w-0 space-y-2">
                             <div className="text-[14px] font-medium leading-snug text-slate-900">
@@ -647,6 +781,28 @@ const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged, openI
             .catch((requestError) => toast(errorOf(requestError, 'Поиск не запустился'), 'error'));
     };
     const changed = useCallback(() => { loadOverview(); loadList(); onChanged(); }, [loadOverview, loadList, onChanged]);
+    // Действия прямо на карточке, как на hh: «Взять в работу» — и сразу окно резюме («Ждём контакты», проверка по возврату
+    // во вкладку iCORE); «Не подходит» — карточка уходит в «Не подошли».
+    const [cardBusy, setCardBusy] = useState(null);
+    const takeFromCard = (item) => {
+        if (cardBusy) return;
+        setCardBusy(item.id);
+        takeResume(api, item)
+            .then(({ needsHh }) => {
+                toast(needsHh ? 'Откройте контакты на hh — карточка появится сама' : 'Берём контакты с hh…', 'success');
+                onOpenId(item.id);
+            })
+            .catch((error) => toast(errorOf(error, 'Не получилось взять в работу'), 'error'))
+            .finally(() => { setCardBusy(null); changed(); });
+    };
+    const rejectFromCard = (item) => {
+        if (cardBusy) return;
+        setCardBusy(item.id);
+        api.post(`/hh/base/resume/${item.id}/status`, { status: 'rejected' })
+            .then(() => toast('Отмечен «Не подходит» — он в «Не подошли»', 'success'))
+            .catch((error) => toast(errorOf(error, 'Не получилось'), 'error'))
+            .finally(() => { setCardBusy(null); changed(); });
+    };
     // Резюме открыто по ссылке и оно другой вакансии — список под окном переключается на неё (когда плитки загрузятся:
     // окно по ссылке может открыться раньше них).
     const [linkedVacancy, setLinkedVacancy] = useState(null);
@@ -722,8 +878,12 @@ const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged, openI
                             ? (current.running ? 'Ищем на hh — первые резюме появятся через минуту-две' : 'Новых кандидатов нет')
                             : view === 'taken' ? 'Из базы ещё никого не взяли' : 'Пусто'}</Empty>
                     ) : (
-                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                            {items.map((item) => <ResumeCard key={item.id} item={item} meId={meId} onOpen={onOpenId} />)}
+                        // Одной колонкой, как выдача hh.
+                        <div className="max-w-5xl space-y-3">
+                            {items.map((item) => (
+                                <ResumeCard key={item.id} api={api} item={item} meId={meId} caps={caps} busy={cardBusy === item.id}
+                                            onOpen={onOpenId} onTake={takeFromCard} onReject={rejectFromCard} />
+                            ))}
                         </div>
                     )}
                     {list && list.pages > 1 && (

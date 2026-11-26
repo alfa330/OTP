@@ -1093,6 +1093,24 @@ class HhBaseTests(unittest.TestCase):
                           'phone_raw': '+998 90 1'})
         self.assertIsNone(hh_base.clean_contacts({'first_name': 'Анна', 'phones': ['+998 90 123 45 67']})['phone'])
 
+    def test_photo_is_checked_by_its_bytes(self):
+        """Фото от моста — base64; тип — по самим байтам (JPEG, PNG, WebP), слово моста не в счёт; больше 200 КБ, пусто,
+        не base64 или не картинка — None."""
+        import base64
+        from hiring import hh_base
+
+        def raw(data, kind='image/jpeg'):
+            return {'type': kind, 'data': base64.b64encode(data).decode('ascii')}
+
+        jpeg, png = b'\xff\xd8\xff\xe0' + b'1' * 30, b'\x89PNG\r\n\x1a\n' + b'2' * 30
+        webp = b'RIFF' + b'\x10\x00\x00\x00' + b'WEBP' + b'3' * 20
+        self.assertEqual(hh_base.clean_photo(raw(jpeg)), ('image/jpeg', jpeg))
+        self.assertEqual(hh_base.clean_photo(raw(png, 'image/jpeg')), ('image/png', png))
+        self.assertEqual(hh_base.clean_photo(raw(webp)), ('image/webp', webp))
+        for bad in (raw(b'<html>hello</html>', 'image/jpeg'), raw(b''), raw(jpeg + b'0' * (200 * 1024)),
+                    {'type': 'image/jpeg', 'data': 'не base64!'}, {'data': 5}, None, 'строка'):
+            self.assertIsNone(hh_base.clean_photo(bad), str(bad)[:40])
+
     def test_candidate_text_score_and_card_entries(self):
         from hiring import hh, hh_base
         snippet = hh_base.clean_found({'hash': 'b' * 38, 'title': 'Оператор', 'age': 21, 'gender': 'male',

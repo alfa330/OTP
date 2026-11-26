@@ -82,6 +82,7 @@ hh чаще одного запроса за раз, между запросам
 """
 
 import argparse
+import base64
 import html as html_lib
 import json
 import logging
@@ -103,7 +104,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'hh/1.4.2'
+VERSION = 'hh/1.5.0'
 log = logging.getLogger('cdr_bridge.hh_bridge')
 
 PUSH_PATH = '/api/hiring/hh/agent/push'
@@ -120,6 +121,16 @@ SEARCH_PAGE_SIZE = 20
 SEARCH_MAX_PAGES = 5
 # Фоновое чтение резюме (для балла ИИ) — с паузой человека перед каждым; резюме, открытое рекрутером, — без неё.
 BACKGROUND_RESUME_PAUSE_SECONDS = (6.0, 15.0)
+# Фото кандидата (владелец 26.11.2026: «чтобы подтянулась и аватарка»): превью из выдачи поиска — адрес только под
+# сессией кабинета (без неё hh отвечает 403, проба 26.11), поэтому его скачивает мост: сразу за страницей, как браузер
+# рекрутера грузит картинки выдачи, — короткая пауза, раз на резюме (что уже отдано — в состоянии моста), не больше
+# PHOTOS_PER_TASK за поиск. Портал хранит у себя и отдаёт сам.
+PHOTO_PAUSE_SECONDS = (0.2, 0.7)
+PHOTO_MAX_BYTES = 150 * 1024
+PHOTO_TYPES = ('image/jpeg', 'image/png', 'image/webp')
+PHOTO_PATH = re.compile(r'^/photo/[A-Za-z0-9_\-/]+\.(?:jpe?g|png|webp)(?:\?[A-Za-z0-9_=&\-.%]*)?$')
+PHOTOS_PER_TASK = 100
+PHOTOS_LIMIT = 20000
 # Параметры страницы поиска, которые мост принимает от портала, — только поля формы поиска hh.
 SEARCH_PARAMS = ('text', 'area', 'search_period', 'order_by', 'pos', 'logic', 'exp_period', 'relocation', 'currency_code',
                  'ored_clusters', 'job_search_status', 'age_from', 'age_to', 'gender', 'salary_from', 'salary_to')
@@ -491,6 +502,19 @@ def _search_name(raw):
     return names if names['last_name'] or names['first_name'] else None
 
 
+def photo_path(photo_urls):
+    """Превью фото из photoUrls выдачи или страницы резюме ([{avatar, preview, big, large, …}]) → путь на hh или None.
+    Превью (не 40-пиксельный avatar) — чтобы на карточке и на экранах с плотными пикселями фото не мылилось."""
+    for entry in photo_urls if isinstance(photo_urls, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        for key in ('preview', 'avatar'):
+            value = entry.get(key)
+            if isinstance(value, str) and PHOTO_PATH.match(value):
+                return value
+    return None
+
+
 def names_only(contacts):
     """Из разобранных контактов — только ФИО (телефон и почта порталу нужны лишь после «Взять в работу»)."""
     if not isinstance(contacts, dict):
@@ -545,6 +569,8 @@ def found_from_search(raw):
                    'type': _clip(topic.get('initialTopicType'), 40), 'at': _clip(topic.get('creationTime'), 40)}
                   if topic else None),
         'name': _search_name(raw),
+        # Адрес превью фото — мосту, чтобы скачать картинку; порталу уходят уже байты (photo), сам адрес — нет.
+        'photo_path': photo_path(raw.get('photoUrls')),
     }
 
 
@@ -751,13 +777,37 @@ class Site:
 
     def base_resume(self, resume_hash):
         """Резюме из базы — страница резюме, открытая из поиска → (резюме без контактов, контакты-или-None, доступ к
-        контактам). Контакты hh показывает только открытые: кнопку «Открыть контакты» мост не трогает."""
+        контактам, путь превью фото-или-None). Контакты hh показывает только открытые: кнопку «Открыть контакты» мост не
+        трогает."""
         if not RESUME_HASH.match(str(resume_hash or '')):
             raise SiteTrouble(SITE_ERROR, 'неверный хеш резюме')
         state = initial_state(self._get('/resume/%s' % resume_hash, {'hhtmFrom': 'resume_search_result'},
                                         json_body=False, referer=self.host + '/search/resume'))
         resume, _letter = resume_from_state(state, resume_hash)
-        return resume, contacts_from_state(state), access_from_state(state)
+        page = (state or {}).get('resume') if isinstance(state, dict) else None
+        photo = photo_path(_value(page.get('photoUrls'))) if isinstance(page, dict) else None
+        return resume, contacts_from_state(state), access_from_state(state), photo
+
+    def photo(self, path, referer=None):
+        """Превью фото кандидата → (тип, байты) или None. Не страница: беда с картинкой (не тот ответ, обрыв) — просто
+        без фото, мост не отступает. Пауза — короткая, как у браузера, грузящего картинки выдачи."""
+        if not PHOTO_PATH.match(str(path or '')):
+            return None
+        self._count_request()
+        try:
+            response = self.http.get(self.host + path, headers={
+                'User-Agent': self.user_agent, 'Accept-Language': 'ru-RU,ru;q=0.9',
+                'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+                'Referer': referer or (self.host + '/search/resume')}, timeout=SITE_TIMEOUT, allow_redirects=False)
+        except requests.RequestException:
+            return None
+        finally:
+            self.sleep(random.uniform(*PHOTO_PAUSE_SECONDS))
+        content_type = str(response.headers.get('Content-Type') or '').split(';')[0].strip().lower()
+        data = response.content or b''
+        if response.status_code != 200 or content_type not in PHOTO_TYPES or not 0 < len(data) <= PHOTO_MAX_BYTES:
+            return None
+        return content_type, data
 
 
 def grown_states(previous, current):
@@ -816,7 +866,7 @@ class HhBridge:
         """Что уже отдано порталу, отпечатки счётчиков вакансий и очередь, которую портал ещё не подтвердил: очередь
         на диске — иначе перезапуск между чтением выдачи и ответом портала терял бы отклики (счётчики-то уже сошлись)."""
         path = self.config.get('state_file')
-        state = {'seen': [], 'fingerprints': {}}
+        state = {'seen': [], 'fingerprints': {}, 'photos': []}
         if path and os.path.exists(path):
             try:
                 with open(path, encoding='utf-8') as handle:
@@ -824,11 +874,14 @@ class HhBridge:
                 if isinstance(loaded, dict):
                     state['seen'] = [str(x) for x in loaded.get('seen') or []][-SEEN_LIMIT:]
                     state['fingerprints'] = {str(k): str(v) for k, v in (loaded.get('fingerprints') or {}).items()}
+                    # Резюме, чьё фото уже отдано порталу (хеши): повторно картинку не качаем.
+                    state['photos'] = [str(x) for x in loaded.get('photos') or []][-PHOTOS_LIMIT:]
                     self.pending = [item for item in loaded.get('pending') or []
                                     if isinstance(item, dict) and item.get('topic_id')]
             except (OSError, ValueError) as exc:
                 log.warning('состояние моста не прочиталось (%s) — начинаю с чистого: повторы отсеет портал', exc)
         self._seen = set(state['seen'])
+        self._photos = set(state['photos'])
         return state
 
     def _save_state(self):
@@ -836,8 +889,10 @@ class HhBridge:
         if not path:
             return
         self.state['seen'] = self.state['seen'][-SEEN_LIMIT:]
+        self.state['photos'] = self.state.get('photos', [])[-PHOTOS_LIMIT:]
         self.state['pending'] = self.pending
         self._seen = set(self.state['seen'])
+        self._photos = set(self.state['photos'])
         try:
             _write_json_atomic(path, self.state)
         except OSError as exc:
@@ -1147,6 +1202,8 @@ class HhBridge:
         except (TypeError, ValueError):
             pages = 1
         stop_before = parse_moment(task.get('stop_before'))
+        # Фото — только если портал их принимает (photos в задании, с hh/1.5): прежний портал их бы молча выбросил.
+        photos_left = PHOTOS_PER_TASK if task.get('photos') is True else 0
         items, seen, total, read = [], set(), None, 0
         for number in range(pages):
             if number:
@@ -1155,8 +1212,14 @@ class HhBridge:
             read += 1
             total = page_total if total is None else total
             for item in found:
+                path = item.pop('photo_path', None)
                 if item['hash'] not in seen:
                     seen.add(item['hash'])
+                    if photos_left > 0:
+                        photo = self._photo_payload(item['hash'], path)
+                        if photo:
+                            item['photo'] = photo
+                            photos_left -= 1
                     items.append(item)
             if len(found) < SEARCH_PAGE_SIZE:
                 break
@@ -1172,9 +1235,15 @@ class HhBridge:
         if task.get('reason') in ('score', 'name'):
             # Фоновое чтение (для балла ИИ, за именем) — не залпом: пауза человека, переходящего к следующему резюме.
             self.site.sleep(random.uniform(*BACKGROUND_RESUME_PAUSE_SECONDS))
-        resume, contacts, access = self.site.base_resume(task.get('hash'))
+        resume, contacts, access, path = self.site.base_resume(task.get('hash'))
         result = {'kind': 'resume', 'hash': task.get('hash'), 'reason': task.get('reason'), 'resume': resume,
                   'access': access}
+        # Фото — найденным до hh/1.5 (в поиске их ещё не брали): страница резюме и так открыта.
+        if task.get('photos') is True:
+            photo = self._photo_payload(task.get('hash'), path,
+                                        referer='%s/resume/%s' % (self.site.host, task.get('hash')))
+            if photo:
+                result['photo'] = photo
         # Имя — при любом чтении, если hh его показал: карточка «Базы hh» подписывается именем (владелец 26.11.2026).
         name = names_only(contacts)
         if name:
@@ -1183,6 +1252,17 @@ class HhBridge:
         if task.get('reason') == 'contacts':
             result['contacts'] = contacts
         return result
+
+    def _photo_payload(self, resume_hash, path, referer=None):
+        """Фото резюме для портала — {type, data (base64)} — если его ещё не отдавали и hh его отдал; иначе None."""
+        if not path or not RESUME_HASH.match(str(resume_hash or '')) or resume_hash in self._photos:
+            return None
+        got = self.site.photo(path, referer=referer)
+        if not got:
+            return None
+        self._photos.add(resume_hash)
+        self.state.setdefault('photos', []).append(resume_hash)
+        return {'type': got[0], 'data': base64.b64encode(got[1]).decode('ascii')}
 
     def _sleep(self, wait):
         """Пауза без заданий: пока последний такт прошёл как надо, пульс обновляется раз в HEARTBEAT_SECONDS."""
