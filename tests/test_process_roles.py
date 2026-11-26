@@ -24,6 +24,7 @@ STREAM_PATHS = {
     '/api/pbx/agent/stream': 'pbx/routes.py',
     '/api/shift_auction/test_events': 'shift_auction/routes.py',
     '/api/hiring/wa/stream': 'hiring/routes.py',
+    '/api/hiring/hh/base/stream': 'hiring/routes.py',
     '/api/thermoboxes/stream': 'thermoboxes/routes.py',
 }
 # Стрим на секунды (озвучка тренажёра), остаётся в api — см. Caddyfile.
@@ -73,7 +74,7 @@ def test_stream_limits_capped_by_thread_budget():
     assert 'connection_limit=WAITRESS_CONN_LIMIT,' in MONOLITH
     for name in ('SHIFT_AUCTION_STREAM_LIMIT', 'WAZZUP_PILOT_STREAM_LIMIT', 'PBX_STREAM_LIMIT',
                  'OP_WALLBOARD_LIVE_STREAM_LIMIT', 'BELL_STREAM_LIMIT', 'HIRING_WA_STREAM_LIMIT',
-                 'THERMOBOX_STREAM_LIMIT'):
+                 'HIRING_HH_STREAM_LIMIT', 'THERMOBOX_STREAM_LIMIT'):
         pattern = rf"_env_int\('{name}', \d+, minimum=\d+, maximum=WAITRESS_THREADS\)"
         hits = [file for file, text in BACKEND.items() if re.search(pattern, text)]
         assert len(hits) == 1, f'{name}: нужен потолок WAITRESS_THREADS ровно в одном файле, найдено {hits}'
@@ -105,7 +106,7 @@ def test_compose_runs_three_roles_of_one_image():
     realtime = COMPOSE[COMPOSE.index('  realtime:'):COMPOSE.index('  worker:')]
     threads = int(re.search(r'WAITRESS_THREADS: "(\d+)"', realtime).group(1))
     limits = [int(value) for value in re.findall(r'_STREAM_LIMIT: "(\d+)"', realtime)]
-    assert len(limits) == 7 and sum(limits) < threads, (threads, limits)
+    assert len(limits) == 8 and sum(limits) < threads, (threads, limits)
     assert int(re.search(r'WAITRESS_CONN_LIMIT: "(\d+)"', realtime).group(1)) > threads
 
 

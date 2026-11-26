@@ -4,6 +4,7 @@ import {
     IosHint, IosModal, IosPager, IosSegmented, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
 } from '../ui/ios';
 import { copyText } from '../call_qa/evalLink';
+import { runSseStream } from '../common/sseClient';
 import { HhResume } from './HhResume';
 import { Empty, Loading, Notice } from './hiringUi';
 import {
@@ -24,10 +25,18 @@ import {
  *
  * У каждого резюме своя ссылка (владелец 26.11.2026): открытое окно — в адресе ?view=hiring&hh_resume=<номер>
  * (метку ведёт HiringView), кнопка «Ссылка» в шапке окна копирует её для коллеги.
+ *
+ * В реальном времени (владелец 26.11.2026: «то что берут в работу и т.д другие операции были в реальном времени потому
+ * что пару рекрутеров могут брать в работу то что другой уже взял»): живой канал /hh/base/stream (hiring/wa_live.py)
+ * тычет «изменились кандидаты вакансии …» — плитки, список и открытое резюме перечитываются сразу, и у второго
+ * рекрутера «Взять в работу» пропадает, едва первый его нажал. Опрос — страховка: редкий, пока канал жив, и каждые
+ * 10 секунд, когда его нет.
  */
 
 const VACANCY_KEY = 'hiring.base.vacancy';
-const LIST_POLL_MS = 15000;
+const LIST_POLL_MS = 10000;
+const LIVE_POLL_MS = 60000;
+const PULSE_COALESCE_MS = 200;
 const PAGE_SIZE = 30;
 
 const VIEWS = [
@@ -63,6 +72,54 @@ const storeVacancy = (value) => {
     } catch (error) {
         // Приватное окно: выбор просто не запомнится.
     }
+};
+
+const visible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
+
+/* Живой канал вкладки: {live, pulse}. pulse меняется на каждый тычок ({n, vacancies}: номера вакансий hh, null —
+   перечитать всё); подключился (и переподключился после обрыва) — тоже «перечитать всё»: пока канала не было, тычки не
+   копились. Скрытая вкладка соединение рвёт — место под поток держит только видимая. */
+const useBasePulse = (api) => {
+    const [live, setLive] = useState(false);
+    const [pulse, setPulse] = useState(null);
+    useEffect(() => {
+        if (!api.streamUrl || typeof document === 'undefined') return undefined;
+        let stream = null;
+        let n = 0;
+        let wasLive = false;
+        const bump = (payload) => {
+            n += 1;
+            setPulse({ n, vacancies: payload?.all || !Array.isArray(payload?.v) ? null : payload.v.map(String) });
+        };
+        const open = () => {
+            if (stream || !visible()) return;
+            stream = runSseStream({
+                url: api.streamUrl('/hh/base/stream'),
+                getHeaders: api.headers,
+                onEvent: (event, payload) => { if (event === 'base') bump(payload); },
+                onState: (state) => {
+                    const now = state === 'live';
+                    if (now && !wasLive) bump({ all: 1 });
+                    wasLive = now;
+                    setLive(now);
+                },
+            });
+        };
+        const close = () => {
+            stream?.close();
+            stream = null;
+            wasLive = false;
+            setLive(false);
+        };
+        const onVisibility = () => (visible() ? open() : close());
+        open();
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => {
+            document.removeEventListener('visibilitychange', onVisibility);
+            close();
+        };
+    }, [api]);
+    return { live, pulse };
 };
 
 /** Балл ИИ кружком: цвет — по порогам; ещё не оценён — ИИ думает. */
@@ -150,13 +207,30 @@ const Points = ({ items, tone }) => (items?.length ? (
     </ul>
 ) : null);
 
-const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCard, onLoaded }) => {
+const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCard, onLoaded, refreshKey = 0 }) => {
     const [item, setItem] = useState(null);
     const [loadError, setLoadError] = useState('');
     const [busy, setBusy] = useState(false);
     const polls = useRef(0);
     const loadedRef = useRef(onLoaded);
     useEffect(() => { loadedRef.current = onLoaded; }, [onLoaded]);
+
+    // Тычок живого канала по вакансии резюме (или такт опроса без канала) — окно перечитывается без «обновить с hh»:
+    // другой рекрутер нажал «Взять в работу» — у этого кнопка пропадает сразу. Смена резюме — не повод: его грузит
+    // эффект ниже.
+    const seenKey = useRef(refreshKey);
+    useEffect(() => {
+        if (refreshKey === seenKey.current) return undefined;
+        seenKey.current = refreshKey;
+        if (!id) return undefined;
+        let alive = true;
+        api.get(`/hh/base/resume/${id}`)
+            .then(({ data }) => {
+                if (alive) setItem((previous) => (previous && Number(previous.id) === Number(data.id) ? data : previous));
+            })
+            .catch(() => {});
+        return () => { alive = false; };
+    }, [api, id, refreshKey]);
 
     useEffect(() => {
         if (!id) {
@@ -223,16 +297,33 @@ const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCar
 
     const take = () => {
         if (!item || busy) return;
-        // Вкладку hh — сразу в обработчике щелчка (иначе браузер заблокирует всплывающее окно): контакты открывает человек.
-        if (hhBaseNeedsHh(item)) window.open(item.url, '_blank', 'noopener');
+        const needsHh = hhBaseNeedsHh(item);
+        // Вкладку hh — сразу в обработчике щелчка (иначе браузер заблокирует всплывающее окно), но пустую: адрес резюме
+        // она получит, когда сервер закрепит кандидата за нами. Другой рекрутер успел раньше — вкладка закрывается, а
+        // окно показывает, кто берёт: контакты открывает человек, и открывать их второму незачем.
+        let win = null;
+        if (needsHh) {
+            try {
+                win = window.open('about:blank', '_blank');
+                if (win) win.opener = null;
+            } catch (error) {
+                win = null;
+            }
+        }
         setBusy(true);
         api.post(`/hh/base/resume/${item.id}/take`)
             .then(({ data }) => {
+                if (win && !win.closed) win.location.replace(item.url);
                 setItem(data);
                 onChanged();
-                toast(hhBaseNeedsHh(item) ? 'Откройте контакты на hh — карточка появится сама' : 'Берём контакты с hh…', 'success');
+                toast(needsHh ? 'Откройте контакты на hh — карточка появится сама' : 'Берём контакты с hh…', 'success');
             })
-            .catch((error) => toast(errorOf(error, 'Не получилось взять в работу'), 'error'))
+            .catch((error) => {
+                if (win && !win.closed) win.close();
+                toast(errorOf(error, 'Не получилось взять в работу'), 'error');
+                api.get(`/hh/base/resume/${item.id}`).then(({ data }) => setItem(data)).catch(() => {});
+                onChanged();
+            })
             .finally(() => setBusy(false));
     };
     const setStatus = (status) => {
@@ -478,27 +569,61 @@ const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged, openI
     const current = shown.find((item) => item.hh_vacancy_id === vacancyId) || shown[0] || null;
     const currentId = current?.hh_vacancy_id || null;
 
-    const loadList = useCallback(() => {
+    // quiet — перечитывание по тычку или опросу: сбой не показывается всплывашкой каждые 10 секунд.
+    const loadList = useCallback((quiet) => {
         if (!currentId) return Promise.resolve();
         const seq = ++listSeq.current;
         return api.get(`/hh/base/${currentId}/resumes`, { view, order, page })
             .then(({ data }) => { if (seq === listSeq.current) setList(data); })
-            .catch((requestError) => { if (seq === listSeq.current) toast(errorOf(requestError, 'Список не загрузился'), 'error'); });
+            .catch((requestError) => {
+                if (seq === listSeq.current && quiet !== true) toast(errorOf(requestError, 'Список не загрузился'), 'error');
+            });
     }, [api, currentId, view, order, page, toast]);
     useEffect(() => { setList(null); }, [currentId, view, order]);
     useEffect(() => { loadList(); }, [loadList, version]);
 
-    // Идёт поиск, ИИ ставит баллы или ждём чьи-то контакты — список и плитки перечитываются сами.
+    // Живой канал: тычки, пришедшие разом, сливаются в одно перечитывание; список и открытое резюме — только когда
+    // изменилась показанная вакансия (или «перечитать всё»), плитки со счётчиками — всегда.
+    const { live, pulse } = useBasePulse(api);
+    const [sheetKey, setSheetKey] = useState(0);
+    const latest = useRef({});
+    latest.current = { loadOverview, loadList, currentId };
+    const pending = useRef(null);
+    useEffect(() => {
+        if (!pulse) return undefined;
+        if (!pulse.vacancies) {
+            pending.current = 'all';
+        } else if (pending.current !== 'all') {
+            const set = pending.current instanceof Set ? pending.current : new Set();
+            pulse.vacancies.forEach((value) => set.add(value));
+            pending.current = set;
+        }
+        const timer = setTimeout(() => {
+            const what = pending.current;
+            pending.current = null;
+            const { loadOverview: overviewNow, loadList: listNow, currentId: shownId } = latest.current;
+            overviewNow();
+            if (what === 'all' || (shownId && what instanceof Set && what.has(String(shownId)))) {
+                listNow(true);
+                setSheetKey((n) => n + 1);
+            }
+        }, PULSE_COALESCE_MS);
+        return () => clearTimeout(timer);
+    }, [pulse]);
+
+    // Канала нет (мест нет, сеть рвётся, старый сервер) — опрос каждые 10 секунд: другие рекрутеры берут кандидатов.
+    // Канал жив — страховка раз в минуту, пока идёт поиск, ИИ ставит баллы или ждём чьи-то контакты.
     const busy = Boolean(current?.running || (list?.items || []).some((item) => item.scoring || item.status === 'taking'));
     useEffect(() => {
-        if (!busy) return undefined;
+        if (live && !busy) return undefined;
         const timer = setInterval(() => {
-            if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+            if (!visible()) return;
             loadOverview();
-            loadList();
-        }, LIST_POLL_MS);
+            loadList(true);
+            if (!live) setSheetKey((n) => n + 1);
+        }, live ? LIVE_POLL_MS : LIST_POLL_MS);
         return () => clearInterval(timer);
-    }, [busy, loadOverview, loadList]);
+    }, [live, busy, loadOverview, loadList]);
 
     const choose = (value) => {
         setVacancyId(value);
@@ -599,7 +724,7 @@ const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged, openI
             )}
 
             <ResumeSheet api={api} toast={toast} id={openId} meId={meId} caps={caps} onClose={() => onOpenId(null)}
-                         onChanged={changed} onOpenCard={onOpenCard} onLoaded={resumeLoaded} />
+                         onChanged={changed} onOpenCard={onOpenCard} onLoaded={resumeLoaded} refreshKey={sheetKey} />
             <SearchSettings api={api} toast={toast} target={settings} vacancies={vacancies} onClose={() => setSettings(null)}
                             onSaved={(data, savedId) => { setOverview(data); setSettings(null); choose(savedId); loadList(); }} />
         </div>

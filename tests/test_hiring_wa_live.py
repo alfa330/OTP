@@ -58,3 +58,34 @@ def test_frames_and_stream_places():
     hub.release()
     hub.release()                                        # лишнее «вернуть» не уводит счёт в минус
     assert hub.streams == 0
+
+
+def test_base_payload_is_vacancy_number_only():
+    """«База hh» в реальном времени (владелец 26.11.2026): в тычке только номер вакансии hh — строкой (номера вакансий hh
+    длиннее, чем помещается в JS без потерь, не бывают, но портал везде держит их строкой)."""
+    assert wa_live.parse_base_payload('{"v":"139079696"}') == frozenset({'139079696'})
+    assert wa_live.parse_base_payload('{"v":139079696}') == frozenset({'139079696'})
+    for junk in ('', 'x', '[]', '{"v":true}', '{"v":"-1"}', '{"v":"abc"}', '{"v":"1' + '0' * 18 + '"}', '{"v":null}',
+                 '{"c":12}', '{}', None):
+        assert wa_live.parse_base_payload(junk) is None, junk
+    assert wa_live.base_frame({'139079696', '138923446'}) == 'event: base\ndata: {"v":["138923446","139079696"]}\n\n'
+    assert wa_live.base_frame(None) == 'event: base\ndata: {"all":1}\n\n'
+
+
+class _Note:
+    def __init__(self, channel, payload):
+        self.channel, self.payload = channel, payload
+
+
+class _Conn:
+    def __init__(self, notes):
+        self.notifies = list(notes)
+
+
+def test_one_listener_sorts_pokes_by_channel():
+    """Один слушатель на процесс (одно соединение с базой) раскладывает тычки «Чатов» и «Базы hh» по своим кольцам."""
+    chats, base = wa_live.Hub(), wa_live.Hub()
+    wa_live._drain(_Conn([_Note(wa_live.CHANNEL, '{"c":5}'), _Note(wa_live.BASE_CHANNEL, '{"v":"139079696"}'),
+                          _Note(wa_live.BASE_CHANNEL, '{"c":5}'), _Note(wa_live.CHANNEL, '{"v":"1"}')]), chats, base)
+    assert chats.wait(0, 0) == ({5}, 1)
+    assert base.wait(0, 0) == ({'139079696'}, 1)

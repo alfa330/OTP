@@ -14,6 +14,12 @@
 Ёмкость: каждый поток держит нить waitress на всё время соединения, поэтому мест — stream_limit (сверх — 503, окно
 остаётся на опросе); скрытая вкладка соединение рвёт, поток живёт не дольше STREAM_MAX_SECONDS и уходит событием
 bye — клиент переподключается сразу (sseClient.js).
+
+Тот же слушатель (одно соединение на процесс) слушает и канал «Базы hh» — hiring_hh_base (владелец 26.11.2026: «то что
+берут в работу и т.д другие операции были в реальном времени потому что пару рекрутеров могут брать в работу то что
+другой уже взял»): кандидата взяли, вернули, отметили «Не подходит», пришли балл, резюме или контакты, поиск вакансии
+начался или кончился — тычок с номером вакансии hh (schema.BASE_LIVE_NOTIFY), своё кольцо base_hub и поток
+/api/hiring/hh/base/stream. В тычке только номер вакансии — ни имён, ни хешей резюме.
 """
 
 import collections
@@ -26,6 +32,7 @@ import time
 log = logging.getLogger(__name__)
 
 CHANNEL = 'hiring_wa'
+BASE_CHANNEL = 'hiring_hh_base'
 HEARTBEAT_SECONDS = 20
 LISTENER_RETRY_SECONDS = 2
 STREAM_MAX_SECONDS = 30 * 60
@@ -46,6 +53,19 @@ def parse_payload(payload):
     except (TypeError, ValueError):
         return None
     return frozenset((card,)) if 0 <= card < 2 ** 31 else None
+
+
+def parse_base_payload(payload):
+    """Тычок «Базы hh»: '{"v":"139079696"}' → frozenset({'139079696'}); мусор — None (тычок пропускается)."""
+    try:
+        data = json.loads(payload) if payload else None
+    except (TypeError, ValueError):
+        return None
+    value = data.get('v') if isinstance(data, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    text = str(value)
+    return frozenset((text,)) if text.isdigit() and len(text) <= 18 else None
 
 
 def sse(event, data):
@@ -106,6 +126,7 @@ class Hub:
 
 
 hub = Hub()
+base_hub = Hub()
 
 
 def frame(cards):
@@ -115,17 +136,30 @@ def frame(cards):
     return sse('chats', {'c': sorted(cards)})
 
 
-def _drain(conn, target):
+def base_frame(vacancies):
+    """Кадр потока «Базы hh»: {"v": [...]} — вакансии hh, у которых что-то изменилось, {"all": 1} — перечитать всё."""
+    if vacancies is None or len(vacancies) > MAX_CARDS_PER_FRAME:
+        return sse('base', {'all': 1})
+    return sse('base', {'v': sorted(vacancies)})
+
+
+def _drain(conn, target, base_target=None):
     while conn.notifies:
         note = conn.notifies.pop(0)
+        if getattr(note, 'channel', CHANNEL) == BASE_CHANNEL:
+            vacancies = parse_base_payload(note.payload)
+            if vacancies is not None:
+                (base_target or base_hub).publish(vacancies)
+            continue
         cards = parse_payload(note.payload)
         if cards is not None:
             target.publish(cards)
 
 
-def _run_listener(connect, target):
+def _run_listener(connect, target, base_target=None):
     """Вечный цикл слушателя на собственном соединении — пул приложения не трогаем. После каждого подключения —
-    тычок «перечитать всё»: пока LISTEN лежал, PostgreSQL тычки этому процессу не копил."""
+    тычок «перечитать всё» в оба кольца: пока LISTEN лежал, PostgreSQL тычки этому процессу не копил."""
+    base_target = base_target or base_hub
     while True:
         conn = None
         try:
@@ -133,16 +167,18 @@ def _run_listener(connect, target):
             conn.set_session(autocommit=True)
             cursor = conn.cursor()
             cursor.execute('LISTEN ' + CHANNEL)
+            cursor.execute('LISTEN ' + BASE_CHANNEL)
             target.publish(None)
-            log.info('Воронка найма: слушатель %s подключён', CHANNEL)
+            base_target.publish(None)
+            log.info('Воронка найма: слушатель %s и %s подключён', CHANNEL, BASE_CHANNEL)
             while True:
                 readable, _, _ = select.select([conn], [], [], HEARTBEAT_SECONDS)
                 conn.poll()
-                _drain(conn, target)
+                _drain(conn, target, base_target)
                 if not readable:
                     cursor.execute('SELECT 1')
                     conn.poll()
-                    _drain(conn, target)
+                    _drain(conn, target, base_target)
         except Exception:  # noqa: BLE001
             log.exception('Воронка найма: слушатель %s упал, переподключение', CHANNEL)
         finally:
@@ -158,14 +194,14 @@ _start_lock = threading.Lock()
 _started = False
 
 
-def ensure_listener(connect, target=None):
-    """Поднять слушатель один раз на процесс — лениво, при первом потоке."""
+def ensure_listener(connect, target=None, base_target=None):
+    """Поднять слушатель один раз на процесс — лениво, при первом потоке (окна «Чаты» или вкладки «База hh»)."""
     global _started
     if _started:
         return
     with _start_lock:
         if _started:
             return
-        threading.Thread(target=_run_listener, args=(connect, target or hub), daemon=True,
+        threading.Thread(target=_run_listener, args=(connect, target or hub, base_target or base_hub), daemon=True,
                          name='hiring-wa-listener').start()
         _started = True

@@ -707,12 +707,40 @@ LIVE_TRIGGERS = (
     ('hiring_wa_messages', 'hiring_wa_live_message'),
 )
 
+# «База hh» в реальном времени (владелец 26.11.2026: «то что берут в работу и т.д другие операции были в реальном времени
+# потому что пару рекрутеров могут брать в работу то что другой уже взял»): кандидата взяли, вернули, отметили «Не
+# подходит», пришли балл ИИ, резюме или контакты; поиск вакансии включили, он начался или кончился — тычок NOTIFY
+# hiring_hh_base с номером вакансии hh (hiring/wa_live.py). Только номер вакансии: ни имён, ни хешей резюме. Отметки
+# «взят на оценку» (scoring_at) и «снова в выдаче» (seen_at) тычка не шлют; сотня резюме одного поиска — одна транзакция,
+# и одинаковые тычки PostgreSQL сливает в один. Условие — в функции (она пересоздаётся при каждом старте), триггеры
+# заводятся один раз.
+BASE_LIVE_NOTIFY = """
+    CREATE OR REPLACE FUNCTION hiring_hh_base_live() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+    BEGIN
+        IF TG_OP = 'UPDATE' AND (to_jsonb(OLD) - 'scoring_at' - 'seen_at') = (to_jsonb(NEW) - 'scoring_at' - 'seen_at') THEN
+            RETURN NULL;
+        END IF;
+        -- Вложенным IF: у других таблиц поля kind нет, и обращение к нему упало бы.
+        IF TG_TABLE_NAME = 'hiring_hh_tasks' THEN
+            IF NEW.kind <> 'search' THEN
+                RETURN NULL;
+            END IF;
+        END IF;
+        IF NEW.hh_vacancy_id IS NOT NULL THEN
+            PERFORM pg_notify('hiring_hh_base', json_build_object('v', NEW.hh_vacancy_id::text)::text);
+        END IF;
+        RETURN NULL;
+    END $$;
+"""
+BASE_LIVE_TABLES = ('hiring_hh_resumes', 'hiring_hh_searches', 'hiring_hh_tasks')
+
 
 def init_hiring_schema(cursor):
     for statement in _STATEMENTS:
         cursor.execute(statement)
     _seed(cursor)
     _install_live_notify(cursor)
+    _install_base_live_notify(cursor)
 
 
 def _install_live_notify(cursor):
@@ -732,6 +760,23 @@ def _install_live_notify(cursor):
     except Exception as exc:  # noqa: BLE001
         cursor.execute("ROLLBACK TO SAVEPOINT hiring_wa_live")
         log.warning('hiring: тычки окна «Чаты» не подключены — окно на опросе: %s', exc)
+
+
+def _install_base_live_notify(cursor):
+    """Тычки «Базы hh» — так же своим SAVEPOINT'ом: не встали — вкладка живёт на опросе."""
+    cursor.execute("SAVEPOINT hiring_hh_base_live")
+    try:
+        cursor.execute(BASE_LIVE_NOTIFY)
+        for table in BASE_LIVE_TABLES:
+            for name, event in (('hiring_hh_base_live_ins', 'INSERT'), ('hiring_hh_base_live_upd', 'UPDATE')):
+                cursor.execute("SELECT 1 FROM pg_trigger WHERE tgname = %s AND tgrelid = %s::regclass", (name, table))
+                if cursor.fetchone() is None:
+                    cursor.execute('CREATE TRIGGER %s AFTER %s ON %s FOR EACH ROW EXECUTE FUNCTION hiring_hh_base_live()'
+                                   % (name, event, table))
+        cursor.execute("RELEASE SAVEPOINT hiring_hh_base_live")
+    except Exception as exc:  # noqa: BLE001
+        cursor.execute("ROLLBACK TO SAVEPOINT hiring_hh_base_live")
+        log.warning('hiring: тычки «Базы hh» не подключены — вкладка на опросе: %s', exc)
 
 
 def _seed(cursor):

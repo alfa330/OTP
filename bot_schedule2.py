@@ -54831,6 +54831,8 @@ try:
         # Окно «Чаты» в реальном времени (hiring/wa_live.py): слушатель NOTIFY на своём соединении.
         listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
         stream_limit=_env_int('HIRING_WA_STREAM_LIMIT', 20, minimum=2, maximum=WAITRESS_THREADS),
+        # «База hh» в реальном времени (тот же слушатель, свой поток /api/hiring/hh/base/stream).
+        base_stream_limit=_env_int('HIRING_HH_STREAM_LIMIT', 20, minimum=2, maximum=WAITRESS_THREADS),
     ))
     app.register_blueprint(build_hiring_external_blueprint(
         db=db,

@@ -978,3 +978,49 @@ def test_chats_live_stream(client, monkeypatch):
     assert text(next(chunks)) == 'event: chats\ndata: {"all":1}\n\n'
     stream.close()
     assert hub.streams == 0
+
+
+def test_hh_base_live_stream(client, monkeypatch):
+    """Живой канал вкладки «База hh» (владелец 26.11.2026: «то что берут в работу… в реальном времени»): без слушателя —
+    503, вкладка на опросе; чужому разделу — 403; поток отдаёт «подключён», тычок — кадром с номерами вакансий hh; мест —
+    base_stream_limit, место возвращается при закрытии; кольцо «Чатов» поток «Базы» не трогает."""
+    from hiring import wa_live
+
+    world = client.world
+    off = client.get('/api/hiring/hh/base/stream', headers=as_user(REC1))
+    assert off.status_code == 503 and off.get_json()['code'] == 'HIRING_HH_LIVE_OFF'
+    assert client.get('/api/hiring/hh/base/stream', headers=as_user(STRANGER)).status_code == 403
+    base_hub, chats_hub = wa_live.Hub(), wa_live.Hub()
+    monkeypatch.setattr(wa_live, 'base_hub', base_hub)
+    monkeypatch.setattr(wa_live, 'hub', chats_hub)
+    started = []
+    monkeypatch.setattr(wa_live, 'ensure_listener', lambda connect, target=None, base_target=None: started.append(connect))
+
+    app = Flask('hiring-base-live-test')
+
+    def resolve_requester():
+        raw = request.headers.get('X-User-Id')
+        return (int(raw), SimpleNamespace(id=int(raw)), None) if raw else (None, None, ('Не авторизован', 401))
+
+    app.register_blueprint(routes.build_hiring_blueprint(
+        db=world['db'], require_api_key=lambda handler: handler, build_cors_preflight_response=lambda: ('', 204),
+        resolve_requester=resolve_requester, service=world['service'], listen_connect=world['db'].connect,
+        stream_limit=5, base_stream_limit=1))
+    live = app.test_client()
+    stream = live.get('/api/hiring/hh/base/stream', headers=as_user(REC1), buffered=False)
+    assert stream.status_code == 200 and stream.mimetype == 'text/event-stream' and len(started) == 1
+    chunks = iter(stream.response)
+
+    def text(chunk):
+        return chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
+
+    assert text(next(chunks)).startswith(': connected ')
+    busy = live.get('/api/hiring/hh/base/stream', headers=as_user(REC1), buffered=False)
+    assert busy.status_code == 503 and busy.get_json()['code'] == 'HIRING_HH_LIVE_BUSY' and busy.headers['Retry-After'] == '120'
+    busy.close()
+    base_hub.publish(frozenset({'139079696'}))
+    assert text(next(chunks)) == 'event: base\ndata: {"v":["139079696"]}\n\n'
+    base_hub.publish(None)
+    assert text(next(chunks)) == 'event: base\ndata: {"all":1}\n\n'
+    stream.close()
+    assert base_hub.streams == 0 and chats_hub.streams == 0

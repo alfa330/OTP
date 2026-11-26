@@ -3450,7 +3450,8 @@ def test_chat_live_pokes_on_commit(world):
 def test_chat_live_listener_relays_pokes(world):
     """Слушатель процесса (wa_live._run_listener): после подключения — «перечитать всё», дальше — тычки базы в кольцо."""
     hub = wa_live.Hub()
-    threading.Thread(target=wa_live._run_listener, args=(world['db'].connect, hub), daemon=True).start()
+    base = wa_live.Hub()
+    threading.Thread(target=wa_live._run_listener, args=(world['db'].connect, hub, base), daemon=True).start()
     deadline = time.monotonic() + 5
     while hub.current_seq() < 1 and time.monotonic() < deadline:
         time.sleep(0.05)
@@ -3464,6 +3465,12 @@ def test_chat_live_listener_relays_pokes(world):
         more, _seq = hub.wait(1, 0.2)
         cards = more if more is not None else cards
     assert cards == {41, 0}
+    # Тот же слушатель (то же соединение) — и канал «Базы hh», в своё кольцо.
+    assert base.wait(0, 0)[0] is None
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT pg_notify(%s, %s)", (wa_live.BASE_CHANNEL, '{"v":"139079696"}'))
+    vacancies, _seq = base.wait(1, 5)
+    assert vacancies == {'139079696'}
 
 
 def test_chat_templates_are_shared_and_edited_by_recruiters(world):
@@ -3573,6 +3580,64 @@ def search_and_find(world, items, total=6472):
 
 def base_rows(world, vacancy=HH_OPERATOR):
     return world['service'].hh_base_list(ctx_of(world, REC1), vacancy)['items']
+
+
+def _listen_base(db):
+    conn = db.connect()
+    conn.set_session(autocommit=True)
+    with conn.cursor() as cur:
+        cur.execute('LISTEN ' + wa_live.BASE_CHANNEL)
+    return conn
+
+
+def test_hh_base_live_pokes_on_commit(base):
+    """«База hh» в реальном времени (владелец 26.11.2026: «пару рекрутеров могут брать в работу то что другой уже взял»):
+    поиск включили и он пошёл, резюме нашлись, балл, «Взять в работу», «Не подходит» — тычок с номером вакансии hh при
+    коммите. Сорок найденных резюме — не сорок тычков; отметки «взят на оценку» и «снова в выдаче», задания моста по
+    резюме и откат транзакции тычка не дают; в тычке — только номер вакансии."""
+    listener = _listen_base(base['db'])
+    try:
+        _pokes(listener)
+        enable_search(base)
+        pokes = _pokes(listener)
+        assert pokes and all(poke == {'v': HH_OPERATOR} for poke in pokes)
+        search_and_find(base, [base_found(n) for n in range(1, 41)])
+        pokes = _pokes(listener)
+        assert pokes and all(poke == {'v': HH_OPERATOR} for poke in pokes) and len(pokes) <= 10, pokes
+        rows = base_rows(base)
+        with base['db']._get_cursor() as cur:
+            cur.execute("UPDATE hiring_hh_resumes SET scoring_at = %s, seen_at = %s WHERE id = %s",
+                        (BASE_NOW, BASE_NOW + timedelta(minutes=1), rows[0]['id']))
+        assert _pokes(listener) == []
+        base['service'].hh_base_take(ctx_of(base, REC1), rows[0]['id'])
+        assert _pokes(listener) == [{'v': HH_OPERATOR}]
+        base['service'].hh_base_status(ctx_of(base, REC2), rows[1]['id'], 'rejected')
+        assert _pokes(listener) == [{'v': HH_OPERATOR}]
+        with base['db']._get_cursor() as cur:
+            queries.hh_task_add(cur, 'resume', 'view', BASE_NOW, priority=2, resume_hash=rows[2]['hash'])
+        assert _pokes(listener) == []
+        with pytest.raises(RuntimeError):
+            with base['db']._get_cursor() as cur:
+                queries.hh_resume_note(cur, rows[3]['id'], 'черновик')
+                raise RuntimeError('откат')
+        assert _pokes(listener) == []
+    finally:
+        listener.close()
+
+
+def test_hh_base_take_locks_every_row_of_the_resume(base):
+    """Один кандидат найден поиском двух вакансий: второй рекрутер, нажавший «Взять» в другой вакансии, получает
+    «уже берёт» — строки резюме под замком разом."""
+    enable_search(base)
+    enable_search(base, vacancy=HH_SUPERVISOR)
+    tasks = [task for task in base_tasks(base)['tasks'] if task['kind'] == 'search']
+    base_tasks(base, [{'id': task['id'], 'ok': True, 'total': 1, 'items': [base_found(1)]} for task in tasks])
+    operator = base_rows(base)[0]['id']
+    supervisor = base_rows(base, vacancy=HH_SUPERVISOR)[0]['id']
+    base['service'].hh_base_take(ctx_of(base, REC1), operator)
+    with pytest.raises(HiringError) as caught:
+        base['service'].hh_base_take(ctx_of(base, REC2), supervisor)
+    assert caught.value.status == 409 and 'Первый Рекрутер' in caught.value.message
 
 
 def test_hh_base_search_settings_and_first_search(base):

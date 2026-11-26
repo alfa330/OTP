@@ -1028,6 +1028,10 @@ class HiringService:
         return self._hh_base_item(row, known, full=True,
                                   refreshing=bool(open_task and open_task['not_before'] <= now))
 
+    def hh_base_live_check(self, ctx):
+        """Живой канал вкладки «База hh» (wa_live.py) — тем же, кому открыта вкладка."""
+        self._hh_reader(ctx)
+
     def hh_base_take(self, ctx, row_id):
         """«Взять в работу» (владелец 25.11.2026): кандидат закрепляется за рекрутером, мост ждёт, когда тот откроет
         контакты на hh (окно с резюме на hh открывает сам интерфейс), и заводит карточку «В работе»."""
@@ -1035,7 +1039,14 @@ class HiringService:
             raise _forbidden('Брать кандидатов в работу могут рекрутеры')
         now = self._now()
         with self._cursor() as cursor:
-            row = queries.hh_resume_get(cursor, row_id, lock=True)
+            row = queries.hh_resume_get(cursor, row_id)
+            if not row:
+                raise HiringError('HIRING_NOT_FOUND', 'Резюме не найдено', 404)
+            # Под замок — все строки этого резюме разом, по порядку id (владелец 26.11.2026: «пару рекрутеров могут брать
+            # в работу то что другой уже взял»): один кандидат бывает найден поиском двух вакансий, и два рекрутера,
+            # нажавшие «Взять» в разных вакансиях одновременно, иначе оба прошли бы проверку ниже.
+            rows = queries.hh_resumes_by_hash(cursor, row['resume_hash'], lock=True)
+            row = next((item for item in rows if item['id'] == row['id']), None)
             if not row:
                 raise HiringError('HIRING_NOT_FOUND', 'Резюме не найдено', 404)
             known = self._hh_known(cursor, [row]).get(row['resume_hash'])
@@ -1045,7 +1056,7 @@ class HiringService:
                     (' у %s' % known['recruiter_name']) if known.get('recruiter_name') else ''), 409)
             if row['status'] == 'taken':
                 raise HiringError('HIRING_ALREADY_TAKEN', 'Кандидата уже взяли в работу', 409)
-            others = [other for other in queries.hh_resumes_by_hash(cursor, row['resume_hash'])
+            others = [other for other in rows
                       if other['status'] == 'taking' and other['status_by'] != ctx['user_id']
                       and other.get('status_at') and now - other['status_at'] < hh_base.TAKING_STALE]
             if others:

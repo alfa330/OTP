@@ -22,7 +22,7 @@
 	# bot_schedule2.py). Каждый путь с text/event-stream обязан быть здесь — иначе поток
 	# осядет в api и съест его нити; tests/test_process_roles.py это сверяет.
 	# /api/trainer/speak тоже стрим, но на секунды (озвучка) — остаётся в api.
-	@realtime path /api/notifications/stream /api/wazzup/pilot/stream /api/op_wallboard/live /api/pbx/stream /api/pbx/agent/stream /api/shift_auction/test_events /api/hiring/wa/stream /api/thermoboxes/stream
+	@realtime path /api/notifications/stream /api/wazzup/pilot/stream /api/op_wallboard/live /api/pbx/stream /api/pbx/agent/stream /api/shift_auction/test_events /api/hiring/wa/stream /api/hiring/hh/base/stream /api/thermoboxes/stream
 
 	handle /api/* {
 		# Загрузки: фото задач, файлы вики, вложения чатов, импорт CSV/XLSX.

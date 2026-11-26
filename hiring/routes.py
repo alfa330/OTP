@@ -176,12 +176,13 @@ def public_card(card, ctx):
 
 
 def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester, service,
-                           dial_list=None, listen_connect=None, stream_limit=20):
+                           dial_list=None, listen_connect=None, stream_limit=20, base_stream_limit=20):
     """dial_list — () -> сервис раздела «Удаленный КЦ» (dial_list.service.DialListService) или None.
     Через него руководитель рекрутинга сажает рекрутера на линию Binotel прямо из настроек воронки,
     чтобы отклики прозванивались из iCore Phone (владелец 30.10.2026). Без него линии недоступны.
-    listen_connect — () -> отдельное соединение с базой для слушателя тычков окна «Чаты» (hiring/wa_live.py),
-    stream_limit — сколько окон держат живой канал одновременно; без listen_connect окно живёт на опросе."""
+    listen_connect — () -> отдельное соединение с базой для слушателя тычков окна «Чаты» и вкладки «База hh»
+    (hiring/wa_live.py), stream_limit / base_stream_limit — сколько окон «Чатов» / вкладок «Базы hh» держат живой канал
+    одновременно; без listen_connect оба живут на опросе."""
     bp = Blueprint('hiring', __name__, url_prefix='/api/hiring')
 
     def _dial_list():
@@ -1042,6 +1043,41 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
     def hiring_hh_base(ctx):
         """Вкладка «База hh»: вакансии кабинета с поиском по базе, счёт найденных, состояние моста."""
         return jsonify(_json(service.hh_base_overview(ctx)))
+
+    # Живой канал вкладки (владелец 26.11.2026: «то что берут в работу и т.д другие операции были в реальном времени
+    # потому что пару рекрутеров могут брать в работу то что другой уже взял»): тычок «изменились кандидаты вакансии …» —
+    # вкладка перечитывает плитки, список и открытое резюме обычными запросами (права — там же). Поток держит нить
+    # waitress: мест base_stream_limit, сверх — 503, и вкладка остаётся на опросе.
+    @hiring_route('/hh/base/stream')
+    def hiring_hh_base_stream(ctx):
+        service.hh_base_live_check(ctx)
+        if listen_connect is None:
+            return _bad('Живой канал не подключён — вкладка обновляется опросом', 'HIRING_HH_LIVE_OFF', 503)
+        wa_live.ensure_listener(listen_connect)
+        if not wa_live.base_hub.acquire(base_stream_limit):
+            response = jsonify({"error": "Мест под живые вкладки нет — вкладка обновляется опросом",
+                                "code": "HIRING_HH_LIVE_BUSY"})
+            response.status_code = 503
+            response.headers['Retry-After'] = '120'
+            return response
+
+        def generate():
+            cursor_seq = wa_live.base_hub.current_seq()
+            yield ': connected %d\n\n' % int(time.time())
+            deadline = time.monotonic() + wa_live.STREAM_MAX_SECONDS
+            while time.monotonic() < deadline:
+                vacancies, cursor_seq = wa_live.base_hub.wait(cursor_seq, wa_live.HEARTBEAT_SECONDS)
+                if vacancies is None or vacancies:
+                    yield wa_live.base_frame(vacancies)
+                else:
+                    yield ': ping %d\n\n' % int(time.time())
+            yield wa_live.sse('bye', {'reason': 'lifetime'})
+
+        response = Response(generate(), mimetype='text/event-stream')
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        response.call_on_close(wa_live.base_hub.release)
+        return response
 
     @hiring_route('/hh/base/<vacancy_key>/resumes')
     def hiring_hh_base_resumes(vacancy_key, ctx):

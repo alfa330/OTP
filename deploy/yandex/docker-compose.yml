@@ -61,6 +61,7 @@ services:
       PBX_STREAM_LIMIT: "50"
       OP_WALLBOARD_LIVE_STREAM_LIMIT: "50"
       HIRING_WA_STREAM_LIMIT: "50"
+      HIRING_HH_STREAM_LIMIT: "20"
       THERMOBOX_STREAM_LIMIT: "20"
     expose:
       - "8080"
