@@ -1004,7 +1004,9 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(self.app.count('<span className="sidebar-text">Воронка найма</span>'), 1)
         self.assertIn("{view === 'hiring' && canAccessHiringSection && (", self.app)
         self.assertIn('|| canAccessHiringSection\n', self.app)
-        self.assertEqual(self.app.count("if (nextView !== 'hiring') url.searchParams.delete('card');"), 2)
+        # Уход из раздела снимает его метки: карточку (card=…) и резюме «Базы hh» (hh_resume=…, владелец 26.11.2026).
+        self.assertEqual(self.app.count(
+            "if (nextView !== 'hiring') ['card', 'hh_resume'].forEach((name) => url.searchParams.delete(name));"), 2)
         self.assertIn("if (nextView === 'hiring' && Number(target)) {", self.app)
         self.assertIn("if (view !== 'hiring') setHiringFocusRequest(null);", self.app)
         trainer_block = self.app[self.app.index('const TRAINER_ALLOWED_VIEWS'):self.app.index(']);', self.app.index('const TRAINER_ALLOWED_VIEWS'))]
