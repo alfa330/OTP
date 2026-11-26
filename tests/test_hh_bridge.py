@@ -68,6 +68,13 @@ def response(topic, at, phone='+7 (701) 555-00-%02d', invitation=False):
     return candidate, resume
 
 
+def page_of_responses_with_phone(formatted):
+    """Выдача откликов с одним откликом и заданным показом телефона."""
+    candidate, resume = response(5000000901, '2026-11-26T10:00:00+03:00')
+    resume['phone'] = [{'type': 'cell', 'formatted': formatted, 'raw': None, 'country': '7', 'city': '776'}]
+    return page((candidate, resume))
+
+
 def page(*rows):
     return {'contactCenterCandidates': {'candidates': [c for c, _r in rows],
                                         'rawEnrichingData': {'resumes': {'resumes': [r for _c, r in rows]}}}}
@@ -590,21 +597,25 @@ def search_page(items, total=6472, user_type='employer'):
         json.dumps(state, ensure_ascii=False))
 
 
-def base_resume_page(resume_hash, opened=False):
-    """Страница резюме из базы: без открытых контактов имя, телефон и почта пустые (value: null), как на hh."""
+def base_resume_page(resume_hash, opened=False, masked=False):
+    """Страница резюме из базы: без открытых контактов имя, телефон и почта пустые (value: null), как на hh. masked —
+    «без списания», но в этом кабинете номер не показан (живая страница 26.11): имя видно, телефон — урезанный показ
+    «+7 707 123-», number и raw пустые."""
+    named = opened or masked
+    phone = {'city': '707', 'raw': None, 'type': 'cell', 'number': None, 'comment': None, 'country': '7', 'verified': True,
+             'formatted': '+7 707 123-45-67', 'needVerification': None, 'canVerify': False}
+    if masked:
+        phone = dict(phone, formatted='+7 707 123-')
     state = {'resume': {
         'hash': resume_hash, 'title': wrapped('Оператор call-центра'), 'age': 26,
         'language': wrapped([{'title': 'Казахский', 'degree': 'b2'}], 'list'),
-        'openedContacts': opened, 'permission': 'view' if opened else 'view_without_contacts',
-        'resumeContactsOpening': {'canOpenContactsThroughCIV': not opened,
-                                  'viewStatus': 'OPENED' if opened else 'DENIED_NO_FA'},
-        'firstName': wrapped('Анна' if opened else None, 'field'), 'lastName': wrapped('Иванова' if opened else None, 'field'),
+        'openedContacts': opened, 'permission': 'view' if named else 'view_without_contacts',
+        'resumeContactsOpening': {'canOpenContactsThroughCIV': not named,
+                                  'viewStatus': 'OPENED' if opened else 'AVAILABLE_WITHOUT_SPEND' if masked else 'DENIED_NO_FA'},
+        'firstName': wrapped('Анна' if named else None, 'field'), 'lastName': wrapped('Иванова' if named else None, 'field'),
         'middleName': wrapped(None, 'field'),
-        # Форма — как у живой страницы 26.11: в formatted только местная часть, код страны и города — рядом.
-        'phone': wrapped([{'city': '707', 'raw': None, 'type': 'cell', 'number': None, 'comment': None, 'country': '7',
-                           'verified': True, 'formatted': '123-45-67', 'needVerification': None, 'canVerify': False}]
-                         if opened else None, 'field'),
-        'email': wrapped('anna@example.kz' if opened else None, 'field'),
+        'phone': wrapped([phone] if named else None, 'field'),
+        'email': wrapped('anna@example.kz' if named else None, 'field'),
         'birthday': wrapped('1999-12-17', 'field'),
     }}
     return '<html><body><template id="HH-Lux-InitialState">%s</template></body></html>' % html_lib.escape(
@@ -671,28 +682,33 @@ class HhBaseBridgeTests(unittest.TestCase):
         self.assertEqual(hh_bridge.access_from_state(closed), 'closed')
         opened = hh_bridge.initial_state(base_resume_page('d' * 38, opened=True))
         self.assertEqual(hh_bridge.contacts_from_state(opened), {'last_name': 'Иванова', 'first_name': 'Анна',
-                                                                 'middle_name': None, 'phones': ['+77071234567'],
-                                                                 'email': 'anna@example.kz'})
+                                                                 'middle_name': None, 'phones': ['+7 707 123-45-67'],
+                                                                 'email': 'anna@example.kz', 'phones_hidden': False})
         self.assertEqual(hh_bridge.access_from_state(opened), 'opened')
 
-    def test_phone_is_assembled_from_country_city_and_local_part(self):
-        """Живой случай 26.11: кандидат открыт, а в карточку шло «нет казахстанского телефона» — мост отдавал только
-        местные 7 цифр. Полный номер в formatted (выдача откликов) — как есть; мусор — None."""
-        phone = hh_bridge.phone_text
-        self.assertEqual(phone({'country': '7', 'city': '707', 'formatted': '123-45-67', 'number': None}), '+77071234567')
-        self.assertEqual(phone({'country': '7', 'city': '701', 'number': '1234567', 'formatted': None}), '+77011234567')
+    def test_masked_phone_is_never_a_number(self):
+        """Живой случай 26.11: у «без списания» hh показывает в этом кабинете урезанный номер «+7 776 622-» (код страны,
+        код оператора и три цифры), number и raw пусты. Мост hh/1.4.1 склеивал из этого «+7 776 7776622» — в карточки
+        ушли чужие номера, рекрутеры видели на hh один номер, а в карточке другой. Урезанный показ — не номер: телефона
+        нет, phones_hidden — и рекрутер вставит номер с hh сам. Полный — в formatted/raw или местная часть в number."""
+        phone, masked = hh_bridge.phone_text, hh_bridge.phone_masked
+        for shown in ('+7 776 622-', '+7 776 622…', '+7 (776) 622-**-**', '+7 776 622 XX XX', '776622'):
+            item = {'country': '7', 'city': '776', 'formatted': shown, 'number': None, 'raw': None}
+            self.assertIsNone(phone(item), shown)
+            self.assertTrue(masked(item), shown)
+        self.assertEqual(phone({'country': '7', 'city': '701', 'number': '1234567', 'formatted': '+7 701 123-'}), '+77011234567')
         self.assertEqual(phone({'formatted': '+7 (701) 555-00-01', 'raw': '7701555'}), '+7 (701) 555-00-01')
         self.assertEqual(phone({'raw': '77015550001'}), '77015550001')
+        self.assertFalse(masked({'formatted': '+7 (701) 555-00-01'}))
         for bad in ({'country': '7', 'city': None, 'formatted': None}, {'formatted': '12-34'}, None, 'строка',
-                    {'country': True, 'city': '707', 'formatted': '123'}):
+                    {'country': True, 'city': '707', 'number': '123'}):
             self.assertIsNone(phone(bad), bad)
-        state = {'resume': {'firstName': [{'string': 'Анна'}], 'lastName': {'value': [{'string': 'Иванова'}], 'type': 'list'},
-                            'phone': {'value': [{'country': '7', 'city': '707', 'formatted': '123-45-67'},
-                                                {'country': '7', 'city': '707', 'formatted': '123 45 67'}], 'type': 'list'}}}
-        contacts = hh_bridge.contacts_from_state(state)
-        self.assertEqual((contacts['first_name'], contacts['last_name'], contacts['phones']), ('Анна', 'Иванова', ['+77071234567']))
-        rules_phone = __import__('hiring.rules', fromlist=['normalize_phone']).normalize_phone
-        self.assertEqual(rules_phone(contacts['phones'][0]), '+77071234567')
+        page = hh_bridge.initial_state(base_resume_page('e' * 38, masked=True))
+        contacts = hh_bridge.contacts_from_state(page)
+        self.assertEqual((contacts['first_name'], contacts['phones'], contacts['phones_hidden']), ('Анна', [], True))
+        self.assertEqual(hh_bridge.access_from_state(page), 'free')
+        # Выдача откликов: урезанного номера там не бывает, но и он не превратится в чужой.
+        self.assertIsNone(hh_bridge.items_from_page(page_of_responses_with_phone('+7 776 622-'), {'id': OPERATOR})[0]['phone'])
 
     def test_tasks_search_resume_and_contacts(self):
         bridge = self.bridge()
@@ -713,7 +729,7 @@ class HhBaseBridgeTests(unittest.TestCase):
         self.assertEqual(searches[0], {'text': 'оператор', 'area': '160', 'search_period': '3', 'order_by': 'publication_time'})
         done = {item['id']: item for payload in self.portal.task_payloads for item in payload['done']}
         self.assertEqual((done['1']['ok'], done['1']['total'], done['1']['pages'], len(done['1']['items'])), (True, 6472, 3, 60))
-        self.assertEqual(done['2']['contacts']['phones'], ['+77071234567'])
+        self.assertEqual(done['2']['contacts']['phones'], ['+7 707 123-45-67'])
         self.assertEqual((done['2']['access'], done['2']['reason']), ('opened', 'contacts'))
         self.assertEqual(done['2']['name'], {'last_name': 'Иванова', 'first_name': 'Анна', 'middle_name': None})
         self.assertNotIn('contacts', done['3'])                      # при просмотре контакты не берутся

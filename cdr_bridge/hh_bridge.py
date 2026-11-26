@@ -104,7 +104,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'hh/1.5.0'
+VERSION = 'hh/1.5.1'
 log = logging.getLogger('cdr_bridge.hh_bridge')
 
 PUSH_PATH = '/api/hiring/hh/agent/push'
@@ -295,18 +295,29 @@ def _digits(value):
     return re.sub(r'\D', '', str(value)) if isinstance(value, (str, int)) and not isinstance(value, bool) else ''
 
 
+def phone_masked(item):
+    """Номер на hh спрятан: показ урезан («+7 776 622-», «…», звёздочки), а полного — ни в number, ни в raw. Так hh отдаёт
+    телефон, пока контакты в этом кабинете не открыты — и у «без списания» тоже (проба 26.11: «+d ddd ddd-»)."""
+    if not isinstance(item, dict):
+        return False
+    shown = item.get('formatted')
+    return (isinstance(shown, str) and bool(shown.strip()) and len(_digits(shown)) < 10
+            and len(_digits(item.get('number'))) < 5 and len(_digits(item.get('raw'))) < 10)
+
+
 def phone_text(item):
-    """Телефон hh → полный номер строкой или None. В выдаче откликов formatted — уже весь номер («+7 (701) 234-56-78»),
-    а на странице резюме (проба 26.11) — только местная часть: formatted «123-45-67», код страны и города — рядом, в
-    country и city. Местную часть без кода портал не примет — номер собирается из трёх частей."""
+    """Телефон hh → полный номер строкой или None. Целиком — в formatted или raw («+7 (701) 234-56-78», выдача откликов)
+    либо кодом страны и города с местной частью в number. Урезанный показ («+7 776 622-») — НЕ номер: 26.11 мост hh/1.4.1
+    склеивал из него код страны, код города и эти 7 цифр, и в карточки уходили чужие номера («+7 776 7776622»)."""
     if not isinstance(item, dict):
         return None
     for key in ('formatted', 'raw'):
-        if len(_digits(item.get(key))) >= 10:
-            return _clip(item.get(key), 40)
-    local = next((_digits(item.get(key)) for key in ('number', 'formatted', 'raw') if len(_digits(item.get(key))) >= 5), '')
+        value = item.get(key)
+        if isinstance(value, str) and len(_digits(value)) >= 10 and not re.search(r'[*•…xXхХ]|[-–]\s*$', value):
+            return _clip(value, 40)
+    local = _digits(item.get('number'))
     digits = _digits(item.get('country')) + _digits(item.get('city')) + local
-    return '+' + digits if local and 10 <= len(digits) <= 15 else None
+    return '+' + digits if len(local) >= 5 and 10 <= len(digits) <= 15 else None
 
 
 def _first(resume, field):
@@ -602,16 +613,18 @@ def contacts_from_state(state):
 
     names = {key: name(field) for key, field in (('last_name', 'lastName'), ('first_name', 'firstName'),
                                                   ('middle_name', 'middleName'))}
-    phones = []
+    phones, hidden = [], False
     for item in _value(resume.get('phone')) or []:
         text = phone_text(item)
         if text and text not in phones:
             phones.append(text)
+        hidden = hidden or phone_masked(item)
     email = _value(resume.get('email'))
     email = _clip(email, 120) if isinstance(email, str) and '@' in email else None
     if not (any(names.values()) or phones or email):
         return None
-    return dict(names, phones=phones[:5], email=email)
+    # phones_hidden — номер есть, но в этом кабинете hh его не показывает: рекрутер вставит его в iCORE сам.
+    return dict(names, phones=phones[:5], email=email, phones_hidden=hidden and not phones)
 
 
 def access_from_state(state):
