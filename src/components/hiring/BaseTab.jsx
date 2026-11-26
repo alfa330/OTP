@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ExternalLink, Loader2, Plus, RefreshCw, Search, Settings2, Sparkles, X } from 'lucide-react';
+import { Check, ExternalLink, Link2, Loader2, Plus, RefreshCw, Search, Settings2, Sparkles, X } from 'lucide-react';
 import {
     IosHint, IosModal, IosPager, IosSegmented, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
 } from '../ui/ios';
+import { copyText } from '../call_qa/evalLink';
 import { HhResume } from './HhResume';
 import { Empty, Loading, Notice } from './hiringUi';
 import {
     errorOf, hhAddKeywords, hhBaseExperience, hhBaseLine, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseTone,
-    hhSearchBody, longTime, plural,
+    hhResumeLink, hhSearchBody, longTime, plural,
 } from './hiringMeta';
 
 /*
@@ -20,6 +21,9 @@ import {
  * жмёт сам рекрутер (hh подписывает эту кнопку настоящим щелчком — решение владельца 25.11.2026), а ФИО и телефон мост
  * переносит в карточку «В работе» сам; вернулся во вкладку iCORE — проверка сразу. Портрет, ключевые слова и тумблер
  * поиска — у руководителя рекрутинга (кнопка «Настроить»).
+ *
+ * У каждого резюме своя ссылка (владелец 26.11.2026): открытое окно — в адресе ?view=hiring&hh_resume=<номер>
+ * (метку ведёт HiringView), кнопка «Ссылка» в шапке окна копирует её для коллеги.
  */
 
 const VACANCY_KEY = 'hiring.base.vacancy';
@@ -146,11 +150,13 @@ const Points = ({ items, tone }) => (items?.length ? (
     </ul>
 ) : null);
 
-const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCard }) => {
+const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCard, onLoaded }) => {
     const [item, setItem] = useState(null);
     const [loadError, setLoadError] = useState('');
     const [busy, setBusy] = useState(false);
     const polls = useRef(0);
+    const loadedRef = useRef(onLoaded);
+    useEffect(() => { loadedRef.current = onLoaded; }, [onLoaded]);
 
     useEffect(() => {
         if (!id) {
@@ -163,10 +169,21 @@ const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCar
         setLoadError('');
         // Окно открыл рекрутер — мост перечитывает резюме на hh (если прошлое чтение не свежее).
         api.get(`/hh/base/resume/${id}`, { refresh: '1' })
-            .then(({ data }) => { if (alive) setItem(data); })
+            .then(({ data }) => {
+                if (!alive) return;
+                setItem(data);
+                loadedRef.current?.(data);
+            })
             .catch((error) => { if (alive) setLoadError(errorOf(error, 'Резюме не открылось')); });
         return () => { alive = false; };
     }, [api, id]);
+
+    const copyLink = async () => {
+        const link = hhResumeLink(window.location.href, id);
+        const copied = link ? await copyText(link) : false;
+        toast(copied ? 'Ссылка на резюме скопирована' : 'Не удалось скопировать — ссылка есть в адресной строке',
+              copied ? 'success' : 'error');
+    };
 
     // Мост читает резюме или ждём контакты — окно перечитывается: первые две минуты часто, потом реже.
     const waiting = Boolean(item && (item.refreshing || item.status === 'taking'));
@@ -261,7 +278,14 @@ const ResumeSheet = ({ api, toast, id, meId, caps, onClose, onChanged, onOpenCar
 
     return (
         <IosModal open={Boolean(id)} onClose={onClose} maxWidth="max-w-2xl" sizeKey={item ? 'ready' : 'loading'}
-                  title={item?.title || 'Резюме'} subtitle={item ? hhBaseLine(item) : ''} footer={footer}>
+                  title={item?.title || 'Резюме'} subtitle={item ? hhBaseLine(item) : ''} footer={footer}
+                  headerActions={item ? (
+                      <button type="button" onClick={copyLink} aria-label="Скопировать ссылку на резюме"
+                              title="Скопировать ссылку на это резюме — её можно отправить коллеге" className={iosBtnGhost}>
+                          <Link2 size={14} aria-hidden="true" />
+                          <span className="hidden sm:inline">Ссылка</span>
+                      </button>
+                  ) : null}>
             {loadError && <Notice tone="red">{loadError}</Notice>}
             {!item && !loadError && <Loading text="Открываем резюме…" />}
             {item && (
@@ -431,7 +455,7 @@ const SearchSettings = ({ api, toast, target, vacancies, onClose, onSaved }) => 
 
 /* ── Вкладка ─────────────────────────────────────────────────────────────── */
 
-const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) => {
+const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged, openId = null, onOpenId }) => {
     const meId = boot?.me?.id;
     const [overview, setOverview] = useState(null);
     const [error, setError] = useState('');
@@ -440,7 +464,6 @@ const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) => 
     const [order, setOrder] = useState('score');
     const [page, setPage] = useState(1);
     const [list, setList] = useState(null);
-    const [openId, setOpenId] = useState(null);
     const [settings, setSettings] = useState(null);
     const listSeq = useRef(0);
 
@@ -489,6 +512,19 @@ const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) => 
             .catch((requestError) => toast(errorOf(requestError, 'Поиск не запустился'), 'error'));
     };
     const changed = useCallback(() => { loadOverview(); loadList(); onChanged(); }, [loadOverview, loadList, onChanged]);
+    // Резюме открыто по ссылке и оно другой вакансии — список под окном переключается на неё (когда плитки загрузятся:
+    // окно по ссылке может открыться раньше них).
+    const [linkedVacancy, setLinkedVacancy] = useState(null);
+    const resumeLoaded = useCallback((item) => setLinkedVacancy(item?.hh_vacancy_id || null), []);
+    useEffect(() => {
+        if (!linkedVacancy || !shown.some((item) => item.hh_vacancy_id === linkedVacancy)) return;
+        if (linkedVacancy !== currentId) {
+            setVacancyId(linkedVacancy);
+            storeVacancy(linkedVacancy);
+            setPage(1);
+        }
+        setLinkedVacancy(null);
+    }, [linkedVacancy, shown, currentId]);
 
     if (error && !overview) return <div className={`${iosCard} p-6 text-center text-[13.5px] text-slate-600`}>{error}</div>;
     if (!overview) return <Loading text="Открываем базу hh…" />;
@@ -551,7 +587,7 @@ const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) => 
                             : view === 'taken' ? 'Из базы ещё никого не взяли' : 'Пусто'}</Empty>
                     ) : (
                         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                            {items.map((item) => <ResumeCard key={item.id} item={item} meId={meId} onOpen={setOpenId} />)}
+                            {items.map((item) => <ResumeCard key={item.id} item={item} meId={meId} onOpen={onOpenId} />)}
                         </div>
                     )}
                     {list && list.pages > 1 && (
@@ -562,8 +598,8 @@ const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) => 
                 </>
             )}
 
-            <ResumeSheet api={api} toast={toast} id={openId} meId={meId} caps={caps} onClose={() => setOpenId(null)}
-                         onChanged={changed} onOpenCard={onOpenCard} />
+            <ResumeSheet api={api} toast={toast} id={openId} meId={meId} caps={caps} onClose={() => onOpenId(null)}
+                         onChanged={changed} onOpenCard={onOpenCard} onLoaded={resumeLoaded} />
             <SearchSettings api={api} toast={toast} target={settings} vacancies={vacancies} onClose={() => setSettings(null)}
                             onSaved={(data, savedId) => { setOverview(data); setSettings(null); choose(savedId); loadList(); }} />
         </div>

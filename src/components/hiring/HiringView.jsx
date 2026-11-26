@@ -11,7 +11,7 @@ import GroupsTab from './GroupsTab';
 import ReportsTab from './ReportsTab';
 import SettingsTab from './SettingsTab';
 import UploadTab from './UploadTab';
-import { errorOf, hiringTabs } from './hiringMeta';
+import { HH_RESUME_PARAM, errorOf, hhResumeFromSearch, hiringTabs } from './hiringMeta';
 import { Loading } from './hiringUi';
 
 /*
@@ -34,7 +34,8 @@ import { Loading } from './hiringUi';
  *   Настройки      рекрутеры, источники, вакансии, причины, план найма, интеграции.
  *
  * Карточка кандидата — одно окно на весь раздел (CardSheet): открывается с доски, с рабочего
- * стола, из отчёта и по ссылке ?view=hiring&card=<id> (колокол, Telegram).
+ * стола, из отчёта и по ссылке ?view=hiring&card=<id> (колокол, Telegram). Резюме «Базы hh» — по ссылке
+ * ?view=hiring&hh_resume=<id> (вкладка «База hh» сразу с этим резюме).
  */
 
 const TAB_STORAGE_KEY = 'hiring.tab';
@@ -94,12 +95,21 @@ const cardFromLocation = () => {
     }
 };
 
-const writeCardParam = (cardId) => {
+const resumeFromLocation = () => {
+    try {
+        return hhResumeFromSearch(window.location.search);
+    } catch (error) {
+        return null;
+    }
+};
+
+/** Метка открытого окна в адресе (карточка, резюме «Базы hh»): replaceState — открытые окна не история браузера. */
+const writeParam = (name, value) => {
     try {
         const url = new URL(window.location.href);
-        if (cardId) url.searchParams.set(CARD_QUERY_PARAM, String(cardId));
-        else url.searchParams.delete(CARD_QUERY_PARAM);
-        window.history.replaceState(window.history.state, '', url.toString());
+        if (value) url.searchParams.set(name, String(value));
+        else url.searchParams.delete(name);
+        if (url.toString() !== window.location.href) window.history.replaceState(window.history.state, '', url.toString());
     } catch (error) {
         // Адрес не обновился — окно всё равно открыто.
     }
@@ -135,8 +145,10 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
 
     const [boot, setBoot] = useState(null);
     const [error, setError] = useState('');
-    const [tab, setTab] = useState(readStoredTab);
+    // Ссылка на резюме «Базы hh» открывает раздел сразу на этой вкладке.
+    const [tab, setTab] = useState(() => (resumeFromLocation() ? 'base' : readStoredTab()));
     const [openCardId, setOpenCardId] = useState(cardFromLocation);
+    const [openResumeId, setOpenResumeId] = useState(resumeFromLocation);
     // Перетаскивание на доске открывает карточку сразу с выбранным переходом.
     const [openMove, setOpenMove] = useState(null);
     // «Позвонить» со стола или с доски: звонок уже ушёл в iCore Phone, карточка открывается с окном результата.
@@ -163,11 +175,14 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
         if (focusRequest?.cardId) setOpenCardId(Number(focusRequest.cardId));
     }, [focusRequest]);
 
-    useEffect(() => { writeCardParam(openCardId); }, [openCardId]);
+    useEffect(() => { writeParam(CARD_QUERY_PARAM, openCardId); }, [openCardId]);
+    useEffect(() => { writeParam(HH_RESUME_PARAM, openResumeId); }, [openResumeId]);
 
     const caps = boot?.capabilities || {};
     // Набор и порядок вкладок по правам — hiringTabs (тренеру «Группы» первой, отчётов у тренера нет).
     const tabs = useMemo(() => hiringTabs(caps), [caps]);
+    // Вкладки «База hh» по правам нет — ссылка на резюме ничего не откроет, метку из адреса убрать.
+    useEffect(() => { if (boot && !tabs.includes('base')) setOpenResumeId(null); }, [boot, tabs]);
     // Сколько чатов ждут ответа — на вкладке «Чаты», раз в 30 секунд (одна лёгкая выборка).
     const [waitingChats, setWaitingChats] = useState(0);
     const chatsTab = tabs.includes('chats');
@@ -187,6 +202,8 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
     const active = tabs.includes(tab) ? tab : tabs[0];
     const chooseTab = (value) => {
         setTab(value);
+        // Ушли с «Базы hh» — окно резюме закрылось вместе с вкладкой, его метка в адресе не нужна.
+        if (value !== 'base') setOpenResumeId(null);
         try {
             window.localStorage.setItem(TAB_STORAGE_KEY, value);
         } catch (storageError) {
@@ -265,7 +282,7 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
             {active === 'desk' && <DeskTab {...shared} onOpenChat={onOpenChat} />}
             {active === 'board' && <BoardTab {...shared} />}
             {active === 'chats' && <ChatsTab {...shared} onWaiting={setWaitingChats} focus={chatFocus} onFocusConsumed={focusConsumed} />}
-            {active === 'base' && <BaseTab {...shared} />}
+            {active === 'base' && <BaseTab {...shared} openId={openResumeId} onOpenId={setOpenResumeId} />}
             {active === 'groups' && <GroupsTab {...shared} />}
             {active === 'reports' && <ReportsTab {...shared} />}
             {active === 'upload' && <UploadTab {...shared} />}

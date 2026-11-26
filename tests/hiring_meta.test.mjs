@@ -14,7 +14,7 @@ import {
     HH_NO_ICORE, hhIcoreOptions, hhIcoreValue, hhSettingsBody, hhVacancyMeta,
     hhMoney, hhPeriod, hhResumeSummary, hhSpan,
     HH_KEYWORDS_MAX, hhAddKeywords, hhBaseExperience, hhBaseLine, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseTone,
-    hhSearchBody,
+    hhSearchBody, HH_RESUME_PARAM, hhResumeFromSearch, hhResumeLink,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('hh.kz resume in the card: money, spans, periods and a one-line summary', () => {
@@ -431,4 +431,18 @@ test('hh base search settings: keywords from the field and the request body', ()
     assert.deepEqual(hhSearchBody({ enabled: 1, portrait: '  Кого ищем  ', keywords: ['оператор', ' ', 'Оператор'] }),
         { enabled: true, portrait: 'Кого ищем', keywords: ['оператор'] });
     assert.deepEqual(hhSearchBody({}), { enabled: false, portrait: '', keywords: [] });
+});
+
+test('hh base resume link: own number in the address, a clean link for a colleague', () => {
+    assert.equal(HH_RESUME_PARAM, 'hh_resume');
+    assert.equal(hhResumeFromSearch('?view=hiring&hh_resume=59'), 59);
+    assert.equal(hhResumeFromSearch('?hh_resume=59&card=954'), 59);
+    for (const bad of ['', '?view=hiring', '?hh_resume=', '?hh_resume=abc', '?hh_resume=0', '?hh_resume=-5', '?hh_resume=1e3',
+        `?hh_resume=${'9'.repeat(13)}`, null, undefined]) {
+        assert.equal(hhResumeFromSearch(bad), null, String(bad));
+    }
+    assert.equal(hhResumeLink('https://icorehub.kz/?view=hiring&card=954&tab=x#top', 59),
+        'https://icorehub.kz/?view=hiring&hh_resume=59');
+    assert.equal(hhResumeLink('https://icorehub.kz/app/?view=wiki', 7), 'https://icorehub.kz/app/?view=hiring&hh_resume=7');
+    assert.equal(hhResumeLink('не адрес', 7), '');
 });

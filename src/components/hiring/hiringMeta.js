@@ -366,6 +366,35 @@ export const hhSearchBody = ({ enabled, portrait, keywords }) => ({
     keywords: hhAddKeywords([], (keywords || []).join('\n')),
 });
 
+/* Своя ссылка у каждого резюме «Базы hh» (владелец 26.11.2026: «чтобы у каждого резюме был свой айди в ссылке»):
+   ?view=hiring&hh_resume=<номер> открывает вкладку «База hh» сразу с этим резюме. Метку ставит и снимает раздел
+   (HiringView), уход в другой раздел снимает её App.jsx. Права проверяет сервер, как у любого резюме. */
+export const HH_RESUME_PARAM = 'hh_resume';
+
+/** Номер резюме из адреса (location.search) или null. */
+export const hhResumeFromSearch = (search) => {
+    try {
+        const value = new URLSearchParams(search || '').get(HH_RESUME_PARAM);
+        return value && /^\d{1,12}$/.test(value) && Number(value) > 0 ? Number(value) : null;
+    } catch (error) {
+        return null;
+    }
+};
+
+/** Ссылка на резюме для коллеги: раздел и само резюме, без прочих меток адреса (открытой карточки, вкладки вики). */
+export const hhResumeLink = (href, id) => {
+    try {
+        const url = new URL(href);
+        url.search = '';
+        url.hash = '';
+        url.searchParams.set('view', 'hiring');
+        url.searchParams.set(HH_RESUME_PARAM, String(id));
+        return url.toString();
+    } catch (error) {
+        return '';
+    }
+};
+
 const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа',
     'сентября', 'октября', 'ноября', 'декабря'];
 const MONTHS_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август',

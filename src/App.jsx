@@ -3516,8 +3516,8 @@ const buildAppViewUrl = (nextView) => {
             url.searchParams.delete('record');
             url.searchParams.delete('disc_tab');
         }
-        /* И метка карточки «Воронки найма» (card=…, ссылка из колокола и Telegram). */
-        if (nextView !== 'hiring') url.searchParams.delete('card');
+        /* И метки «Воронки найма»: карточка (card=…, ссылка из колокола и Telegram) и резюме «Базы hh» (hh_resume=…). */
+        if (nextView !== 'hiring') ['card', 'hh_resume'].forEach((name) => url.searchParams.delete(name));
         /* И метки «Карточки клиента» (cc_request=…, cc_tab=… — ссылки из группы и алерта). */
         if (nextView !== 'client_cards') {
             url.searchParams.delete('cc_request');
@@ -3599,8 +3599,8 @@ const syncAppViewWithUrl = (nextView) => {
             url.searchParams.delete('record');
             url.searchParams.delete('disc_tab');
         }
-        /* И метка карточки «Воронки найма» (card=…, ссылка из колокола и Telegram). */
-        if (nextView !== 'hiring') url.searchParams.delete('card');
+        /* И метки «Воронки найма»: карточка (card=…, ссылка из колокола и Telegram) и резюме «Базы hh» (hh_resume=…). */
+        if (nextView !== 'hiring') ['card', 'hh_resume'].forEach((name) => url.searchParams.delete(name));
         /* И метки «Карточки клиента» (cc_request=…, cc_tab=… — ссылки из группы и алерта). */
         if (nextView !== 'client_cards') {
             url.searchParams.delete('cc_request');
