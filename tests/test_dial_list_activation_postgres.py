@@ -40,7 +40,8 @@ BASE_DDL = '''
                         status text NOT NULL DEFAULT 'working', department_id integer,
                         sip_number text, rate numeric);
     CREATE TABLE sip_department_config (department_id integer PRIMARY KEY, provider text,
-                                        sip_server text, ring_timeout_rings smallint);
+                                        sip_server text, ring_timeout_rings smallint,
+                                        auto_answer boolean, auto_answer_delay smallint);
     INSERT INTO departments (id, name, code) VALUES (2100, 'Активация водителей', 'activation'),
                                                     (1954, 'Удаленный КЦ', 'remote_cc'),
                                                     (2200, 'Пустой отдел', 'free');
@@ -453,3 +454,159 @@ def test_journal_card_and_refresh_buttons(env):
     assert (card["stage"], card["stage_label"], card["activation"]["trips_label"]) == (
         'signed', 'Добрал поездки', 'Добрал 50 поездок')
     assert env.refused(env.svc.check_lead_activation, lead_id, 'nope')[1] == 400
+
+
+# ── режим линий: «Активация» на линиях удалённого КЦ (владелец 26.11.2026) ─────────────────────────────────
+
+SZOV, RCC_OWN, SZOV_GUEST = 1, 540, 541
+
+HOSTED_DDL = '''
+    INSERT INTO departments (id, name, code) VALUES (1, 'СЗоВ', 'szov');
+    INSERT INTO sip_department_config VALUES (1, 'asterisk', '', NULL);
+    INSERT INTO users (id, name, login, role, status, department_id, sip_number) VALUES
+        (540, 'Оператор Удалённого', 'rcc', 'operator', 'working', 1954, '901'),
+        (541, 'Гость СЗоВ', 'szov_guest', 'operator', 'working', 1, 'oktell_541');
+    INSERT INTO dial_list_line_members (user_id, department_id, internal_number) VALUES (541, 1954, '902');
+'''
+
+
+class _SipDb(_Db):
+    """Карточка сотрудника — как db.get_sip_operator (те поля, что читает раздел)."""
+
+    def get_sip_operator(self, user_id):
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT u.id, u.name, u.department_id, COALESCE(dc.provider, 'asterisk'), COALESCE(u.sip_number, '')
+                FROM users u LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
+                WHERE u.id = %s
+            """, (int(user_id),))
+            r = cur.fetchone()
+        if not r:
+            return None
+        return {"id": r[0], "name": r[1], "department_id": r[2], "department_provider": r[3], "sip_number": r[4]}
+
+
+@pytest.fixture
+def hosted(monkeypatch):
+    monkeypatch.setattr(dial_service, 'ANSWER_SETTLE_SEC', 0.0)
+    schema = 't_dial_host_' + uuid.uuid4().hex
+    db = _SipDb(schema)
+    admin = db.connect()
+    admin.autocommit = True
+    with admin.cursor() as cur:
+        cur.execute('CREATE SCHEMA ' + schema)
+        cur.execute('SET search_path TO ' + schema)
+        cur.execute(BASE_DDL)
+        dial_schema.init_dial_list_schema(cur)
+        cur.execute(HOSTED_DDL)
+        cur.execute("INSERT INTO dial_list_department_settings (department_id, enabled, binotel_company, "
+                    "caller_id_for_employee) VALUES (1954, TRUE, 'remote_cc', '100')")
+    binotel, crm, fleet = _Binotel(), _Crm(), _Fleet()
+    signs = SignChecker(db)
+    signs.configured = lambda: False
+    checker = ActivationChecker(db, crm=crm, fleet=fleet, successes=signs, sleep=lambda _s: None)
+    svc = dial_service.DialListService(db, client_factory=lambda dep: binotel, sign_checker=signs,
+                                       calls_submit=_sync, activation_checker=checker)
+    try:
+        yield _Env(db, svc, binotel, crm, fleet)
+    finally:
+        with admin.cursor() as cur:
+            cur.execute('DROP SCHEMA ' + schema + ' CASCADE')
+        admin.close()
+
+
+def _enroll_szov(env):
+    settings = env.svc.enroll_department(SZOV, changed_by=1, profile='activation')
+    goal = settings["trips_goal"]
+    parsed, extras, _counts = activation.parse_activation_file(
+        _xlsx([_row(D1, '77001110001', 34, 'Бумажный документооборот'),
+               _row(D2, '77001110002', 12, 'Payda')]), '.xlsx', goal=goal)
+    env.svc.import_leads(SZOV, 1, 'novички.xlsx', parsed, require_iin=False, keep_iin=True, extras=extras)
+    return settings
+
+
+def test_szov_is_enrolled_on_remote_cc_lines(hosted):
+    svc = hosted.svc
+    candidates = {d["department_id"]: d for d in svc.candidate_departments(profile='activation')}
+    assert candidates[SZOV]["host_department_id"] == RCC
+    assert candidates[SZOV]["host_department_name"] == 'Удаленный КЦ'
+    settings = _enroll_szov(hosted)
+    assert (settings["profile"], settings["host_department_id"], settings["binotel_company"],
+            settings["caller_id_for_employee"], settings["enabled"]) == ('activation', RCC, 'remote_cc', '100', False)
+    block = svc.line_modes_block(RCC)
+    assert (block["host"]["id"], block["container"]["id"], block["hosted"], block["modes"]) == (RCC, SZOV, False, {})
+    assert svc.line_modes_block(SZOV)["hosted"] is True
+    # Отдел без своих линий дистрибутив телефона не получает (bot_schedule2._dial_list_department_allowed).
+    assert [d["host_department_id"] for d in svc.list_departments([SZOV])] == [RCC]
+    # Сотрудники «Активации» — только переключённые в её режим.
+    assert svc.department_users(SZOV) == []
+
+
+def test_switching_a_line_moves_the_operator_between_bases_without_touching_the_line(hosted):
+    svc = hosted.svc
+    _enroll_szov(hosted)
+    # Своя база удалённого КЦ: оператор взял пачку и ещё не звонил.
+    svc.import_leads(RCC, 1, 'rcc.xlsx', [(2, 'Водитель РКЦ', '77009990001', '77009990001', '')], require_iin=False)
+    state = svc.issue_next_portion(RCC_OWN, phone_version=GUARDED)
+    assert (state["profile"], [i["full_name"] for i in state["portion"]["items"]]) == ('remote_cc', ['Водитель РКЦ'])
+
+    result = svc.set_line_modes(RCC, 'activation', user_ids=[RCC_OWN], changed_by=1)
+    assert (result["changed"], result["skipped"], result["released_rows"]) == (1, [], 1)
+    assert result["line_modes"]["modes"] == {str(RCC_OWN): 'activation'}
+    # Линия и отдел сотрудника — прежние; работа обзвона — в «Активации».
+    assert svc.dial_operator(RCC_OWN)["department_id"] == RCC
+    work = svc.work_operator(RCC_OWN)
+    assert (work["department_id"], work["mode_host_department_id"], work["sip_number"]) == (SZOV, RCC, '901')
+    # Водитель удалённого КЦ снова в общем списке, его выдача закрыта.
+    assert hosted.q("SELECT COUNT(*) FROM dial_list_assignments a JOIN dial_list_leads l ON l.id = a.lead_id "
+                    "WHERE l.department_id = %s", (RCC,)) == [(0,)]
+    # Телефон: профиль tez, цель activation, строка водителя — поездки и ЭДО; включён — как у отдела линии.
+    hosted.crm.counts = {D1: 34, D2: 12}
+    state = svc.issue_next_portion(RCC_OWN, phone_version=GUARDED)
+    assert (state["profile"], state["goal"]) == ('tez', 'activation')
+    assert sorted(i["driver"]["label"] for i in state["portion"]["items"]) == [
+        '12 из 50 поездок · ЭДО: Payda', '34 из 50 поездок · ЭДО: Бумажный']
+    block = svc.phone_settings(RCC_OWN, member=None)
+    assert (block["enabled"], block["profile"], block["goal"], block["auto"], block["no_active"]) == (
+        True, 'tez', 'activation', True, False)
+    assert [u["id"] for u in svc.department_users(SZOV)] == [RCC_OWN]
+    # Звонок — с той же линии в кабинете удалённого КЦ.
+    item = state["portion"]["items"][0]
+    svc.start_call(RCC_OWN, item["assignment_id"], operator_status='outbound')
+    assert hosted.binotel.originated[-1][0] == '901'
+
+
+def test_busy_operator_is_not_switched_and_all_lines_switch_back(hosted):
+    svc = hosted.svc
+    _enroll_szov(hosted)
+    res = svc.set_line_modes(SZOV, 'activation', all_lines=True, changed_by=1)
+    assert res["changed"] == 2 and res["line_modes"]["hosted"] is True
+    assert svc.work_operator(SZOV_GUEST)["department_id"] == SZOV
+    # Гость СЗоВ в разговоре — назад в удалённый КЦ его не переключаем, остальных — да.
+    hosted.crm.counts = {D1: 34, D2: 12}
+    item = svc.issue_next_portion(SZOV_GUEST, phone_version=GUARDED)["portion"]["items"][0]
+    svc.start_call(SZOV_GUEST, item["assignment_id"], operator_status='outbound')
+    res = svc.set_line_modes(RCC, 'host', all_lines=True, changed_by=1)
+    assert res["changed"] == 1 and [s["user_id"] for s in res["skipped"]] == [SZOV_GUEST]
+    assert res["skipped"][0]["reason"] == dial_service.DialListService.MODE_BUSY
+    assert svc.work_operator(RCC_OWN)["department_id"] == RCC
+    assert svc.work_operator(SZOV_GUEST)["department_id"] == SZOV
+    # Чужой отделу человек и неверный режим — отказ.
+    assert hosted.refused(svc.set_line_modes, RCC, 'activation', user_ids=[530])[1] == 404
+    assert hosted.refused(svc.set_line_modes, RCC, 'nope', user_ids=[RCC_OWN])[1] == 400
+
+
+def test_release_from_the_line_clears_the_mode(hosted):
+    svc = hosted.svc
+    _enroll_szov(hosted)
+    svc.set_line_modes(RCC, 'activation', user_ids=[SZOV_GUEST], changed_by=1)
+    assert svc.operator_mode(SZOV_GUEST) == (SZOV, RCC)
+    svc.release_line(RCC, SZOV_GUEST, changed_by=1, seat_anyone=True)
+    assert svc.operator_mode(SZOV_GUEST) is None
+    # Снят с линии — своя телефония отдела (не Binotel): в обзвоне его нет.
+    assert svc.work_operator(SZOV_GUEST)["department_id"] == SZOV
+    assert svc.work_operator(SZOV_GUEST)["department_provider"] == 'asterisk'
+    # Режим, оставшийся от другой линии, не действует: сверяется отдел линии.
+    hosted.q("INSERT INTO dial_list_operator_modes (user_id, department_id, host_department_id) VALUES (%s, %s, %s)",
+             (RCC_OWN, SZOV, 9999))
+    assert svc.work_operator(RCC_OWN)["department_id"] == RCC

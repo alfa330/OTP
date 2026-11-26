@@ -660,6 +660,24 @@ DDL = [
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sapar_attempt_id UUID",
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sapar_operator_id INTEGER",
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS sapar_resolved_at TIMESTAMP WITH TIME ZONE",
+    # Режим линий (владелец 26.11.2026: «в удалённом КЦ уже есть линии — надо добавить возможность просто переключать
+    # для них режимы… не меняя сотрудника: линии общие, а что отображается в iCORE Phone, зависит от включённого
+    # режима»). Отдел «Активации» без своих линий (отдел СЗоВ) работает на линиях другого отдела:
+    #   host_department_id   отдел, чьи линии он берёт (удалённый КЦ); NULL — у отдела свои линии на Binotel
+    # dial_list_operator_modes — оператор на линии отдела host_department_id сейчас работает в обзвоне department_id
+    # (строки нет — в обзвоне своей линии). Читается, только пока оператор сидит на линии этого host: пересадили на
+    # другую линию — режим не действует (и при посадке/снятии строка удаляется). FK нет намеренно, как у pinned_by:
+    # стартовый DDL не должен ждать блокировки users и departments.
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS host_department_id INTEGER",
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_operator_modes (
+        user_id INTEGER PRIMARY KEY,
+        department_id INTEGER NOT NULL,
+        host_department_id INTEGER NOT NULL,
+        set_by INTEGER,
+        set_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
     # Индексов по отметкам проверок (sign_checked_at, trip_checked_at) нет НАМЕРЕННО.
     # Отметку пишет каждая проверка подписи и поездок — у каждого неподписавшего раз в
     # час-три, ~100 тыс. обновлений в сутки. Пока отметка стояла в индексе, обновление было
@@ -766,6 +784,8 @@ DDL = [
     " WHERE focused",
     # Файлы водителя — прогресс файлов сводки ищет их по водителю.
     "CREATE INDEX IF NOT EXISTS idx_dial_list_batch_leads_lead ON dial_list_batch_leads(lead_id)",
+    # Режим линий: кто сейчас работает в обзвоне отдела (сводка «Операторы», вкладка «Линии»).
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_operator_modes_department ON dial_list_operator_modes(department_id)",
 ]
 
 

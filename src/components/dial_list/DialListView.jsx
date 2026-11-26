@@ -336,6 +336,9 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
         || String(a.operator_name || '').localeCompare(String(b.operator_name || ''), 'ru')), [rows]);
 
     const enabled = !!dept.settings?.enabled;
+    // «Активация» на линиях удалённого КЦ (режим линий, 26.11.2026): своих линий и сотрудников у отдела нет —
+    // операторы те, кому во вкладке «Линии» включили режим «Активация».
+    const hostedLines = activation && dept.settings?.host_department_id != null;
     // У Тез режим отдела целиком всегда выключен (операторов включают лично): «включён» —
     // это автообзвон.
     const autoDial = !!dept.settings?.auto_dial;
@@ -433,7 +436,11 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             onChange={(v) => setEnrollPick(String(v))}
                             ariaLabel="Отдел для подключения"
                             placeholder="Выберите отдел"
-                            options={candidates.map((d) => ({ value: String(d.department_id), label: d.department_name || `Отдел ${d.department_id}` }))}
+                            options={candidates.map((d) => ({
+                                value: String(d.department_id),
+                                // «Активация» на чужих линиях (режим линий, 26.11.2026): чьи линии — видно сразу.
+                                label: `${d.department_name || `Отдел ${d.department_id}`}${d.host_department_name ? ` · на линиях «${d.host_department_name}»` : ''}`,
+                            }))}
                         />
                         <button type="button" onClick={enroll} disabled={enrolling || !enrollPick} className={`${iosBtnSecondary} py-1.5`}>
                             <FaIcon className={enrolling ? 'fas fa-spinner fa-spin' : 'fas fa-plus'} />
@@ -532,6 +539,8 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                                     // Точечная обработка (17.11.2026): база не пуста — пусты отмеченные файлы.
                                                     ? 'В отмеченных файлах звонить некому — отметьте другие во вкладке «База водителей» или снимите отметки.'
                                                     : 'База пуста — загрузите список водителей во вкладке «База водителей».')
+                                                : hostedLines
+                                                    ? 'Переключите линии в режим «Активация» во вкладке «Линии» — в статусе «Активный» телефоны звонят сами.'
                                                 : tez
                                                     ? 'Включите операторов во вкладке «Настройки» — в статусе «Активный» их телефоны звонят сами.'
                                                     : !enabled
@@ -708,15 +717,21 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                             showToast={showToast}
                                         />
                                     )}
-                                    <DialListOperatorsPanel
-                                        apiBaseUrl={apiBaseUrl}
-                                        authHeaders={authHeaders}
-                                        departmentId={selected.department_id}
-                                        departmentEnabled={enabled}
-                                        canEdit={canEdit}
-                                        showToast={showToast}
-                                        profile={sectionProfile}
-                                    />
+                                    {hostedLines ? (
+                                        <div className={`${iosCard} px-4 py-3 text-[13px] text-slate-600`}>
+                                            Операторы — на линиях удалённого КЦ: кому включить «Активацию водителей», выбирают во вкладке «Линии».
+                                        </div>
+                                    ) : (
+                                        <DialListOperatorsPanel
+                                            apiBaseUrl={apiBaseUrl}
+                                            authHeaders={authHeaders}
+                                            departmentId={selected.department_id}
+                                            departmentEnabled={enabled}
+                                            canEdit={canEdit}
+                                            showToast={showToast}
+                                            profile={sectionProfile}
+                                        />
+                                    )}
                                     {canEdit && candidatesAdmin && (
                                         <div className="flex justify-end">
                                             <button type="button" onClick={unenroll} disabled={enrolling} className={`${iosBtnSecondary} text-rose-600`}>

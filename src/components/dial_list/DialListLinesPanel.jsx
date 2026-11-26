@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import FaIcon from '../common/FaIcon';
-import { iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint } from '../ui/ios';
+import { iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { assignedToast, buildLinePickerOptions, canAssignLine, canReleaseHolder, defaultPickedUser, isRobotLine } from './linePicker';
+import { MODE_ACTIVATION, MODE_HOST, lineModeOptions, modeCounts, modeResultToast } from './lineModes';
 
 /*
  * Линии Binotel отдела: какие внутренние номера есть у компании, кто из них
@@ -15,6 +16,12 @@ import { assignedToast, buildLinePickerOptions, canAssignLine, canReleaseHolder,
  * его по ФИО из всей компании (право и список считает сервер — can_seat_anyone,
  * candidates), остальные руководители раздела — только из сотрудников отдела линии.
  * Что кому предлагать — в linePicker.js.
+ *
+ * Режим линий (владелец 26.11.2026: «линии общие, а что отображается в iCORE Phone, зависит от включённого
+ * режима»): когда к линиям удалённого КЦ подключена «Активация водителей», у каждой занятой линии — переключатель
+ * «Удалённый КЦ / Активация», а над списком — «всем сразу». Сотрудник и линия при этом не меняются. В разделе
+ * «Активация водителей» (hosted) — те же линии, но только с режимом: сажают и снимают в «Удаленном КЦ».
+ * Логика подписей — lineModes.js.
  */
 
 const readError = async (resp) => {
@@ -38,6 +45,8 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
     const [picking, setPicking] = useState(null);   // номер линии, для которой открыт выбор
     const [pickedUser, setPickedUser] = useState('');
     const [busyLine, setBusyLine] = useState(null);
+    // Режим линий: какая строка переключается (номер линии) или 'all' — все сразу.
+    const [modeBusy, setModeBusy] = useState(null);
 
     const toast = useCallback((msg, kind = 'success') => {
         if (typeof showToast === 'function') showToast(msg, kind);
@@ -88,6 +97,27 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
         }
     };
 
+    const switchMode = async (body, busyKey) => {
+        setModeBusy(busyKey);
+        try {
+            const result = await post('mode', body);
+            const { text, kind } = modeResultToast(result, data?.line_modes);
+            toast(text, kind);
+            await load();
+        } catch (e) {
+            toast(e.message || 'Не удалось переключить режим', 'error');
+        } finally {
+            setModeBusy(null);
+        }
+    };
+
+    const switchAll = (mode) => {
+        const modes = data?.line_modes;
+        const name = mode === MODE_ACTIVATION ? 'Активация водителей' : (modes?.host?.name || 'Удаленный КЦ');
+        if (!window.confirm(`Перевести все занятые линии в режим «${name}»? Кто сейчас в разговоре или не поставил итог, останется в прежнем режиме.`)) return;
+        switchMode({ mode, all: true }, 'all');
+    };
+
     const release = async (line) => {
         if (!line.icore_user) return;
         setBusyLine(line.internal_number);
@@ -113,6 +143,12 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
     }), [data, canSeatAnyone, departmentName]);
     const lines = data?.lines || [];
     const online = lines.filter((l) => l.online).length;
+    const lineModes = data?.line_modes || null;
+    // Вкладка «Активации» без своих линий: сажать и снимать здесь нельзя — только режим.
+    const hosted = Boolean(lineModes?.hosted);
+    const seatEdit = canEdit && !hosted;
+    const modeOptions = lineModeOptions(lineModes);
+    const counts = modeCounts(lines);
 
     return (
         <div className="space-y-4">
@@ -127,6 +163,43 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
                         </div>
                     </div>
                 </div>
+            )}
+
+            {lineModes && (
+                <section className="space-y-1.5">
+                    <div className="flex items-center gap-1.5 px-1">
+                        <span className={iosGroupLabel}>Режим линий</span>
+                        <IosHint text={`Линии общие: сотрудник и линия остаются прежними, меняется только то, что он видит в iCORE Phone. «${lineModes.host?.name || 'Удаленный КЦ'}» — обзвон удалённого КЦ, «Активация водителей» — обзвон новичков до цели по поездкам и перевод на Sapar. Телефон переключится сам со следующим обновлением списка; автообзвон в «Активном» — в течение 10 минут или после перезапуска. Кто сейчас в разговоре или не поставил итог, переключается после этого. Выданные в прежнем режиме водители, которым ещё не звонили, возвращаются в общий список.`} />
+                    </div>
+                    <div className={`${iosCard} flex flex-wrap items-center justify-between gap-3 px-4 py-3`}>
+                        <div className="text-[13px] text-slate-600">
+                            В «Активации» — <span className="font-semibold tabular-nums text-slate-900">{counts.activation}</span>
+                            {' '}из <span className="tabular-nums">{counts.taken}</span> занятых линий
+                            {hosted && (
+                                <div className="text-[12px] text-slate-500">
+                                    Это линии отдела «{lineModes.host?.name || 'Удаленный КЦ'}»: сажают на них и снимают в его разделе.
+                                </div>
+                            )}
+                        </div>
+                        {canEdit && counts.taken > 0 && (
+                            <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-[12.5px] text-slate-500">Всем:</span>
+                                {modeOptions.map((o) => (
+                                    <button
+                                        key={o.value}
+                                        type="button"
+                                        onClick={() => switchAll(o.value)}
+                                        disabled={modeBusy !== null}
+                                        className={iosBtnSecondary}
+                                    >
+                                        {modeBusy === 'all' ? <FaIcon className="fas fa-spinner fa-spin" /> : null}
+                                        {o.label}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </section>
             )}
 
             <section className="space-y-1.5">
@@ -196,7 +269,19 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
                                             )}
                                         </div>
                                     </div>
-                                    {canEdit && !isPicking && (
+                                    {lineModes && line.icore_user && (
+                                        <IosSegmented
+                                            value={line.mode || MODE_HOST}
+                                            onChange={(mode) => {
+                                                if (!canEdit || modeBusy !== null || mode === (line.mode || MODE_HOST)) return;
+                                                switchMode({ mode, user_ids: [line.icore_user.id] }, line.internal_number);
+                                            }}
+                                            options={modeOptions}
+                                            size="xs"
+                                            ariaLabel={`Режим линии ${line.internal_number}`}
+                                        />
+                                    )}
+                                    {seatEdit && !isPicking && (
                                         line.icore_user ? (
                                             /* Сотрудника другого отдела снимает тот же, кто вправе его сажать. */
                                             canReleaseHolder(line.icore_user, canSeatAnyone) && (
@@ -249,10 +334,12 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
                         );
                     })}
                 </div>
-                <p className="px-1 text-[11.5px] leading-relaxed text-slate-500">
-                    Сотрудник входит в iCORE Phone своим логином iCORE и оказывается на назначенной линии.
-                    Один сотрудник — одна линия.
-                </p>
+                {!hosted && (
+                    <p className="px-1 text-[11.5px] leading-relaxed text-slate-500">
+                        Сотрудник входит в iCORE Phone своим логином iCORE и оказывается на назначенной линии.
+                        Один сотрудник — одна линия.
+                    </p>
+                )}
             </section>
         </div>
     );

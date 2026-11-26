@@ -760,6 +760,13 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         if str(payload.get('profile') or '').strip().lower() in AUTODIAL_PROFILES and not _global_admin():
             raise DialListError("Подключить отдел к автообзвону может администратор", 403)
         extra = {"profile": payload['profile']} if payload.get('profile') else {}
+        # «Активация водителей» на линиях другого отдела (режим линий, 26.11.2026): какого — host_department_id;
+        # не передан — удалённый КЦ (svc._default_activation_host).
+        if payload.get('host_department_id') is not None:
+            try:
+                extra["host_department_id"] = int(payload['host_department_id'])
+            except (TypeError, ValueError):
+                raise DialListError("host_department_id: число")
         settings = svc.enroll_department(department_id, changed_by=requester_id, **extra)
         return jsonify({"status": "success", "settings": settings}), 200
 
@@ -864,26 +871,72 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         informer у линии — с неё звонит автоинформатор: назначить на неё может только суперадмин
         (can_seat_robot), и тогда робот с неё звонить перестаёт."""
         _manager(department_id)
-        anyone = _seats_anyone()
-        robot = _robot_lines(department_id)
-        line_rows = svc.list_lines(department_id)
+        # Режим линий (владелец 26.11.2026): у линий удалённого КЦ есть режим «Удалённый КЦ / Активация водителей».
+        # line_modes — кто в каком режиме; hosted — это вкладка «Активации» без своих линий: показываем линии
+        # удалённого КЦ только с переключателем режима, сажают и снимают на них в «Удаленном КЦ».
+        modes = _line_modes_or_none(department_id)
+        hosted = bool(modes and modes.get("hosted"))
+        lines_department = modes["host"]["id"] if hosted else department_id
+        anyone = _seats_anyone() and not hosted
+        robot = _robot_lines(lines_department)
+        line_rows = svc.list_lines(lines_department)
         for line in line_rows:
             line["informer"] = str(line.get("internal_number") or "") in robot
+            if modes is not None:
+                holder = line.get("icore_user") or {}
+                line["mode"] = (modes["modes"].get(str(holder["id"]), "host") if holder.get("id") is not None
+                                else None)
         return jsonify({
             "status": "success",
-            "sip_server": svc.department_sip_server(department_id),
+            "sip_server": svc.department_sip_server(lines_department),
             "lines": line_rows,
-            "users": svc.department_users(department_id),
+            "users": [] if hosted else svc.department_users(department_id),
             "can_seat_anyone": anyone,
-            "can_seat_robot": _seats_on_robot_lines(),
+            "can_seat_robot": _seats_on_robot_lines() and not hosted,
             "candidates": svc.line_candidates(department_id) if anyone else [],
+            "line_modes": modes,
         }), 200
+
+    def _line_modes_or_none(department_id):
+        """Режим линий для вкладки «Линии» — надстройка: не прочитали — вкладка работает, как раньше, без него."""
+        try:
+            return svc.line_modes_block(department_id)
+        except Exception:
+            log.exception("dial_list: режим линий отдела %s не прочитан — вкладка без него", department_id)
+            return None
+
+    def _own_lines_only(department_id):
+        """Сажают и снимают только на линиях своего отдела: у «Активации» без своих линий их нет."""
+        try:
+            settings = svc.department_settings(department_id)
+        except Exception:
+            log.exception("dial_list: настройки отдела %s не прочитаны — линии как раньше", department_id)
+            return
+        if settings.get("host_department_id") is not None:
+            raise DialListError("Это линии удалённого КЦ: сажают на них и снимают в разделе «Удаленный КЦ», а здесь "
+                                "только переключают режим", 409)
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/lines/mode', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def lines_mode(department_id):
+        """Режим линий: {mode: 'activation' | 'host', user_ids: [..]} или {mode, all: true} — операторы на линиях
+        работают в обзвоне «Активации водителей» или своей линии. Отдел — и удалённый КЦ, и «Активация»."""
+        requester_id, _scope = _manager(department_id)
+        payload = request.get_json(silent=True) or {}
+        user_ids = payload.get('user_ids')
+        if user_ids is not None and not isinstance(user_ids, list):
+            raise DialListError("user_ids: список")
+        result = svc.set_line_modes(department_id, payload.get('mode'), user_ids=user_ids,
+                                    all_lines=payload.get('all') is True, changed_by=requester_id)
+        return jsonify({"status": "success", **result}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/lines/assign', methods=['POST', 'OPTIONS'])
     @require_api_key
     @_guard
     def lines_assign(department_id):
         requester_id, _scope = _manager(department_id)
+        _own_lines_only(department_id)
         payload = request.get_json(silent=True) or {}
         try:
             user_id = int(payload.get('user_id'))
@@ -901,6 +954,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @_guard
     def lines_release(department_id):
         requester_id, _scope = _manager(department_id)
+        _own_lines_only(department_id)
         payload = request.get_json(silent=True) or {}
         try:
             user_id = int(payload.get('user_id'))
@@ -926,7 +980,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
                                       require_iin=False, keep_iin=True, extras=extras)
         else:
             counts["period"] = (period or svc.department_settings(department_id)["_period"]).isoformat()
-        counts["rows_total"] = int(counts.get("rows_total") or 0) + file_counts["rows_goal_reached"]             + file_counts["rows_bad_id"] + file_counts["duplicate_ids"]
+        counts["rows_total"] = (int(counts.get("rows_total") or 0) + file_counts["rows_goal_reached"]
+                                + file_counts["rows_bad_id"] + file_counts["duplicate_ids"])
         counts["rows_duplicate"] = int(counts.get("rows_duplicate") or 0) + file_counts["duplicate_ids"]
         counts.update({"rows_goal_reached": file_counts["rows_goal_reached"], "rows_bad_id": file_counts["rows_bad_id"],
                        "bad_id_rows": file_counts["bad_id_rows"], "trips_goal": goal, "sheets": file_counts["sheets"]})

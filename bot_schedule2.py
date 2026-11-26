@@ -56586,7 +56586,10 @@ def _dial_list_department_allowed(department_id):
     if _dial_list_service is None or department_id is None:
         return False
     try:
-        return bool(_dial_list_service.list_departments([int(department_id)]))
+        # Отдел «Активации водителей» без своих линий (режим линий, 26.11.2026; это отдел СЗоВ) дистрибутив
+        # отделу не даёт: телефон получают те, кто сидит на линиях удалённого КЦ, — как и раньше.
+        return any(row.get("host_department_id") is None
+                   for row in _dial_list_service.list_departments([int(department_id)]))
     except Exception:
         logging.exception("dial_list: не удалось проверить отдел %s для дистрибутива телефона", department_id)
         return False

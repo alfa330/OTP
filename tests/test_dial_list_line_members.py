@@ -579,10 +579,15 @@ class CountsAsLineDepartmentEmployeeTests(unittest.TestCase):
     def test_every_phone_route_resolves_the_operator_through_the_binding(self):
         """Порция, звонок, итог, «Мой прогресс», скрипт — все берут отдел из operator_context,
         а он — из dial_operator. Прямого чтения карточки мимо привязки быть не должно."""
+        # С 26.11.2026 (режим линий) — через work_operator: он берёт dial_operator и только поверх него подменяет
+        # отдел работы на «Активацию», если её включили на этой линии.
         for name in ('operator_context', 'phone_settings'):
             src = inspect.getsource(getattr(dial_service.DialListService, name))
-            self.assertIn('self.dial_operator(', src, name)
+            self.assertIn('self.work_operator(', src, name)
             self.assertNotIn('self.db.get_sip_operator(', src, name)
+        work = inspect.getsource(dial_service.DialListService.work_operator)
+        self.assertIn('self.dial_operator(user_id, operator, member=member)', work)
+        self.assertNotIn('self.db.get_sip_operator(', work)
         src = inspect.getsource(dial_routes.build_dial_list_blueprint)
         settings_route = src[src.index("def operator_settings(user_id)"):src.index("def lines(department_id)")]
         self.assertIn('svc.dial_operator(user_id)', settings_route)
@@ -601,7 +606,8 @@ class CountsAsLineDepartmentEmployeeTests(unittest.TestCase):
                                     "guest": False, "department_name": ""})
         self.assertEqual((users[1]["guest"], users[1]["department_name"], users[1]["sip_number"],
                           users[1]["dial_list_enabled"]), (True, "СЗоВ", "906", True))
-        sql, params = cursor.executed[0]
+        # Первым (с 26.11.2026) читаются настройки отдела — не «Активация» ли это без своих линий; список — следом.
+        sql, params = next((q, p) for q, p in cursor.executed if 'FROM users u' in q)
         flat = ' '.join(sql.split())
         # Линия посаженного — из привязки, а не users.sip_number (там логин Oktell его отдела).
         self.assertIn("COALESCE(m.internal_number, u.sip_number, '')", flat)

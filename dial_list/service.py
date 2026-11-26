@@ -2095,7 +2095,8 @@ class DialListService:
                (SELECT COUNT(*) FROM dial_list_leads l
                  WHERE l.department_id = d.id AND l.status IN ('new', 'in_progress')
                    AND l.signed_at IS NULL AND l.sign_status <> 'processing') AS leads_open,
-               COALESCE(s.profile, 'remote_cc') AS profile
+               COALESCE(s.profile, 'remote_cc') AS profile,
+               s.host_department_id
         FROM departments d
         LEFT JOIN sip_department_config dc ON dc.department_id = d.id
         LEFT JOIN dial_list_department_settings s ON s.department_id = d.id
@@ -2112,6 +2113,8 @@ class DialListService:
             "portion_size": int(r[6]), "leads_total": int(r[7] or 0), "leads_open": int(r[8] or 0),
             # Профиль отдела (15.10.2026): удалённый КЦ или автообзвон Тез.
             "profile": (r[9] if len(r) > 9 else None) or PROFILE_REMOTE_CC,
+            # Режим линий (26.11.2026): отдел работает на линиях этого отдела (своих линий нет); None — свои.
+            "host_department_id": (int(r[10]) if len(r) > 10 and r[10] is not None else None),
         }
 
     def list_departments(self, department_ids=None, profile=None):
@@ -2146,6 +2149,23 @@ class DialListService:
         обзвонившие ни одного водителя: так подключили Тез КЦ 01.10.2026; подключение к автообзвону
         переведёт такой отдел (enroll_department)."""
         params = [DEFAULT_PORTION_SIZE, sorted(DIAL_LIST_DEPARTMENT_CODES)]
+        if profile == PROFILE_ACTIVATION:
+            # «Активация водителей» (26.11.2026): отдел со своими линиями на Binotel — как раньше; отдел-куратор
+            # (СЗоВ) — на линиях удалённого КЦ (режим линий, владелец 26.11.2026), если такой отдел есть.
+            with self.db._get_cursor() as cur:
+                host = self._default_activation_host(cur)
+            where = ("s.department_id IS NULL AND NOT (LOWER(COALESCE(d.code, '')) = ANY(%s)) "
+                     "AND (COALESCE(dc.provider, 'asterisk') = 'binotel'"
+                     + (" OR LOWER(COALESCE(d.code, '')) = ANY(%s)" if host else "") + ")")
+            if host:
+                params.append(sorted(DIAL_LIST_OVERSEER_DEPARTMENT_CODES))
+            with self.db._get_cursor() as cur:
+                cur.execute(self._DEPARTMENTS_SQL.format(where=where), params)
+                rows = [self._department_row(r) for r in cur.fetchall()]
+            for row in rows:
+                if row["provider"] != "binotel" and host:
+                    row["host_department_id"], row["host_department_name"] = host
+            return rows
         if profile == PROFILE_TEZ:
             where = ("COALESCE(dc.provider, 'asterisk') = 'binotel' AND (s.department_id IS NULL OR "
                      "(COALESCE(s.profile, 'remote_cc') = 'remote_cc' AND " + self._NO_DIAL_DATA_SQL + ")) "
@@ -2157,7 +2177,25 @@ class DialListService:
             cur.execute(self._DEPARTMENTS_SQL.format(where=where), params)
             return [self._department_row(r) for r in cur.fetchall()]
 
-    def enroll_department(self, department_id, changed_by=None, profile=None):
+    # Отдел, на линиях которого работает «Активация водителей» без своих линий: удалённый КЦ — отдел с кодом из
+    # DIAL_LIST_DEPARTMENT_CODES на Binotel, подключённый к разделу профилем remote_cc.
+    _DEFAULT_HOST_SQL = """
+        SELECT d.id, d.name
+        FROM departments d
+        JOIN sip_department_config dc ON dc.department_id = d.id AND dc.provider = 'binotel'
+        JOIN dial_list_department_settings s ON s.department_id = d.id
+        WHERE COALESCE(d.is_active, TRUE) AND LOWER(COALESCE(d.code, '')) = ANY(%s)
+          AND COALESCE(s.profile, 'remote_cc') = 'remote_cc' AND s.host_department_id IS NULL
+        ORDER BY d.id LIMIT 1
+    """
+
+    def _default_activation_host(self, cur):
+        """(id, название) отдела, чьи линии берёт «Активация» без своих линий, или None."""
+        cur.execute(self._DEFAULT_HOST_SQL, (sorted(DIAL_LIST_DEPARTMENT_CODES),))
+        row = cur.fetchone()
+        return (int(row[0]), row[1] or "") if row else None
+
+    def enroll_department(self, department_id, changed_by=None, profile=None, host_department_id=None):
         """Подключить отдел к разделу: завести строку настроек (режим пока выключен).
 
         profile 'tez' (автообзвон Тез КЦ, 15.10.2026) — сразу со значениями Тез
@@ -2182,7 +2220,12 @@ class DialListService:
             row = cur.fetchone()
             if not row:
                 raise DialListError("Отдел не найден", 404)
-            if row[1] != "binotel":
+            host = None
+            if profile == PROFILE_ACTIVATION and (row[1] != "binotel" or host_department_id is not None):
+                # Режим линий (владелец 26.11.2026): отдел без своих линий (СЗоВ) работает на линиях удалённого КЦ —
+                # операторам переключают режим во вкладке «Линии», сотрудники и линии остаются прежними.
+                host = self._activation_host(cur, department_id, host_department_id)
+            elif row[1] != "binotel":
                 raise DialListError(
                     "Телефония отдела не Binotel: сначала переключите провайдера отдела в «Настройках SIP»", 409)
             if profile == PROFILE_TEZ:
@@ -2210,16 +2253,29 @@ class DialListService:
                 # «Активация водителей» (26.11.2026): движок Тез — автоцикл и расписание повторов, свои итоги;
                 # компания Binotel — по умолчанию (линии СЗоВ в кабинете удалённого КЦ). Режим отдела выключен:
                 # операторов под распределение руководитель включает лично, как у Тез.
+                # На чужих линиях — компания Binotel и номер для линии оператора того отдела: звонок идёт с той же
+                # линии в том же кабинете.
+                company, caller_id = DEFAULT_BINOTEL_COMPANY, ""
+                if host is not None:
+                    cur.execute("""
+                        SELECT binotel_company, caller_id_for_employee FROM dial_list_department_settings
+                        WHERE department_id = %s
+                    """, (host[0],))
+                    hs = cur.fetchone()
+                    if hs:
+                        company, caller_id = (hs[0] or DEFAULT_BINOTEL_COMPANY), (hs[1] or "")
                 cur.execute("""
                     INSERT INTO dial_list_department_settings (department_id, enabled, updated_by, profile,
                                                                auto_dial, retry_after_hours, retry_schedule_min,
-                                                               trips_goal)
-                    VALUES (%s, FALSE, %s, %s, %s, %s, %s::jsonb, %s)
+                                                               trips_goal, host_department_id, binotel_company,
+                                                               caller_id_for_employee)
+                    VALUES (%s, FALSE, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
                     ON CONFLICT (department_id) DO NOTHING
                     RETURNING department_id
                 """, (department_id, changed_by, PROFILE_ACTIVATION, ACTIVATION_DEFAULT_SETTINGS["auto_dial"],
                       ACTIVATION_DEFAULT_SETTINGS["retry_after_hours"],
-                      json.dumps(ACTIVATION_DEFAULT_SETTINGS["retry_schedule_min"]), activation.TRIPS_GOAL_DEFAULT))
+                      json.dumps(ACTIVATION_DEFAULT_SETTINGS["retry_schedule_min"]), activation.TRIPS_GOAL_DEFAULT,
+                      host[0] if host else None, company, caller_id))
                 if cur.fetchone():
                     cur.execute("SELECT 1 FROM dial_list_outcomes WHERE department_id = %s LIMIT 1", (department_id,))
                     if not cur.fetchone():
@@ -2240,6 +2296,29 @@ class DialListService:
         log.info("dial_list: отдел %s подключён к разделу (профиль %s, пользователь %s)", department_id, profile,
                  changed_by)
         return settings
+
+    def _activation_host(self, cur, department_id, host_department_id=None):
+        """Отдел, на линиях которого будет работать «Активация» отдела department_id: заданный (своими линиями на
+        Binotel, удалённый КЦ, не сам отдел) или по умолчанию (_default_activation_host). (id, название);
+        нет такого — 409."""
+        if host_department_id is None:
+            host = self._default_activation_host(cur)
+            if not host:
+                raise DialListError("Нет отдела с линиями Binotel, на которых работать: подключите удалённый КЦ", 409)
+            return host
+        host_department_id = int(host_department_id)
+        if host_department_id == int(department_id):
+            raise DialListError("Отдел не может работать на своих же линиях — у него их нет", 400)
+        cur.execute("""
+            SELECT d.id, d.name FROM departments d
+            JOIN sip_department_config dc ON dc.department_id = d.id AND dc.provider = 'binotel'
+            JOIN dial_list_department_settings s ON s.department_id = d.id
+            WHERE d.id = %s AND COALESCE(s.profile, 'remote_cc') = 'remote_cc' AND s.host_department_id IS NULL
+        """, (host_department_id,))
+        row = cur.fetchone()
+        if not row:
+            raise DialListError("Линии берутся только у отдела удалённого КЦ на Binotel", 400)
+        return int(row[0]), row[1] or ""
 
     def manager_scope(self, is_admin, headed_department_ids, login=None, supervisor_department_code=None,
                       supervisor_id=None):
@@ -2370,11 +2449,46 @@ class DialListService:
                     department_provider=member["provider"],
                     sip_number=member["internal_number"], line_member=True)
 
+    # Режим линии оператора (26.11.2026): действует, только пока он сидит на линии того отдела, на котором режим
+    # включали, и пока отдел режима — «Активация» на линиях этого отдела.
+    _OPERATOR_MODE_SQL = """
+        SELECT m.department_id, m.host_department_id
+        FROM dial_list_operator_modes m
+        JOIN dial_list_department_settings s ON s.department_id = m.department_id
+        WHERE m.user_id = %s AND s.profile = %s AND s.host_department_id = m.host_department_id
+    """
+
+    def operator_mode(self, user_id):
+        """(отдел режима, отдел линии) — оператор сейчас работает в обзвоне отдела режима; None — в своём."""
+        try:
+            with self.db._get_cursor() as cur:
+                cur.execute(self._OPERATOR_MODE_SQL, (int(user_id), PROFILE_ACTIVATION))
+                row = cur.fetchone()
+        except Exception:
+            # Режим — надстройка: не прочитали (схема не догнала) — оператор работает в обзвоне своей линии.
+            log.exception("dial_list: режим линии оператора %s не прочитан — обзвон своей линии", user_id)
+            return None
+        return (int(row[0]), int(row[1])) if row else None
+
+    def work_operator(self, user_id, operator=None, member=MEMBER_NOT_GIVEN):
+        """Оператор глазами работы обзвона (состояние телефона, звонки, итоги, настройки для телефона): как
+        dial_operator, но в режиме «Активация» (режим линии, владелец 26.11.2026) — отдел режима вместо отдела
+        линии. Линия, провайдер и номер — прежние: звонок идёт с той же линии. mode_host_department_id — отдел линии.
+        Управление линиями (посадка, снятие, личные настройки) смотрит dial_operator — отдел линии."""
+        operator = self.dial_operator(user_id, operator, member=member)
+        if not operator or operator.get("department_id") is None:
+            return operator
+        mode = self.operator_mode(user_id)
+        if not mode or int(operator["department_id"]) != mode[1]:
+            return operator
+        return dict(operator, department_id=mode[0], mode_host_department_id=mode[1])
+
     def operator_profile(self, user_id):
         """Профиль отдела, в котором сотрудник работает с телефона (сидящий на линии другого отдела —
-        профиль отдела линии, dial_operator): 'tez' | 'remote_cc'; не на Binotel или не найден — None.
+        профиль отдела линии, dial_operator; в режиме «Активация» — её, work_operator): 'tez' | 'remote_cc' |
+        'activation'; не на Binotel или не найден — None.
         По нему ручки телефона решают, закрыт ли он до QR (routes._operator_data)."""
-        operator = self.dial_operator(user_id) or {}
+        operator = self.work_operator(user_id) or {}
         department_id = operator.get("department_id")
         if department_id is None or (operator.get("department_provider") or "") != "binotel":
             return None
@@ -2662,6 +2776,14 @@ class DialListService:
         # списка первый же тест-оператор). Список уволенных — тот же, что у панели SIP.
         inactive = list(getattr(self.db, "_SIP_INACTIVE_STATUSES", ("fired",)))
         department_id = int(department_id)
+        # Отдел «Активации» без своих линий (режим линий, 26.11.2026): его операторы — те, кому на линиях отдела
+        # host включили «Активацию»; обзвон у них включён режимом.
+        settings = self.department_settings(department_id)
+        host = settings.get("host_department_id")
+        if host is not None and is_activation(settings):
+            modes = self.line_modes(host, department_id)
+            return [dict(u, dial_list_enabled=True, line_mode=self.MODE_ACTIVATION)
+                    for u in self.department_users(host) if int(u["id"]) in modes]
         with self.db._get_cursor() as cur:
             # Линия посаженного — из его привязки, а не users.sip_number: там номер
             # телефонии его собственного отдела. Свой сотрудник отдела, которого
@@ -2838,6 +2960,7 @@ class DialListService:
                     self._seat_member(cur, department_id, user_id, internal_number, login, password, changed_by)
         except psycopg2.errors.UniqueViolation as exc:
             raise self._seat_conflict(exc, internal_number)
+        self.clear_operator_mode(user_id)
         log.info("dial_list: сотруднику %s назначена линия Binotel %s (отдел %s%s, назначил %s)", user_id,
                  internal_number, department_id, "" if own else ", сотрудник другого отдела", changed_by)
         return {
@@ -2858,6 +2981,7 @@ class DialListService:
             if operator.get("department_id") != department_id and not seat_anyone:
                 raise DialListError(SEAT_ANYONE_DENIED, 403)
             self._unseat_member(user_id, changed_by)
+            self.clear_operator_mode(user_id)
             log.info("dial_list: сотрудник %s снят с линии Binotel %s (отдел %s, снял %s)", user_id,
                      member["internal_number"], department_id, changed_by)
             return {"user_id": user_id, "internal_number": ""}
@@ -2868,7 +2992,175 @@ class DialListService:
                                            changed_by=changed_by)
         except ValueError as exc:
             raise DialListError(str(exc), 400)
+        self.clear_operator_mode(user_id)
         return {"user_id": user_id, "internal_number": ""}
+
+    # ------------------------------------------------------------ режим линий (26.11.2026)
+    # Владелец 26.11.2026: «в удалённом КЦ уже есть линии — надо добавить возможность просто переключать для них
+    # режимы… не меняя сотрудника: линии общие, а что отображается в iCORE Phone, зависит от включённого режима».
+    # Отдел «Активации водителей» без своих линий (host_department_id — отдел удалённого КЦ) берёт его линии: у
+    # оператора на такой линии режим — обзвон своей линии (удалённый КЦ) или «Активация». Переключает руководитель
+    # во вкладке «Линии» — по одной линии или всем сразу. Телефон видит новый режим со следующим состоянием обзвона
+    # (профиль 'tez' у «Активации» — без перезапуска), автоцикл «Активного» — со следующим обновлением настроек.
+    MODE_ACTIVATION = "activation"
+    MODE_HOST = "host"
+    MODE_BUSY = "Идёт звонок или не поставлен итог прошлого разговора — переключите после"
+
+    def line_mode_context(self, department_id):
+        """(отдел линий, отдел «Активации») для вкладки «Линии» отдела department_id — им может быть и тот, и
+        другой; None — у отдела режима линий нет."""
+        settings = self.department_settings(department_id)
+        host = settings.get("host_department_id")
+        if host is not None and is_activation(settings):
+            return int(host), int(department_id)
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT department_id FROM dial_list_department_settings
+                WHERE host_department_id = %s AND profile = %s ORDER BY department_id LIMIT 1
+            """, (int(department_id), PROFILE_ACTIVATION))
+            row = cur.fetchone()
+        return (int(department_id), int(row[0])) if row else None
+
+    def line_modes(self, host_id, container_id):
+        """{id сотрудника: 'activation'} — кто на линиях отдела host_id сейчас работает в «Активации»."""
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT user_id FROM dial_list_operator_modes
+                WHERE department_id = %s AND host_department_id = %s
+            """, (int(container_id), int(host_id)))
+            return {int(r[0]): self.MODE_ACTIVATION for r in cur.fetchall()}
+
+    def line_modes_block(self, department_id):
+        """Блок режима для ответа вкладки «Линии»: отдел линий, отдел «Активации», чья это вкладка (hosted —
+        отдела «Активации»: линии сажают и снимают в удалённом КЦ) и режим каждого. None — режима линий нет."""
+        context = self.line_mode_context(department_id)
+        if not context:
+            return None
+        host, container = context
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT id, name FROM departments WHERE id = ANY(%s)", ([host, container],))
+            names = {int(r[0]): r[1] or "" for r in cur.fetchall()}
+        return {"host": {"id": host, "name": names.get(host, "")},
+                "container": {"id": container, "name": names.get(container, "")},
+                "hosted": int(department_id) == container,
+                "modes": {str(k): v for k, v in self.line_modes(host, container).items()}}
+
+    def clear_operator_mode(self, user_id):
+        """Снять режим оператора (посадка на линию, снятие с неё). Сбой — в журнал: режим без линии и так не
+        действует (work_operator сверяет отдел линии)."""
+        try:
+            with self.db._get_cursor() as cur:
+                cur.execute("DELETE FROM dial_list_operator_modes WHERE user_id = %s RETURNING department_id",
+                            (int(user_id),))
+                row = cur.fetchone()
+            if row:
+                log.info("dial_list: у сотрудника %s снят режим линии (обзвон отдела %s)", user_id, row[0])
+        except Exception:
+            log.exception("dial_list: режим линии сотрудника %s не снят", user_id)
+
+    def _operator_busy(self, cur, user_id):
+        """Идёт звонок или не поставлен итог разговора: такому оператору режим не переключаем — его итог
+        принадлежит обзвону прежнего режима, а справочник итогов у нового свой."""
+        return bool(self._active_attempt(cur, user_id, include_ended=True) or self._pending_outcome(cur, user_id))
+
+    # Строки оператора в базе отдела, который он покидает: выданы, звонок по ним не идёт. Как у строки без обработки
+    # (release_idle_rows): без звонков — удаляется (будто не выдавали), со звонками — закрывается без результата.
+    _OPERATOR_ROWS_SQL = """
+        SELECT a.id, a.portion_id,
+               EXISTS (SELECT 1 FROM dial_list_attempts tt WHERE tt.assignment_id = a.id) AS tried
+        FROM dial_list_assignments a
+        JOIN dial_list_leads l ON l.id = a.lead_id
+        WHERE a.operator_id = %s AND a.state = 'issued' AND l.department_id = %s
+          AND NOT EXISTS (SELECT 1 FROM dial_list_attempts t WHERE t.assignment_id = a.id AND t.state IN %s)
+        FOR UPDATE OF a SKIP LOCKED
+    """
+
+    def _release_operator_rows(self, cur, user_id, department_id):
+        """Водители, выданные оператору в обзвоне отдела department_id, — снова в общем списке (смена режима).
+        Возвращает, сколько строк вернули."""
+        cur.execute(self._OPERATOR_ROWS_SQL, (int(user_id), int(department_id), IN_FLIGHT_STATES))
+        rows = cur.fetchall()
+        if not rows:
+            return 0
+        cur.execute("""
+            DELETE FROM dial_list_assignments a
+            WHERE a.id = ANY(%s::uuid[]) AND a.state = 'issued'
+              AND NOT EXISTS (SELECT 1 FROM dial_list_attempts t WHERE t.assignment_id = a.id)
+        """, ([str(r[0]) for r in rows if not r[2]],))
+        released = cur.rowcount
+        cur.execute("""
+            UPDATE dial_list_assignments SET state = 'done', result = 'other', done_at = CURRENT_TIMESTAMP
+            WHERE id = ANY(%s::uuid[]) AND state = 'issued'
+        """, ([str(r[0]) for r in rows if r[2]],))
+        released += cur.rowcount
+        cur.execute("""
+            UPDATE dial_list_portions p SET closed_at = CURRENT_TIMESTAMP
+            WHERE p.id = ANY(%s::uuid[]) AND p.closed_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM dial_list_assignments a WHERE a.portion_id = p.id AND a.state = 'issued')
+        """, (sorted({str(r[1]) for r in rows}),))
+        return released
+
+    def set_line_modes(self, department_id, mode, user_ids=None, all_lines=False, changed_by=None):
+        """Переключить режим операторам линий (вкладка «Линии» удалённого КЦ или «Активации»): mode 'activation' —
+        работать в обзвоне «Активации», 'host' — в обзвоне своей линии. user_ids — кому; all_lines — всем, кто сидит
+        на линиях. Занятого звонком или итогом не переключаем (skipped с причиной). Выданные ему строки прежнего
+        обзвона, по которым звонок не идёт, возвращаются в общий список. Возвращает {mode, changed, skipped,
+        released_rows, line_modes}."""
+        mode = str(mode or "").strip().lower()
+        if mode == PROFILE_REMOTE_CC:
+            mode = self.MODE_HOST
+        if mode not in (self.MODE_ACTIVATION, self.MODE_HOST):
+            raise DialListError("mode: activation или host")
+        context = self.line_mode_context(department_id)
+        if not context:
+            raise DialListError("У отдела нет режима линий: подключите «Активацию водителей» на линиях удалённого КЦ",
+                                409)
+        host, container = context
+        operators = {int(u["id"]): u for u in self.department_users(host) if u.get("sip_number")}
+        if all_lines:
+            wanted = list(operators)
+        else:
+            wanted = []
+            for raw in user_ids or []:
+                try:
+                    uid = int(raw)
+                except (TypeError, ValueError):
+                    raise DialListError("user_ids: числа")
+                if uid not in operators:
+                    raise DialListError("Сотрудник не сидит на линии этого отдела", 404)
+                if uid not in wanted:
+                    wanted.append(uid)
+            if not wanted:
+                raise DialListError("Укажите, кому переключить режим")
+        current = self.line_modes(host, container)
+        to_activation = mode == self.MODE_ACTIVATION
+        changed, skipped, released = [], [], 0
+        for uid in wanted:
+            if (uid in current) == to_activation:
+                continue
+            with self.db._get_cursor() as cur:
+                self._lock_operator(cur, uid)
+                if self._operator_busy(cur, uid):
+                    skipped.append({"user_id": uid, "name": operators[uid].get("name") or "", "reason": self.MODE_BUSY})
+                    continue
+                if to_activation:
+                    cur.execute("""
+                        INSERT INTO dial_list_operator_modes (user_id, department_id, host_department_id, set_by, set_at)
+                        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id) DO UPDATE SET department_id = EXCLUDED.department_id,
+                            host_department_id = EXCLUDED.host_department_id, set_by = EXCLUDED.set_by,
+                            set_at = EXCLUDED.set_at
+                    """, (uid, container, host, changed_by))
+                else:
+                    cur.execute("DELETE FROM dial_list_operator_modes WHERE user_id = %s", (uid,))
+                released += self._release_operator_rows(cur, uid, host if to_activation else container)
+            changed.append(uid)
+        if changed or skipped:
+            log.info("dial_list: режим линий отдела %s → %s: переключено %d (%s), занятых пропущено %d, строк вернули "
+                     "в общий список %d, руководитель %s", host, mode, len(changed),
+                     ", ".join(str(u) for u in changed), len(skipped), released, changed_by)
+        return {"mode": mode, "changed": len(changed), "skipped": skipped, "released_rows": released,
+                "line_modes": self.line_modes_block(department_id)}
 
     # ------------------------------------------------------------ настройки
     def department_settings(self, department_id):
@@ -2880,7 +3172,7 @@ class DialListService:
                        caller_id_for_employee, updated_at, binotel_company, active_period,
                        profile, auto_dial, call_interval_sec, wrapup_sec, retry_schedule_min,
                        callback_own_minutes, followup_after_min, wa_license_id, wa_templates,
-                       repeat_share_pct, trips_goal
+                       repeat_share_pct, trips_goal, host_department_id
                 FROM dial_list_department_settings WHERE department_id = %s
             """, (int(department_id),))
             row = cur.fetchone()
@@ -2925,6 +3217,9 @@ class DialListService:
         settings["_repeat_share_stored"] = stored_share
         # «Активация водителей» (26.11.2026): сколько поездок — «добрал» (у других профилей не используется).
         settings["trips_goal"] = activation.clean_goal(row[18] if row and len(row) > 18 else None)
+        # Режим линий (26.11.2026): отдел без своих линий работает на линиях этого отдела; None — свои линии.
+        host = row[19] if row and len(row) > 19 else None
+        settings["host_department_id"] = int(host) if host is not None else None
         return settings
 
     def save_department_settings(self, department_id, payload, changed_by=None):
@@ -3120,13 +3415,13 @@ class DialListService:
         Режим имеет смысл только у Binotel: звонок инициирует АТС по API. У
         локальной АТС такого API нет, и телефон не должен показывать вкладку.
         Сидящий на линии другого отдела получает настройки отдела ЛИНИИ (dial_operator)."""
-        operator = self.dial_operator(user_id, operator, member=member) or {}
+        operator = self.work_operator(user_id, operator, member=member) or {}
         department_id = operator.get("department_id")
         provider = operator.get("department_provider") or "asterisk"
         if provider != "binotel" or department_id is None:
             return {"enabled": False}
         dept = self.department_settings(department_id)
-        enabled = resolve_enabled(self.user_setting(user_id), dept["enabled"] if dept["configured"] else None)
+        enabled = self._work_enabled(user_id, operator, dept)
         # Свой отдел сидящего на чужой линии: в карточке раздела он подменён отделом линии.
         own_code = self._own_department_code(user_id) if operator.get("line_member") else ""
         # Правила статусов удалённого КЦ (IDLE_OFFLINE_ENV): тем, у кого обзвон включён, и не на движке автообзвона
@@ -3162,6 +3457,15 @@ class DialListService:
             **({"goal": PROFILE_ACTIVATION} if is_activation(dept) else {}),
             "auto": bool(is_autodial(dept) and dept.get("auto_dial")),
         }
+
+    def _work_enabled(self, user_id, operator, dept):
+        """Включён ли обзвон оператору: личная настройка, иначе — как у отдела. В режиме «Активация» (режим линии)
+        — как у отдела ЛИНИИ: переключили режим тому, у кого обзвон был включён, — он и остаётся включённым; у
+        отдела «Активации» без линий свой режим отдела не включают."""
+        host = operator.get("mode_host_department_id") if operator else None
+        if host is not None:
+            dept = self.department_settings(host)
+        return resolve_enabled(self.user_setting(user_id), dept["enabled"] if dept["configured"] else None)
 
     def _own_department_code(self, user_id):
         """Код отдела, где человек числится (а не отдела линии, на которую его посадили)."""
@@ -5660,7 +5964,7 @@ class DialListService:
     def operator_context(self, user_id):
         """Кто звонит: отдел, внутренний номер, включён ли режим. DialListError, если нельзя.
         У сидящего на линии другого отдела отдел и номер — ЛИНИИ (dial_operator)."""
-        operator = self.dial_operator(user_id)
+        operator = self.work_operator(user_id)
         if not operator:
             raise DialListError("Сотрудник не найден", 404)
         if (operator.get("department_provider") or "asterisk") != "binotel":
@@ -5669,7 +5973,7 @@ class DialListService:
         if department_id is None:
             raise DialListError("У сотрудника не указан отдел", 409)
         settings = self.department_settings(department_id)
-        enabled = resolve_enabled(self.user_setting(user_id), settings["enabled"] if settings["configured"] else None)
+        enabled = self._work_enabled(user_id, operator, settings)
         if not enabled:
             raise DialListError("Обзвон из телефона для вас не включён", 403)
         internal_number = str(operator.get("sip_number") or "").strip()
@@ -5691,24 +5995,30 @@ class DialListService:
         Замок живёт до конца транзакции этого курсора."""
         cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"dial_list_operator:{int(user_id)}",))
 
-    def _open_portion(self, cur, user_id):
+    # Выдачи оператора — того отдела, в обзвоне которого он сейчас работает (department_id; None — любого, как
+    # было): режим линии (26.11.2026) переключает оператора между отделами, и выдача прежнего не должна ни держать
+    # «Ещё», ни показываться в телефоне. У выдач до отдела в строке (NULL) — показываются, как раньше.
+    _PORTION_DEPT_SQL = " AND (%s::int IS NULL OR department_id IS NULL OR department_id = %s::int)"
+
+    def _open_portion(self, cur, user_id, department_id=None):
         cur.execute("""
             SELECT id, size, issued_at FROM dial_list_portions
-            WHERE operator_id = %s AND closed_at IS NULL
+            WHERE operator_id = %s AND closed_at IS NULL""" + self._PORTION_DEPT_SQL + """
             ORDER BY issued_at DESC LIMIT 1
-        """, (int(user_id),))
+        """, (int(user_id), department_id, department_id))
         row = cur.fetchone()
         return {"id": str(row[0]), "size": int(row[1]), "issued_at": row[2], "closed_at": None} if row else None
 
-    def _last_portion(self, cur, user_id):
+    def _last_portion(self, cur, user_id, department_id=None):
         """Последняя выдача оператора, открытая или уже закрытая. Закрытую телефон
         показывает целиком с итогами, пока оператор не возьмёт следующую: иначе после
-        последней строки список исчезал, и итоги пачки никто не видел (владелец, 24.09.2026)."""
+        последней строки список исчезал, и итоги пачки никто не видел (владелец, 24.09.2026).
+        department_id — только выдачи отдела, в обзвоне которого он сейчас (_PORTION_DEPT_SQL)."""
         cur.execute("""
             SELECT id, size, issued_at, closed_at FROM dial_list_portions
-            WHERE operator_id = %s
+            WHERE operator_id = %s""" + self._PORTION_DEPT_SQL + """
             ORDER BY closed_at IS NULL DESC, issued_at DESC LIMIT 1
-        """, (int(user_id),))
+        """, (int(user_id), department_id, department_id))
         row = cur.fetchone()
         return {"id": str(row[0]), "size": int(row[1]), "issued_at": row[2], "closed_at": row[3]} if row else None
 
@@ -5992,7 +6302,7 @@ class DialListService:
             # Открытая выдача либо последняя закрытая: обработанная пачка остаётся на
             # экране с итогами, пока оператор не возьмёт следующую («Ещё»). Номер в строках — только
             # Тез: прямому звонку удалённого КЦ номер нужен лишь для набора, на экран он не идёт.
-            portion = self._last_portion(cur, user_id)
+            portion = self._last_portion(cur, user_id, ctx["department_id"])
             base = self._dial_base(settings)
             items = (self._portion_items(cur, portion["id"], today, tez=tez, with_phone=direct and tez,
                                          period=base, goal=goal)
@@ -6764,7 +7074,7 @@ class DialListService:
 
         Строки водителей прошлой базы месяца (_dial_base) «Ещё» не держат (10.11.2026): телефон
         их не показывает, и обрабатывать их оператору не нужно."""
-        portion = self._open_portion(cur, ctx["user_id"])
+        portion = self._open_portion(cur, ctx["user_id"], ctx["department_id"])
         if portion:
             base = self._dial_base(ctx.get("settings") or {})
             cur.execute("""
@@ -7145,7 +7455,7 @@ class DialListService:
         «Мой прогресс» от него не зависят — они считают сами попытки. «Вернуть в список»
         руководителя (_reopen_in_latest_portion) счётчик не трогает."""
         user_id = ctx["user_id"]
-        portion = self._last_portion(cur, user_id)
+        portion = self._last_portion(cur, user_id, ctx["department_id"])
         if not portion:
             cur.execute("""
                 INSERT INTO dial_list_portions (operator_id, department_id, size)
@@ -10252,7 +10562,7 @@ class DialListService:
                     break
             if chosen is None:
                 kind = "queue"
-                portion = self._open_portion(cur, ctx["user_id"])
+                portion = self._open_portion(cur, ctx["user_id"], ctx["department_id"])
                 rows = []
                 if portion:
                     cur.execute(self._AUTO_ROWS_SQL, (portion["id"],))
@@ -10288,7 +10598,7 @@ class DialListService:
                             **self.get_state(ctx["user_id"], phone_version=phone_version)}
                 raise
             with self.db._get_cursor() as cur:
-                portion = self._open_portion(cur, ctx["user_id"])
+                portion = self._open_portion(cur, ctx["user_id"], ctx["department_id"])
                 if portion:
                     cur.execute(self._AUTO_ROWS_SQL, (portion["id"],))
                     for r in cur.fetchall():
