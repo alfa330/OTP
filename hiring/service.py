@@ -1011,6 +1011,10 @@ class HiringService:
         self._hh_reader(ctx)
         key = self._hh_vacancy_key(hh_vacancy_id)
         statuses = {'new': ('new', 'taking'), 'taken': ('taken',), 'rejected': ('rejected',)}.get(view, ('new', 'taking'))
+        # У взятых вторая сортировка — «Новые» (владелец 26.11.2026: «фильтр назывался не свежие а новые где фильтровать
+        # надо по времени взятия в работу»): кто взят последним — сверху.
+        if view == 'taken' and order in ('fresh', 'taken'):
+            order = 'taken'
         page = max(1, _int(page) or 1)
         size = 30
         with self._cursor() as cursor:

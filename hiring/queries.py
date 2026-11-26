@@ -1398,6 +1398,8 @@ def hh_resumes_unnamed_open(cursor, limit, retry_since):
 _LIST_ORDER = {
     'score': 'r.score DESC NULLS LAST, r.found_at DESC, r.id DESC',
     'fresh': 'r.hh_updated_at DESC NULLS LAST, r.id DESC',
+    # «Взятые» → «Новые» (владелец 26.11.2026): по времени взятия в работу, свежие сверху.
+    'taken': 'r.status_at DESC NULLS LAST, r.id DESC',
 }
 
 
@@ -1442,14 +1444,16 @@ def hh_known_cards(cursor, hashes):
               FROM hiring_hh_resumes r WHERE r.resume_hash = ANY(%s) AND r.card_id IS NOT NULL
         )
         SELECT DISTINCT ON (k.resume_hash) k.resume_hash, k.how, c.id, c.candidate_no, c.full_name, c.stage, c.is_closed,
-               c.recruiter_id, u.name
+               c.recruiter_id, u.name, c.substage
           FROM known k
           JOIN hiring_cards c ON c.id = k.card_id
           LEFT JOIN users u ON u.id = c.recruiter_id
          ORDER BY k.resume_hash, c.is_closed, k.at DESC NULLS LAST
     """, (hashes, hashes))
+    # Этап и подстатус карточки — во «Взятых» карточка «Базы hh» показывает, где кандидат в воронке (владелец 26.11.2026).
     return {row[0]: {'how': row[1], 'card_id': row[2], 'candidate_no': row[3], 'full_name': row[4], 'stage': row[5],
-                     'is_closed': row[6], 'recruiter_id': row[7], 'recruiter_name': row[8]} for row in cursor.fetchall()}
+                     'is_closed': row[6], 'recruiter_id': row[7], 'recruiter_name': row[8], 'substage': row[9]}
+            for row in cursor.fetchall()}
 
 
 def hh_card_base_resumes(cursor, card_id):

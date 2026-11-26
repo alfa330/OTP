@@ -14,7 +14,7 @@ import {
     HH_NO_ICORE, hhIcoreOptions, hhIcoreValue, hhSettingsBody, hhVacancyMeta,
     hhMoney, hhPeriod, hhResumeSummary, hhSpan,
     HH_KEYWORDS_MAX, hhAddKeywords, hhBaseExperience, hhBaseLine, hhBaseNeedsHh, hhBaseSearchLine, hhBaseState, hhBaseTone,
-    hhSearchBody, HH_RESUME_PARAM, hhResumeFromSearch, hhResumeLink, hhBaseName, hhBaseSubline,
+    hhSearchBody, HH_RESUME_PARAM, hhResumeFromSearch, hhResumeLink, hhBaseName, hhBaseSubline, hhBaseFunnelState,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('hh.kz resume in the card: money, spans, periods and a one-line summary', () => {
@@ -435,6 +435,27 @@ test('hh base card caption: candidate name, not the resume title; hidden name un
     assert.deepEqual(hhBaseName({ name: null }), { text: 'Имя скрыто', hidden: true });
     assert.equal(hhBaseSubline({ name: 'Анна' }), '');
     assert.deepEqual(hhBaseName(null), { text: 'Без должности', hidden: false });
+});
+
+test('hh base taken: the funnel stage of the candidate card with its colour', () => {
+    assert.deepEqual(hhBaseFunnelState({ stage: 'in_work', candidate_no: 854 }), { tone: 'blue', text: 'В работе · №854' });
+    assert.deepEqual(hhBaseFunnelState({ stage: 'in_work', substage: 'dial', candidate_no: 854 }),
+        { tone: 'green', text: 'В работе · Дозвон · №854' });
+    assert.deepEqual(hhBaseFunnelState({ stage: 'in_work', substage: 'no_answer', candidate_no: 855 }),
+        { tone: 'amber', text: 'В работе · Недозвон / не ответил · №855' });
+    assert.deepEqual(hhBaseFunnelState({ stage: 'invited_office', substage: 'expected', candidate_no: 7 }),
+        { tone: 'blue', text: 'Приглашен в офис · Ожидается · №7' });
+    assert.deepEqual(hhBaseFunnelState({ stage: 'refused', substage: 'candidate', candidate_no: 8 }),
+        { tone: 'red', text: 'Отказ · Отказ кандидата · №8' });
+    assert.deepEqual(hhBaseFunnelState({ stage: 'hired', candidate_no: 9 }), { tone: 'green', text: 'Отработал 7 дней · №9' });
+    assert.deepEqual(hhBaseFunnelState({ stage: 'no_response', candidate_no: 10 }), { tone: 'slate', text: 'Не отвечает звонок/чат · №10' });
+    // Сервер прежний (этапа нет) или карточки не видно — как было.
+    assert.deepEqual(hhBaseFunnelState({ candidate_no: 1201 }), { tone: 'green', text: 'В воронке · №1201' });
+    assert.deepEqual(hhBaseFunnelState(null), { tone: 'green', text: 'В воронке' });
+    assert.deepEqual(hhBaseState({ status: 'taken', known: { stage: 'on_training', candidate_no: 3 } }),
+        { tone: 'blue', text: 'Вышел на обучение · №3' });
+    assert.deepEqual(hhBaseState({ status: 'taken', take_outcome: 'employee', known: { stage: 'in_work' } }),
+        { tone: 'slate', text: 'Телефон сотрудника' });
 });
 
 test('hh base search settings: keywords from the field and the request body', () => {

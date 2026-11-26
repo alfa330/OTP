@@ -3657,6 +3657,32 @@ def test_hh_base_names_on_cards(base):
     assert {row['hash']: row['name'] for row in base_rows(base)}[base_hash(1)] == 'Стендова Айгерим'
 
 
+def test_hh_base_taken_show_funnel_stage_newest_taken_first(base):
+    """«Взятые» (владелец 26.11.2026): «Новые» — по времени взятия в работу, последний взятый сверху (а не по номеру
+    строки); у карточки — этап воронки и подстатус кандидата."""
+    enable_search(base)
+    search_and_find(base, [base_found(1, access='free'), base_found(2, access='free')])
+    service = base['service']
+    ids = {row['hash']: row['id'] for row in base_rows(base)}
+    for minute, n in ((1, 2), (2, 1)):                       # сначала взяли второе резюме, потом первое
+        base['clock'].now = BASE_NOW + timedelta(minutes=minute)
+        service.hh_base_take(ctx_of(base, REC1), ids[base_hash(n)])
+        task = next(t for t in base_tasks(base)['tasks'] if t['kind'] == 'resume' and t['hash'] == base_hash(n))
+        assert task['reason'] == 'contacts'
+        base_tasks(base, [{'id': task['id'], 'ok': True, 'resume': {'title': 'Оператор'}, 'access': 'free',
+                           'contacts': {'last_name': 'Иванова', 'first_name': 'Анна', 'phones': ['7 707 123 45 6%d' % n]}}],
+                   take=False)
+    newest = service.hh_base_list(ctx_of(base, REC1), HH_OPERATOR, view='taken', order='fresh')['items']
+    assert [row['hash'] for row in newest] == [base_hash(1), base_hash(2)]
+    by_score = service.hh_base_list(ctx_of(base, REC1), HH_OPERATOR, view='taken', order='score')['items']
+    assert [row['hash'] for row in by_score] == [base_hash(2), base_hash(1)]          # баллы равны — по номеру строки
+    with base['db']._get_cursor() as cur:
+        cur.execute("UPDATE hiring_cards SET substage = 'dial' WHERE id = %s", (newest[0]['card_id'],))
+    newest = service.hh_base_list(ctx_of(base, REC1), HH_OPERATOR, view='taken', order='fresh')['items']
+    assert (newest[0]['known']['stage'], newest[0]['known']['substage']) == ('in_work', 'dial')
+    assert (newest[1]['known']['stage'], newest[1]['known']['substage']) == ('in_work', None)
+
+
 def test_hh_base_take_locks_every_row_of_the_resume(base):
     """Один кандидат найден поиском двух вакансий: второй рекрутер, нажавший «Взять» в другой вакансии, получает
     «уже берёт» — строки резюме под замком разом."""

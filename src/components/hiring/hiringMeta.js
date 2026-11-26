@@ -327,12 +327,26 @@ export const hhBaseTone = (score) => (score == null ? 'slate' : score >= 70 ? 'g
  *  уже открытые мост прочитает сам. */
 export const hhBaseNeedsHh = (item) => item?.access !== 'free' && item?.access !== 'opened';
 
+const HH_STAGE_DOTS = { red: 'red', green: 'green', gray: 'slate', amber: 'amber' };
+
+/** Этап воронки взятого кандидата (владелец 26.11.2026: «во взятых… чтобы в карточке отображались статусы воронки»):
+ *  «В работе · Дозвон · №854»; цвет точки — как у этапа и подстатуса на доске (отказ и отсев — красные, «Отработал» —
+ *  зелёный, недозвон — жёлтый), прочие этапы — синие. Карточки не видно (сервер прежний) — «В воронке · №…». */
+export const hhBaseFunnelState = (known) => {
+    const number = known?.candidate_no ? `№${known.candidate_no}` : '';
+    const stage = known?.stage ? (FUNNEL_LABELS[known.stage] || STAGE_LABELS[known.stage]) : '';
+    if (!stage) return { tone: 'green', text: ['В воронке', number].filter(Boolean).join(' · ') };
+    const sub = known.substage ? SUBSTAGE_LABELS[known.substage] : '';
+    const tone = HH_STAGE_DOTS[SUBSTAGE_TONES[known.substage]] || HH_STAGE_DOTS[STAGE_TONES[known.stage]] || 'blue';
+    return { tone, text: [stage, sub, number].filter(Boolean).join(' · ') };
+};
+
 /** Состояние кандидата словом и цветом точки — одно, самое важное. */
 export const hhBaseState = (item, meId) => {
     if (!item) return null;
     if (item.status === 'taken') {
         if (item.take_outcome === 'employee') return { tone: 'slate', text: 'Телефон сотрудника' };
-        return { tone: 'green', text: item.known?.candidate_no ? `В воронке · №${item.known.candidate_no}` : 'В воронке' };
+        return hhBaseFunnelState(item.known);
     }
     if (item.status === 'taking') {
         const mine = meId != null && Number(item.status_by) === Number(meId);

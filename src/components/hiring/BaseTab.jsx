@@ -50,6 +50,11 @@ const ORDERS = [
     { value: 'score', label: 'По баллу' },
     { value: 'fresh', label: 'Свежие' },
 ];
+// У взятых вторая сортировка — «Новые»: по времени взятия в работу (владелец 26.11.2026); сервер сам понимает её так.
+const TAKEN_ORDERS = [
+    { value: 'score', label: 'По баллу' },
+    { value: 'fresh', label: 'Новые' },
+];
 const DOTS = { green: 'bg-emerald-500', blue: 'bg-blue-500', amber: 'bg-amber-500', red: 'bg-rose-500', slate: 'bg-slate-400' };
 // «Кружок + текст» рядом и на телефоне: сетка с колонками в style (mobile-shell.css не трогает её, в отличие от flex).
 const ROW = { gridTemplateColumns: 'auto minmax(0, 1fr)' };
@@ -693,7 +698,8 @@ const BaseTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged, openI
                     <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="flex flex-wrap items-center gap-2">
                             <IosSegmented value={view} onChange={(value) => { setView(value); setPage(1); }} options={viewOptions} ariaLabel="Кандидаты" />
-                            <IosSegmented value={order} onChange={(value) => { setOrder(value); setPage(1); }} options={ORDERS} size="sm" ariaLabel="Порядок" />
+                            <IosSegmented value={order} onChange={(value) => { setOrder(value); setPage(1); }}
+                                          options={view === 'taken' ? TAKEN_ORDERS : ORDERS} size="sm" ariaLabel="Порядок" />
                         </div>
                         <div className="flex flex-wrap items-center justify-end gap-2">
                             <span className="text-[12.5px] text-slate-500">{hhBaseSearchLine(current)}</span>
