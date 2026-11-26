@@ -32,6 +32,17 @@
 Рассылки (сообщения без привязанного сотрудника: «Admin», «ЯР», «Отток группа», боты) в
 расчёт не идут вовсе: они не ответ клиенту и не начало разговора.
 
+С 26.11.2026 переписка верификаторов — в Syntony (номера аккаунта «op» Wazzup переехали туда;
+строки готовит syntony_chats/verifiers.py, правила те же). Там клиенту отвечает и ИИ, и правило
+для него — решение владельца 26.11.2026:
+  * ответ ИИ закрывает ожидание клиента и никому не засчитывается (как ответ коллеги — без
+    задержки в чьих-то цифрах);
+  * ИИ передал чат человеку (handoff) — с этой секунды клиент ждёт человека: ответ ИИ ожидание
+    уже не закрывает, первый ответ верификатора считается от передачи;
+  * диалог, который вёл только ИИ (люди не писали, человеку не передавал), — не чат
+    верификаторов: ни в итоги, ни на стену «сейчас».
+У Wazzup ни ИИ, ни передач нет — для его строк всё как было.
+
 Модуль чистый — считает по спискам словарей и проверяется без базы (tests/test_op_chat_wallboard.py).
 """
 
@@ -80,6 +91,8 @@ KIND_CLIENT = 'in'
 KIND_VERIFIER = 'ver'
 KIND_OTHER = 'other'      # сотрудник другой группы или автор без привязки к сотруднику
 KIND_SERVICE = 'service'  # рассылка, бот, отправка без автора
+KIND_AI = 'ai'            # ответ ИИ Syntony: закрывает ожидание, никому не засчитан
+KIND_HANDOFF = 'handoff'  # ИИ передал чат человеку: с этой секунды клиент ждёт человека
 
 # Шаблон WhatsApp Business от автора без привязки — рассылка («ЯР», «Отток группа»), а не ответ.
 TEMPLATE_TYPE = 'wapi_template'
@@ -97,7 +110,10 @@ def classify(rows, verifier_ids, verifiers_by_day=None):
     верификаторов не засчитывается. Иначе клиент, которому ответили, висел бы «ждущим».
 
     verifiers_by_day — {дата: множество id} для периода, где состав менялся: сотрудник,
-    перешедший в верификаторы 10-го, до 10-го считается сотрудником своей прежней группы."""
+    перешедший в верификаторы 10-го, до 10-го считается сотрудником своей прежней группы.
+
+    Строки Syntony несут ещё два признака (см. докстринг модуля): is_ai — ответ ИИ, is_handoff —
+    не сообщение, а момент передачи чата человеку."""
     verifiers = {int(v) for v in verifier_ids or ()}
     by_day = {day: {int(v) for v in ids} for day, ids in (verifiers_by_day or {}).items()}
     out = []
@@ -106,8 +122,12 @@ def classify(rows, verifier_ids, verifiers_by_day=None):
         if at is None:
             continue
         user_id = row.get('user_id')
-        if not row.get('is_echo'):
+        if row.get('is_handoff'):
+            kind, user_id = KIND_HANDOFF, None
+        elif not row.get('is_echo'):
             kind = KIND_CLIENT
+        elif row.get('is_ai'):
+            kind, user_id = KIND_AI, None
         elif row.get('is_bot'):
             continue
         elif user_id is None:
@@ -120,7 +140,8 @@ def classify(rows, verifier_ids, verifiers_by_day=None):
             kind = KIND_OTHER
         out.append({'channel_id': row.get('channel_id'), 'chat_id': row.get('chat_id'),
                     'at': at, 'kind': kind, 'message_id': str(row.get('message_id') or ''),
-                    'user_id': int(user_id) if user_id is not None else None})
+                    'user_id': int(user_id) if user_id is not None else None,
+                    'conversation_id': row.get('conversation_id')})
     return out
 
 
@@ -132,7 +153,9 @@ def split_episodes(messages, gap_seconds=EPISODE_GAP_SECONDS):
     же миллисекунду реплика клиента идёт раньше ответа (ответ не бывает раньше вопроса), дальше —
     по message_id: база отдаёт строки без сортировки.
 
-    Исключение из паузы — клиент, которому не ответил никто (см. UNANSWERED_REPLY_MAX_SECONDS)."""
+    Исключение из паузы — клиент, которому не ответил никто (см. UNANSWERED_REPLY_MAX_SECONDS). Ответ
+    ИИ — тоже ответ (владелец 26.11.2026): ночной диалог, который вёл ИИ, с утренним не склеивается;
+    после передачи человеку и без его ответа клиент снова «неотвеченный» — он ждёт человека."""
     by_chat = defaultdict(list)
     for index, message in enumerate(messages or []):
         by_chat[(message['channel_id'], message['chat_id'])].append(
@@ -146,7 +169,8 @@ def split_episodes(messages, gap_seconds=EPISODE_GAP_SECONDS):
         current = None
         for at, _order, _message_id, _index, message in items:
             if current is None or (at - current['end'] >= gap and not (
-                    current['last_human'] is None and current['pending'] is not None
+                    current['last_human'] is None and not current['ai_answered']
+                    and current['pending'] is not None
                     and at - current['pending'] <= unanswered_max)):
                 current = _new_episode(key, at)
                 episodes.append(current)
@@ -158,17 +182,43 @@ def _new_episode(key, at):
     return {'channel_id': key[0], 'chat_id': key[1], 'start': at, 'end': at,
             'pending': None, 'first_done': False, 'first_by': None,
             'incoming': 0, 'has_verifier': False, 'has_other': False,
-            'last_human': None, 'people': {}}
+            'has_ai': False, 'handed_off': False, 'awaiting_human': False, 'ai_answered': False,
+            'conversation_id': None, 'last_human': None, 'people': {}}
 
 
 def _feed_episode(episode, message):
     at = message['at']
     episode['end'] = at
-    if message['kind'] == KIND_CLIENT:
+    kind = message['kind']
+    conversation = message.get('conversation_id')
+    if conversation is not None and conversation != episode['conversation_id']:
+        # Новый диалог Syntony того же водителя (прошлый закрыли): передача человеку жила в прошлом,
+        # этот ИИ ведёт заново — его ответы снова закрывают ожидание.
+        if episode['conversation_id'] is not None:
+            episode['awaiting_human'] = False
+        episode['conversation_id'] = conversation
+    if kind == KIND_CLIENT:
         episode['incoming'] += 1
         if episode['pending'] is None:
             episode['pending'] = at
         return
+    if kind == KIND_HANDOFF:
+        # Передача человеку: ждать человека клиент начинает отсюда, даже если его реплика
+        # висела и раньше — до передачи её вёл ИИ (решение владельца 26.11.2026).
+        episode['handed_off'] = True
+        episode['awaiting_human'] = True
+        episode['ai_answered'] = False
+        episode['pending'] = at
+        return
+    if kind == KIND_AI:
+        episode['has_ai'] = True
+        # Ответ ИИ клиенту — ответ: ожидание закрыто, задержки ни у кого нет. Но после передачи
+        # человеку «передаю оператору» ИИ пишет в ту же секунду, и ответом это быть не может.
+        if not episode['awaiting_human']:
+            episode['pending'] = None
+            episode['ai_answered'] = True
+        return
+    episode['awaiting_human'] = False
     user_id = message['user_id']
     if message['kind'] == KIND_VERIFIER:
         episode['has_verifier'] = True
@@ -190,11 +240,25 @@ def _feed_episode(episode, message):
     episode['pending'] = None
 
 
+def ai_only(episode):
+    """Диалог вёл только ИИ: людей не было, а человеку чат он не передавал — или передал, но клиент
+    в этом диалоге не писал (одна отметка передачи без реплик — не разговор)."""
+    if episode['has_verifier'] or episode['has_other']:
+        return False
+    if not episode.get('has_ai') and not episode.get('handed_off'):
+        return False
+    return not episode.get('handed_off') or not episode['incoming']
+
+
 def belongs_to_verifiers(episode):
     """Диалог верификаторов: писал верификатор или не писал никто из других групп.
 
     Неотвеченный клиент — в очереди аккаунта верификаторов, поэтому их; диалог, который вёл
-    только сотрудник другой группы, — не их, и в итоги направления не идёт."""
+    только сотрудник другой группы, — не их, и в итоги направления не идёт. Диалог, который
+    целиком провёл ИИ Syntony, — тоже не их (владелец 26.11.2026); переданный человеку и
+    оставшийся без ответа — их: клиент ждёт человека в их очереди."""
+    if ai_only(episode):
+        return False
     return episode['has_verifier'] or not episode['has_other']
 
 
@@ -372,7 +436,8 @@ def now_block(episodes, now, *, in_work_seconds=IN_WORK_SECONDS, gap_seconds=EPI
     не нужен», которой в сообщениях нет (владелец 19.10.2026: «Ждёт дольше всех» смотрит на неё).
     None у чата — ждать нечего; время — клиент написал снова после нажатия, ждёт с этой реплики.
     Чата нет в словаре (Global, не WhatsApp — их счётчик не ведёт) — правило сообщений, как было.
-    Ожидания, которого нет по сообщениям, счётчик не добавляет."""
+    Ожидания, которого нет по сообщениям, счётчик не добавляет. У Syntony кнопки нет — её место
+    занимает закрытие диалога (syntony_chats/verifiers.waiting_since), форма словаря та же."""
     in_work_by_person = defaultdict(int)
     chats_in_work = 0
     waiting = 0
@@ -381,6 +446,9 @@ def now_block(episodes, now, *, in_work_seconds=IN_WORK_SECONDS, gap_seconds=EPI
     for episode in episodes:
         silence = (now - episode['end']).total_seconds()
         if silence >= gap_seconds:
+            continue
+        # Чат, который ведёт ИИ Syntony, — не работа верификаторов и не их очередь (26.11.2026).
+        if ai_only(episode):
             continue
         last = episode['last_human']
         if last is not None and last[0] != KIND_VERIFIER:
@@ -437,7 +505,8 @@ def assemble(rows, now, *, verifier_ids, names, last_message_at=None,
              in_work_seconds=IN_WORK_SECONDS, gap_seconds=EPISODE_GAP_SECONDS,
              waiting_max_seconds=WAITING_MAX_SECONDS,
              first_target_seconds=FIRST_TARGET_SECONDS, inner_target_seconds=INNER_TARGET_SECONDS,
-             live_statuses=None, status_entry=None, status_events=None, waiting_since=None):
+             live_statuses=None, status_entry=None, status_events=None, waiting_since=None,
+             entry_gap_hours=snapshot_mod.SESSION_GAP_HOURS):
     """Снимок табло на момент `now` (наивное время Алматы).
 
     rows — сообщения с полуночи минус `gap_seconds` до `now`: диалог, начатый вчера вечером,
@@ -470,7 +539,7 @@ def assemble(rows, now, *, verifier_ids, names, last_message_at=None,
         row = {**person, 'id': user_id, 'in_work': in_work.get(user_id, 0), 'in_roster': True}
         row.update(snapshot_mod.status_fields(status_entry(live.get('status_key')), live))
         operators.append(row)
-    snapshot_mod.attach_entry_times(operators, status_events, day, status_entry)
+    snapshot_mod.attach_entry_times(operators, status_events, day, status_entry, entry_gap_hours)
     # Как у «Линии»: по разряду статуса (работа → пауза → вне смены), внутри — по алфавиту. Строки
     # на стене не прыгают от каждого сообщения, а глаз ищет человека по месту.
     operators.sort(key=lambda item: (item['status_weight'], item['name']))

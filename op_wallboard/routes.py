@@ -4,7 +4,8 @@
     GET /api/op_wallboard/snapshot       снимок дня: итоги, часы, люди, разрезы по группам
     GET /api/op_wallboard/journal        журнал статусов одного сотрудника за сутки (?operator_id=,
                                          верификатор со стены «Чата» — &direction=chat)
-    GET /api/op_wallboard/chat_snapshot  направление «Чат»: чаты верификаторов в Wazzup (#367)
+    GET /api/op_wallboard/chat_snapshot  направление «Чат»: чаты верификаторов (#367) — с 26.11.2026
+                                         в Syntony (syntony_chats/verifiers.py), раньше — Wazzup
     GET /api/op_wallboard/chat_export    то же за период файлом .xlsx (?date_from=&date_to=)
     GET /api/op_wallboard/live           SSE «сейчас» в реальном времени (коннектор АТС, 22.10.2026)
 
@@ -42,6 +43,7 @@ from zoneinfo import ZoneInfo
 from flask import Blueprint, Response, jsonify, request, send_file
 
 from cdr import directory as directory_mod, leads as cdr_leads_mod, queries, touches as touches_mod
+from syntony_chats import verifiers as verifiers_mod
 from test_numbers import keys as test_keys
 from . import (chat as chat_mod, chat_export as chat_export_mod, lead_speed as lead_speed_mod,
                snapshot as snapshot_mod)
@@ -308,6 +310,22 @@ def load_chat_last_message_at(cursor, account=CHAT_ACCOUNT):
     return row[0] if row else None
 
 
+def load_syntony_window(cursor, since, until, channels, is_test_sql=None):
+    """Переписка номеров верификаторов в Syntony за [since, until) — см. verifiers.load_window."""
+    return verifiers_mod.load_window(cursor, since=since, until=until, channels=channels,
+                                     is_test_sql=is_test_sql)
+
+
+def load_syntony_replies(cursor, since, until):
+    """Ответы сотрудников по всей сети Syntony — онлайн по ответам (verifiers.load_replies)."""
+    return verifiers_mod.load_replies(cursor, since=since, until=until)
+
+
+def load_syntony_state(cursor):
+    """Отметки сторожа Syntony и самое раннее сообщение — свежесть данных (verifiers.load_state)."""
+    return verifiers_mod.load_state(cursor)
+
+
 def load_chat_verifiers(cursor, day_from, day_to=None):
     """{user_id: ФИО} — верификаторы: состоят в группе модели op_verificator.
 
@@ -396,10 +414,16 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
                                  ar_max_percent=snapshot_mod.DEFAULT_AR_MAX_PERCENT,
                                  chat_ttl_seconds=10, chat_messages_ttl_seconds=30, chat_stale_max_seconds=600,
                                  chat_settings=None, chat_export_max_days=chat_export_mod.MAX_DAYS,
+                                 chat_syntony=None,
                                  lead_ttl_seconds=60, listen_connect=None, live_stream_limit=10,
                                  live_hub=None, live_loader=None):
     """`live_loader()` → (идущие звонки станции, на связи ли коннектор) для сборки снимка;
-    по умолчанию — из таблиц раздела «АТС» (pbx/). Подменяется в тестах."""
+    по умолчанию — из таблиц раздела «АТС» (pbx/). Подменяется в тестах.
+
+    `chat_syntony` — чаты верификаторов по Syntony (26.11.2026): {'matcher': ФИО {id: имя} →
+    resolve(имя автора Syntony) → id | None, 'is_test_sql': условие «номер тестовый»,
+    'covers': сутки → считать ли по Syntony (по умолчанию verifiers.covers), 'channels': () →
+    каналы верификаторов}. Без matcher — Wazzup, как до переезда."""
     bp = Blueprint('op_wallboard', __name__, url_prefix='/api/op_wallboard')
     cache = {'ts': 0.0, 'payload': None}
     lock = threading.Lock()
@@ -880,17 +904,21 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             'segments': segments,
         })
 
-    # ── Направление «Чат»: чаты верификаторов в Wazzup (задача #367) ─────────────────────────
+    # ── Направление «Чат»: чаты верификаторов (задача #367) ──────────────────────────────────
     # Свой кэш и свой замок: снимок линии и снимок чатов считаются из разных таблиц и с разной
     # частотой, и один не должен ждать другой. В БД снимок чатов не сохраняется — источник и так
     # наша база, после рестарта первый же запрос посчитает его заново за секунды.
+    # С 26.11.2026 переписка верификаторов — в Syntony (номера аккаунта «op» Wazzup переехали
+    # туда): сутки с дня перехода считаются по ней, теми же правилами (см. _chat_fetch_syntony).
     chat_cache = {'ts': 0.0, 'payload': None}
     chat_lock = threading.Lock()
     chat_label = 'Табло ОП · чат'
     # Снимок считается запросом к НАШЕЙ базе: замер снимка — это её сбой, а не Wazzup (о молчании
     # Wazzup говорит отдельный признак stream.silent). Имя источника уходит в «… не отвечает».
+    # Снимок Syntony называет источник сам (source_label) — его замер и есть «Syntony не отвечает».
     chat_source = 'база iCORE'
     settings = dict(chat_settings or {})
+    syntony = dict(chat_syntony or {})
 
     # Переписка суток (тысячи строк) — раз в chat_messages_ttl_seconds, как было до статусов; снимок
     # же обновляется раз в chat_ttl_seconds ради статусов смены (точечные запросы по составу). Так
@@ -908,9 +936,86 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         chat_messages_cache.update(ts=time.time(), day=day, value=value)
         return value
 
+    # ── Syntony (26.11.2026) ──
+    # Та же переписка суток раз в chat_messages_ttl_seconds, что у Wazzup; статусы — по ответам
+    # (решение владельца), поэтому отдельных точечных запросов на каждом снимке нет.
+    syntony_cache = {'ts': 0.0, 'day': None, 'value': None}
+
+    def _syntony_covers(day):
+        """Сутки — по Syntony? Без сопоставления авторов (matcher) — никогда."""
+        if not syntony.get('matcher'):
+            return False
+        try:
+            return bool((syntony.get('covers') or verifiers_mod.covers)(day))
+        except Exception:  # noqa: BLE001
+            log.exception('%s: не понять, считать ли по Syntony — считаю по Wazzup', chat_label)
+            return False
+
+    def _syntony_channels():
+        return (syntony.get('channels') or verifiers_mod.channel_ids)()
+
+    def _syntony_data(cursor, now, day, since):
+        if (syntony_cache['value'] is not None and syntony_cache['day'] == day
+                and time.time() - syntony_cache['ts'] < chat_messages_ttl_seconds):
+            return syntony_cache['value']
+        until = now + timedelta(minutes=1)
+        # Ответы — с вечера прошлых суток, как события смены у «Линии»: вход ночной смены ложится
+        # на её начало, а «Нет ответов» — это 16 часов без ответа.
+        replies_since = (datetime.combine(day, datetime.min.time())
+                         - timedelta(hours=snapshot_mod.ENTRY_LOOKBACK_HOURS, minutes=1))
+        value = (load_chat_verifiers(cursor, day),
+                 load_syntony_window(cursor, since, until, _syntony_channels(),
+                                     syntony.get('is_test_sql')),
+                 load_syntony_replies(cursor, min(replies_since, since), until),
+                 load_syntony_state(cursor))
+        syntony_cache.update(ts=time.time(), day=day, value=value)
+        return value
+
+    def _chat_fetch_syntony(now, day):
+        """Снимок «Чата» по Syntony: правила табло верификаторов (chat.py), ИИ и передача человеку
+        — по решению владельца 26.11.2026, онлайн — ответ клиенту за 15 минут на любом номере."""
+        gap = settings.get('gap_seconds', chat_mod.EPISODE_GAP_SECONDS)
+        since = datetime.combine(day, datetime.min.time()) - timedelta(seconds=gap)
+        with db._get_cursor() as cursor:
+            names, window, replies, state = _syntony_data(cursor, now, day, since)
+        newest_reply = max((moment for _author, moment in replies), default=None)
+        newest = max((moment for moment in (window.newest, newest_reply) if moment is not None),
+                     default=None)
+        # Сторож встал, вебхук молчит или сутки неполные — табло падает словами (как у СЗоВ), и
+        # стена показывает прошлый снимок с «Syntony не отвечает», а не замершие цифры как живые.
+        verifiers_mod.check_fresh(state, newest, now)
+        resolve = syntony['matcher'](names)
+        rows = verifiers_mod.build_rows(window, resolve, since=since, until=now + timedelta(minutes=1))
+        waiting_max = settings.get('waiting_max_seconds', chat_mod.WAITING_MAX_SECONDS)
+        waiting_since = verifiers_mod.waiting_since(
+            window, rows, chat_mod.waiting_candidates(rows, now, waiting_max))
+        live, events = verifiers_mod.presence(replies, resolve, names, now)
+        payload = chat_mod.assemble(rows, now, verifier_ids=names, names=names,
+                                    last_message_at=window.newest, live_statuses=live,
+                                    status_entry=verifiers_mod.status_entry, status_events=events,
+                                    waiting_since=waiting_since,
+                                    entry_gap_hours=verifiers_mod.ENTRY_GAP_HOURS, **settings)
+        payload.update(
+            source=verifiers_mod.SOURCE,
+            source_label=verifiers_mod.SOURCE_LABEL,
+            # Статусы — по ответам: экран подписывает их так, а журнала смен у них нет.
+            statuses_source='replies',
+            presence_minutes=round(verifiers_mod.PRESENCE_WINDOW_SECONDS / 60),
+            journal=False,
+        )
+        payload['diagnostics'].update(
+            channels=len(_syntony_channels()),
+            # Писали клиентам на этих номерах, но не верификаторы (или имя не сопоставилось с
+            # карточкой) — по списку видно расхождение имён в Syntony и в iCORE.
+            other_authors=verifiers_mod.other_authors(window, resolve, day),
+        )
+        return payload
+
     def _chat_fetch():
         now = datetime.now(_ALMATY).replace(tzinfo=None)
         day = now.date()
+        if _syntony_covers(day):
+            return _chat_fetch_syntony(now, day)
         gap = settings.get('gap_seconds', chat_mod.EPISODE_GAP_SECONDS)
         since = datetime.combine(day, datetime.min.time()) - timedelta(seconds=gap)
         with db._get_cursor() as cursor:
@@ -945,20 +1050,52 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             ttl=chat_ttl_seconds, stale_max=chat_stale_max_seconds,
             retry_after=retry_after_seconds, lock_wait=lock_wait_seconds, label=chat_label)
 
-    def _chat_blocks(days, now):
-        """Показатели нескольких суток из базы — выгрузке и полуночной отбивке.
-
-        Сообщения читаются с запасом паузы в обе стороны: диалог, начатый накануне вечером, знает
+    def _period_bounds(days, now):
+        """Сообщения читаются с запасом паузы в обе стороны: диалог, начатый накануне вечером, знает
         своё начало, а ответ в 00:03 на диалог из 23:50 последних суток попадает в эти сутки."""
         gap = settings.get('gap_seconds', chat_mod.EPISODE_GAP_SECONDS)
         since = datetime.combine(days[0], datetime.min.time()) - timedelta(seconds=gap)
         until = min(datetime.combine(days[-1] + timedelta(days=1), datetime.min.time())
                     + timedelta(seconds=gap), now + timedelta(minutes=1))
+        return gap, since, until
+
+    def _wazzup_blocks(days, now):
+        gap, since, until = _period_bounds(days, now)
         with db._get_cursor() as cursor:
             names, by_day = load_chat_verifier_days(cursor, days[0], days[-1])
             rows = load_chat_messages(cursor, since, until)
         return chat_mod.period_days(rows, days, verifier_ids=names, names=names,
                                     gap_seconds=gap, verifiers_by_day=by_day)
+
+    def _syntony_blocks(days, now):
+        """Сутки по Syntony. Нет данных за какие-то из них (сторож начал позже, старше 30 дней
+        почищено) — ошибка словами, а не нули: нули читались бы как пустая смена."""
+        gap, since, until = _period_bounds(days, now)
+        with db._get_cursor() as cursor:
+            names, by_day = load_chat_verifier_days(cursor, days[0], days[-1])
+            window = load_syntony_window(cursor, since, until, _syntony_channels(),
+                                         syntony.get('is_test_sql'))
+            state = load_syntony_state(cursor)
+        for day in days:
+            error = verifiers_mod.coverage_error(state, day)
+            if error:
+                raise RuntimeError(error)
+        rows = verifiers_mod.build_rows(window, syntony['matcher'](names), since=since, until=until)
+        return chat_mod.period_days(rows, days, verifier_ids=names, names=names,
+                                    gap_seconds=gap, verifiers_by_day=by_day)
+
+    def _chat_blocks(days, now):
+        """Показатели нескольких суток из базы — выгрузке и полуночной отбивке. Сутки с дня
+        перехода — по Syntony, раньше — по Wazzup: там переписка верификаторов тех дней."""
+        syntony_days = [day for day in days if _syntony_covers(day)]
+        taken = set(syntony_days)
+        wazzup_days = [day for day in days if day not in taken]
+        blocks = {}
+        if wazzup_days:
+            blocks.update(zip(wazzup_days, _wazzup_blocks(wazzup_days, now)))
+        if syntony_days:
+            blocks.update(zip(syntony_days, _syntony_blocks(syntony_days, now)))
+        return [blocks[day] for day in days]
 
     def _chat_day(day):
         """Итог одних (закончившихся) суток — отбивке в полночь, про вчера целиком."""

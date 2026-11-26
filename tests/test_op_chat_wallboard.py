@@ -714,7 +714,8 @@ class BroadcastTests(unittest.TestCase):
             '_env_int', 'OP_CHAT_BROADCAST_MIN_CHATS', '_szov_wallboard_int', '_szov_plural',
             '_szov_format_seconds_mmss', '_szov_format_age_ru', '_szov_broadcast_stale_note',
             '_op_chat_broadcast_duration', '_op_chat_broadcast_stream_note',
-            '_op_chat_broadcast_deviations', '_op_chat_broadcast_notes',
+            '_op_chat_broadcast_stale_source', '_op_chat_broadcast_deviations',
+            '_op_chat_broadcast_notes',
         }, {'os': os, 'logging': __import__('logging')})
 
     def data(self, chats=20, first=50, inner=200, silent=False, waiting=0):
@@ -962,7 +963,7 @@ class FrontendTests(unittest.TestCase):
         # Тот же чип с временем в статусе, время входа и журнал по строке, что у «Линии».
         for piece in ('const chip = opStatusChip(row);', 'opEntryTime(row.entry_at, snapshot?.day)',
                       'formatSeconds(row.status_seconds)',
-                      "row.id != null && row.status_key !== 'unknown' && Boolean(onOpenJournal)"):
+                      "&& row.id != null && row.status_key !== 'unknown' && Boolean(onOpenJournal)"):
             self.assertIn(piece, self.board, piece)
         for header in ('Сотрудник', 'Статус', 'Время входа', 'В работе', 'Чатов за сутки',
                        'Первый ответ, мин', 'Внутри чата, мин'):

@@ -105,3 +105,25 @@ test('пустые состояния говорят словами', () => {
     assert.match(idle, /Сегодня никто из верификаторов не начинал смену\./);
     assert.match(idle, /не начинавших смену/);
 });
+
+test('Syntony: статус по ответам — без журнала, свёрнуты «не отвечавшие»', () => {
+    // Снимок Syntony (26.11.2026): статус по ответам клиенту за 15 минут, журнала смен у него нет.
+    const html = renderTable({
+        snapshot: { day: '2026-11-26', statuses_source: 'replies', journal: false, now: { operators: [
+            person({ id: 1, user_id: 1, name: 'Иванова Айгерим', status_key: 'free', status_label: 'Онлайн',
+                status_weight: 20, status_seconds: 540, entry_at: '2026-11-26T09:00:00', in_work: 1, chats: 4 }),
+            person({ id: 2, user_id: 2, name: 'Петров Данияр', status_key: 'offline', status_label: 'Не в системе',
+                status_weight: 70, status_seconds: 6300, entry_at: '2026-11-26T08:10:00', chats: 6 }),
+            person({ id: 3, user_id: 3, name: 'Сидорова Дана', status_label: 'Нет ответов' }),
+        ] } },
+        firstTarget: 60, innerTarget: 240, onOpenJournal: () => {},
+    });
+    assert.deepEqual(cells(html, 'Иванова Айгерим').slice(0, 3), ['Иванова Айгерим', 'Онлайн9:00', '09:00']);
+    assert.deepEqual(cells(html, 'Петров Данияр').slice(1, 2), ['Не в системе1:45:00']);
+    assert.ok(!html.includes('title="Журнал статусов"'));            // ФИО не нажимается
+    assert.ok(!html.includes('fa-chevron-right'));
+    assert.match(html, /Показать не отвечавших<span class="tabular-nums text-slate-400">1<\/span>/);
+    const nobody = renderTable({ snapshot: { day: '2026-11-26', statuses_source: 'replies', journal: false,
+        now: { operators: [person({})] } }, firstTarget: 60, innerTarget: 240 });
+    assert.match(nobody, /Никто из верификаторов не отвечал клиентам\./);
+});

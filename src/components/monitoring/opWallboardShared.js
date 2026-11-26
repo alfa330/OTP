@@ -438,11 +438,12 @@ export const DEFAULT_OP_WIDGET_METRICS = [
     'op_ar',
 ];
 
-// ── Направление «Чат»: чаты верификаторов в Wazzup (задача #367) ──────────────────────────────
+// ── Направление «Чат»: чаты верификаторов (задача #367; с 26.11.2026 — Syntony) ────────────────
 /*
- * Второй экран раздела, как «Чат» у табло СЗоВ. Переписка приходит вебхуком в нашу базу. Статусы
- * людей — кнопка смены в «Чатах ОП» (у Wazzup их нет): с 19.10.2026 они на стене поимённо и в
- * реальном времени, как у «Линии» (владелец), поэтому и опрос тот же — снимок сервер держит 10 с.
+ * Второй экран раздела, как «Чат» у табло СЗоВ. Переписка приходит в нашу базу (Syntony — вебхуком и
+ * сторожем API, раньше Wazzup — вебхуком). Статусы людей у Syntony — по ответам (онлайн — ответил
+ * клиенту за 15 минут), у Wazzup были кнопкой смены в «Чатах ОП»; опрос тот же, что у «Линии» —
+ * снимок сервер держит 10 с.
  * «Сейчас» в плитках — это чаты: в работе (последнее сообщение не старше окна) и ждущие ответа.
  */
 export const OP_CHAT_POLL_INTERVAL_MS = 10000;
@@ -457,7 +458,7 @@ export const useOpChatWallboardSnapshot = createSnapshotFeed({
 // Переключатель в шапке раздела: подписи те же, что у табло СЗоВ («Линия / Чат», запрос владельца).
 export const OP_WALLBOARD_VIEWS = [
     { key: 'line', label: 'Линия', hint: 'Звонки отдела продаж: FreePBX и iCORE Phone' },
-    { key: 'chat', label: 'Чат', hint: 'Чаты верификаторов: Wazzup' },
+    { key: 'chat', label: 'Чат', hint: 'Чаты верификаторов: Syntony' },
 ];
 
 /*
@@ -525,17 +526,19 @@ export const DEFAULT_OP_CHAT_WIDGET_METRICS = [
 ];
 
 /*
- * Поток вебхука Wazzup замолчал — цифры на стене замерли, хотя снимок «свежий». Порог сервер
- * выбирает по часу (ночью тишина — норма) и присылает готовый признак `stream.silent`.
+ * Переписка перестала приходить — цифры на стене замерли, хотя снимок «свежий». Порог сервер
+ * выбирает по часу (ночью тишина — норма) и присылает готовый признак `stream.silent`; источник
+ * снимок называет сам (Syntony), у старого снимка Wazzup подписи нет.
  */
 export const opChatFreshnessNotice = (snapshot) => {
     const stream = snapshot?.stream;
     if (!stream?.silent) return null;
-    if (isBlank(stream.silent_seconds)) return 'Wazzup ещё не присылал сообщений';
-    return `Wazzup молчит ${formatDuration(stream.silent_seconds)} — цифры могут отставать`;
+    const source = snapshot?.source_label || 'Wazzup';
+    if (isBlank(stream.silent_seconds)) return `${source}: сообщений ещё нет`;
+    return `${source} молчит ${formatDuration(stream.silent_seconds)} — цифры могут отставать`;
 };
 
-/** «данные на 19:09:55» — по последнему сообщению Wazzup, а не по моменту снимка. */
+/** «данные на 19:09:55» — по последнему сообщению переписки, а не по моменту снимка. */
 export const opChatClockLabel = (snapshot) => {
     const at = snapshot?.source_now || snapshot?.captured_at;
     return at ? `данные на ${formatClock(at)}` : null;
@@ -565,9 +568,9 @@ export const OP_WALLBOARD_DIRECTIONS = {
     op_chat: {
         key: 'op_chat',
         label: 'ОП · Чат',
-        hint: 'Чаты верификаторов: Wazzup',
+        hint: 'Чаты верификаторов: Syntony',
         title: 'Табло ОП · чаты',
-        source: 'Wazzup',
+        source: 'Syntony',
         clockField: 'source_now',
         icon: 'fa-comments',
         useSnapshot: useOpChatWallboardSnapshot,
@@ -578,7 +581,7 @@ export const OP_WALLBOARD_DIRECTIONS = {
         readMetric: readOpMetric,
         clockLabel: (snapshot) => {
             const clock = opChatClockLabel(snapshot);
-            return clock ? `Wazzup, ${clock}` : null;
+            return clock ? `${snapshot?.source_label || 'Wazzup'}, ${clock}` : null;
         },
         freshnessNotice: opChatFreshnessNotice,
     },

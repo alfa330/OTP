@@ -170,8 +170,15 @@ def _load(db, ctx, start, end):
 
 
 def _check_fresh(state, messages, now):
+    """Свежесть данных по сообщениям окна — см. check_fresh."""
+    check_fresh(state, max((m.created_at for m in messages if m.created_at is not None),
+                           default=None), now)
+
+
+def check_fresh(state, newest, now):
     """Падает, если показывать нечего или данные замерли. Без сторожа API (только вебхук)
-    судить не по чему — не падаем.
+    судить не по чему — не падаем. newest — последнее сообщение окна (с поясом) или None.
+    Общая с табло верификаторов ОП (verifiers.py): одни и те же данные — одни и те же слова.
 
     * Сторож ещё ни разу не прошёл ленту — данных за сутки нет.
     * Сторож давно не отмечал удачный прогон, а вебхук за то же время ничего не завёл —
@@ -186,7 +193,6 @@ def _check_fresh(state, messages, now):
     if feed is None or conversations is None:
         raise RuntimeError('Syntony: первая загрузка чатов ещё не прошла')
     mark, written_at = feed
-    newest = max((m.created_at for m in messages if m.created_at is not None), default=None)
     webhook_alive = newest is not None and (now - newest).total_seconds() <= STALE_SECONDS
     # Лента сообщений и снимки диалогов — два шага одного прогона: встал любой — данные
     # неполные (сообщения без снимка диалога не знают своего номера и выпадают из чатов).
@@ -219,6 +225,11 @@ def _operators_day(per_person):
     """Разрез по сотрудникам за сутки — суммами, для итогов выгрузки: чат, где человек отвечал
     в разные часы, в сутках один, а в часах — в каждом."""
     return [dict(sums, name=name) for name, sums in sorted(per_person.items())]
+
+
+def coverage_gap(state, start):
+    """Публичное имя _coverage_gap — для табло верификаторов ОП (verifiers.py)."""
+    return _coverage_gap(state, start)
 
 
 def _coverage_gap(state, start):

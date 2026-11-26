@@ -31283,8 +31283,8 @@ SZOV_BROADCAST_DIRECTION_OP = 'op'
 # предупреждения о перерывах вне графика (возврат #292 18.09.2026), и сообщение уходит,
 # только когда такие перерывы есть. Получатели, ручки настройки и таблица — общие.
 SZOV_BROADCAST_DIRECTION_TEZ = 'tez'
-# «Табло ОП · Чат» — пятое (задача #367): чаты верификаторов в Wazzup. Хозяин тот же, что у
-# «Табло ОП», — глава отдела продаж.
+# «Табло ОП · Чат» — пятое (задача #367): чаты верификаторов (с 26.11.2026 — Syntony, раньше
+# Wazzup). Хозяин тот же, что у «Табло ОП», — глава отдела продаж.
 SZOV_BROADCAST_DIRECTION_OP_CHAT = 'op_chat'
 # Кому отбивка «Табло ОП · Чат» открыта поимённо и ТОЛЬКО лично себе, без групп-получателей:
 # СВ верификаторов, постановщик #367 (решение владельца 25.09.2026). По общему правилу СВ форму
@@ -37217,10 +37217,10 @@ async def op_broadcast_job():
 
 
 # === Отбивка «Табло ОП · Чат» (задача #367) =====================================================
-# Пятое направление той же отбивки: чаты верификаторов в Wazzup. Как у «Чата» СЗоВ — одна
-# картинка плиток и строки отклонений, почасовой таблицы нет. Цифры — из того же снимка, что на
-# стене (op_wallboard: bp.chat_snapshot), своих запросов отбивка не делает, поэтому предпросмотр
-# и тестовая отправка бесплатны.
+# Пятое направление той же отбивки: чаты верификаторов (с 26.11.2026 — Syntony, раньше Wazzup).
+# Как у «Чата» СЗоВ — одна картинка плиток и строки отклонений, почасовой таблицы нет. Цифры — из
+# того же снимка, что на стене (op_wallboard: bp.chat_snapshot), своих запросов отбивка не делает,
+# поэтому предпросмотр и тестовая отправка бесплатны.
 OP_CHAT_BROADCAST_SEND_TIMES = (os.getenv('OP_CHAT_BROADCAST_SEND_TIMES') or OP_BROADCAST_SEND_TIMES).strip()
 # Сколько чатов должно накопиться за сутки, чтобы средним временем ответа можно было будить
 # людей: в 01:00 оно стоит на двух-трёх диалогах. Норму не меняет — плитка на табло краснеет
@@ -37258,6 +37258,8 @@ def _op_chat_broadcast_collect(scheduled=False, now=None):
         'now': snapshot.get('now') or {},
         'today': today,
         'stream': snapshot.get('stream') or {},
+        # Откуда переписка: с 26.11.2026 Syntony, при откате — Wazzup (у его снимка подписи нет).
+        'source_label': snapshot.get('source_label') or 'Wazzup',
         'first_target_seconds': _szov_wallboard_int(snapshot.get('first_target_seconds')),
         'inner_target_seconds': _szov_wallboard_int(snapshot.get('inner_target_seconds')),
         'waiting_max_minutes': _szov_wallboard_int(snapshot.get('waiting_max_minutes')),
@@ -37272,15 +37274,23 @@ def _op_chat_broadcast_duration(seconds):
 
 
 def _op_chat_broadcast_stream_note(data):
-    """Wazzup перестал присылать сообщения — цифры на стене замерли. None — поток жив."""
+    """Переписка перестала приходить (Syntony, при откате — Wazzup) — цифры на стене замерли.
+    None — поток жив."""
     stream = data.get('stream') or {}
     if not stream.get('silent'):
         return None
+    source = data.get('source_label') or 'Wazzup'
     silent = stream.get('silent_seconds')
     if silent is None:
-        return "Wazzup не присылал сообщений — цифры на табло могут быть неполными."
-    return (f"Также Wazzup не присылает сообщения уже {_szov_format_age_ru(silent)} — "
+        return f"{source} пока не присылает сообщений — цифры на табло могут быть неполными."
+    return (f"Также {source} не присылает сообщения уже {_szov_format_age_ru(silent)} — "
             f"цифры на табло замерли.")
+
+
+def _op_chat_broadcast_stale_source(data):
+    """Кто молчит, когда снимок замер: снимок Syntony замирает, когда молчит Syntony; снимок
+    Wazzup — только при сбое нашей базы (переписка уже лежит в ней)."""
+    return 'Syntony' if data.get('source_label') == 'Syntony' else 'базы iCORE'
 
 
 def _op_chat_broadcast_deviations(data):
@@ -37289,7 +37299,8 @@ def _op_chat_broadcast_deviations(data):
     Норма ровно та, что красит плитки на табло: первый ответ и ответ внутри чата против норм
     владельца (минута и четыре). Второго порога нет — иначе одна цифра была бы отклонением в
     Telegram и нормой на экране. Поправка одна — выборка (OP_CHAT_BROADCAST_MIN_CHATS).
-    Замерший поток Wazzup и замерший снимок — тоже отклонения: знать о них надо."""
+    Замерший поток переписки (Syntony, при откате Wazzup) и замерший снимок — тоже отклонения:
+    знать о них надо."""
     notes = []
     today = data.get('today') or {}
     chats = _szov_wallboard_int(today.get('chats'))
@@ -37304,7 +37315,8 @@ def _op_chat_broadcast_deviations(data):
                     f"{_szov_format_seconds_mmss(value)} на {chats} "
                     f"{_szov_plural(chats, 'чате', 'чатах', 'чатах')} "
                     f"{'за ' + data['period_label'] if data.get('period_label') else 'за сутки'}.")
-    for note in (_op_chat_broadcast_stream_note(data), _szov_broadcast_stale_note(data, 'базы iCORE')):
+    stale = _szov_broadcast_stale_note(data, _op_chat_broadcast_stale_source(data))
+    for note in (_op_chat_broadcast_stream_note(data), stale):
         if note:
             notes.append(note)
     return notes
@@ -37315,8 +37327,8 @@ def _op_chat_broadcast_notes(data):
 
     Дежурные строки отклонениями НЕ считаются — иначе чат «только при отклонениях» получал бы
     письмо каждый раз. Замершие данные — последними, после дежурных строк."""
-    tail = [note for note in (_op_chat_broadcast_stream_note(data),
-                              _szov_broadcast_stale_note(data, 'базы iCORE')) if note]
+    stale = _szov_broadcast_stale_note(data, _op_chat_broadcast_stale_source(data))
+    tail = [note for note in (_op_chat_broadcast_stream_note(data), stale) if note]
     notes = [note for note in _op_chat_broadcast_deviations(data) if note not in tail]
     now = data.get('now') or {}
     today = data.get('today') or {}
@@ -56892,6 +56904,42 @@ try:
 except Exception:
     logging.exception("Oktell с VM шлюза: Blueprint НЕ подключён")
 
+
+def _op_chat_test_is_test_sql(expr):
+    """Условие «номер из Реестра тестовых номеров» — переписка с тестовых номеров табло не идёт."""
+    from test_numbers import keys as test_keys
+    return test_keys.sql_is_test(expr)
+
+
+def _op_chat_syntony_matcher(names):
+    """{id: ФИО} верификаторов → resolve(имя автора Syntony) → id или None.
+
+    Правило то же, что у чатников СЗоВ (_szov_chat_wallboard_resolve): казахские буквы, «и/ы»,
+    отчество и порядок «Имя Фамилия» сводятся, совпадение — только единственное; искать — только
+    среди верификаторов (сотрудник другой группы — «не верификатор», а не чужой ответ под их
+    именем). Сверх того — мягкий знак внутри слова: «Дильбар» в Syntony и «Дилбар» в карточке —
+    один человек (так у одного из верификаторов, 26.11.2026)."""
+    lookup, soft = {}, {}
+
+    def _soft(text):
+        return re.sub(r'[ьъЬЪ]', '', str(text or ''))
+
+    for user_id, name in (names or {}).items():
+        info = {'id': int(user_id), 'name': name or ''}
+        for key in _status_import_operator_name_variants(name):
+            lookup.setdefault(key, []).append(info)
+            soft.setdefault(_soft(key), []).append(info)
+
+    def resolve(author):
+        if not author or not lookup:
+            return None
+        matches = _status_import_resolve_operator_matches(author, lookup)
+        if not matches:
+            matches = _status_import_resolve_operator_matches(_soft(author), soft)
+        return int(matches[0]['id']) if len(matches) == 1 else None
+    return resolve
+
+
 # --- Табло ОП: отдел продаж на FreePBX -----------------------------------------------------
 # Аналог табло СЗоВ по «Линии», но портал к станции не ходит: цифры дня — из касаний,
 # которые мост досылает живым хвостом (cdr_bridge/live.py), люди и статусы — из событий
@@ -56935,10 +56983,12 @@ try:
         sl_seconds=_env_int('OP_WALLBOARD_SL_SECONDS', 20, minimum=5, maximum=120),
         ar_min_percent=_env_int('OP_WALLBOARD_AR_MIN_PERCENT', 3, minimum=0, maximum=50),
         ar_max_percent=_env_int('OP_WALLBOARD_AR_MAX_PERCENT', 5, minimum=0, maximum=50),
-        # Направление «Чат» (#367): чаты верификаторов в Wazzup. Нормы — владельца 25.09.2026.
-        # Снимок раз в 10 с, как у линии: на стене статусы смены в реальном времени (19.10.2026).
+        # Направление «Чат» (#367): чаты верификаторов — с 26.11.2026 в Syntony (verifiers.py; откат —
+        # OP_CHAT_SOURCE=wazzup), раньше в Wazzup. Нормы — владельца 25.09.2026. Снимок раз в 10 с,
+        # как у линии.
         chat_ttl_seconds=_env_int('OP_CHAT_WALLBOARD_CACHE_TTL_SECONDS', 10, minimum=5, maximum=600),
         chat_export_max_days=_env_int('OP_CHAT_EXPORT_MAX_DAYS', 31, minimum=1, maximum=45),
+        chat_syntony={'matcher': _op_chat_syntony_matcher, 'is_test_sql': _op_chat_test_is_test_sql},
         chat_settings={
             'first_target_seconds': _env_int('OP_CHAT_WALLBOARD_FIRST_TARGET_SECONDS', 60,
                                              minimum=10, maximum=3600),

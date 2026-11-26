@@ -977,12 +977,13 @@ def _stamp(value):
     return value.strftime('%Y-%m-%dT%H:%M:%S') if value else None
 
 
-def attach_entry_times(rows, phone_events, day, status_entry):
-    """`entry_at` строке списка. Нет событий телефона в эти сутки — None, на экране прочерк."""
+def attach_entry_times(rows, phone_events, day, status_entry, gap_hours=SESSION_GAP_HOURS):
+    """`entry_at` строке списка. Нет событий телефона в эти сутки — None, на экране прочерк.
+    gap_hours — пауза, после которой начинается новая смена (у статусов по ответам она длиннее)."""
     by_operator = events_by_operator(phone_events)
     for row in rows:
         events = by_operator.get(row.get('id')) if row.get('id') is not None else None
-        row['entry_at'] = _stamp(entry_moment(events, day, status_entry)) if events else None
+        row['entry_at'] = _stamp(entry_moment(events, day, status_entry, gap_hours)) if events else None
 
 
 def status_journal(events, day, now, status_entry, gap_hours=SESSION_GAP_HOURS):

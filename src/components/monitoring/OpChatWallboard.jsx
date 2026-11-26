@@ -20,11 +20,12 @@ import { opEntryTime } from './opWallboardGroups';
 import { OP_CHAT_METRIC_MAP, formatCount, formatSeconds, opMetricHint, opStatusChip, readOpMetric } from './opWallboardShared';
 
 /*
- * «Табло ОП» · «Чат» — чаты верификаторов в Wazzup (задача #367). Сверху — как у «Чата» табло
- * СЗоВ: плитки «сейчас» про чаты, итоги дня, график по часам. Снизу — люди, как «Сотрудники» у
- * «Линии» (владелец 19.10.2026): статус смены в реальном времени, время входа, журнал по нажатию
- * и счётчики дня одной таблицей. Статус ставит сам верификатор кнопкой смены в «Чатах ОП» — у
- * Wazzup статусов нет.
+ * «Табло ОП» · «Чат» — чаты верификаторов (задача #367): с 26.11.2026 в Syntony, раньше в Wazzup.
+ * Сверху — как у «Чата» табло СЗоВ: плитки «сейчас» про чаты, итоги дня, график по часам. Снизу —
+ * люди, как «Сотрудники» у «Линии» (владелец 19.10.2026): статус, время входа и счётчики дня
+ * одной таблицей. У Syntony статус — по ответам (решение владельца 26.11.2026): «Онлайн» —
+ * ответил клиенту за последние 15 минут, журнала смен у такого статуса нет. У Wazzup статус
+ * ставил сам верификатор кнопкой смены в «Чатах ОП», и по нажатию на ФИО открывался журнал.
  *
  * Цвет — только у времени ответа и только относительно нормы из снимка (первый ответ — минута,
  * внутри чата — четыре, решение владельца) и у статусов людей (те же цвета, что у «Линии»).
@@ -53,6 +54,9 @@ const NowTile = ({ metricKey, snapshot, scale }) => {
  */
 const isIdleVerifier = (row) => row.status_key === 'unknown' && !row.chats && !row.in_work;
 
+/* Статусы по ответам (Syntony): «не начинал смену» там значит «не отвечал» — так и подписано. */
+const repliesStatuses = (snapshot) => snapshot?.statuses_source === 'replies';
+
 /*
  * Поимённый список — та же таблица, что «Сотрудники» у «Линии»: статус смены с временем в нём,
  * время входа, строка с журналом нажимается целиком, порядок — по разряду статуса (его ставит
@@ -66,6 +70,8 @@ export const VerifiersTable = ({ snapshot, firstTarget, innerTarget, scale = 1, 
     if (!rows.length) {
         return <div className="text-[13px] text-slate-500">В группе верификаторов нет сотрудников.</div>;
     }
+    const byReplies = repliesStatuses(snapshot);
+    const idleLabel = byReplies ? 'не отвечавших' : 'не начинавших смену';
     const idle = rows.filter(isIdleVerifier);
     const working = rows.filter((row) => !isIdleVerifier(row));
     const shown = showIdle ? [...working, ...idle] : working;
@@ -87,14 +93,16 @@ export const VerifiersTable = ({ snapshot, firstTarget, innerTarget, scale = 1, 
             className="mt-2 inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 active:scale-[0.98]"
         >
             <FaIcon className={`fas ${showIdle ? 'fa-chevron-up' : 'fa-chevron-down'} text-[10px]`} aria-hidden="true" />
-            {showIdle ? 'Скрыть' : 'Показать'} не начинавших смену
+            {showIdle ? 'Скрыть' : 'Показать'} {idleLabel}
             <span className="tabular-nums text-slate-400">{idle.length}</span>
         </button>
     ) : null;
     if (!shown.length) {
         return (
             <div>
-                <div className="text-[13px] text-slate-500">Сегодня никто из верификаторов не начинал смену.</div>
+                <div className="text-[13px] text-slate-500">
+                    {byReplies ? 'Никто из верификаторов не отвечал клиентам.' : 'Сегодня никто из верификаторов не начинал смену.'}
+                </div>
                 {toggle}
             </div>
         );
@@ -119,7 +127,8 @@ export const VerifiersTable = ({ snapshot, firstTarget, innerTarget, scale = 1, 
                         {shown.map((row) => {
                             const chip = opStatusChip(row);
                             const entry = opEntryTime(row.entry_at, snapshot?.day);
-                            const canOpen = row.id != null && row.status_key !== 'unknown' && Boolean(onOpenJournal);
+                            const canOpen = snapshot?.journal !== false
+                                && row.id != null && row.status_key !== 'unknown' && Boolean(onOpenJournal);
                             const selected = canOpen && row.id === selectedId;
                             return (
                                 <tr
@@ -369,7 +378,13 @@ export default function OpChatWallboardBody({ snapshot, scale = 1, selectedId = 
             </Section>
 
             <Section icon="fa-users" title="Верификаторы"
-                     right={<span className="text-[12px] text-slate-500">статусы — смена в «Чатах ОП», счётчики — переписка за день</span>}>
+                     right={(
+                         <span className="text-[12px] text-slate-500">
+                             {repliesStatuses(snapshot)
+                                 ? `онлайн — ответил клиенту за ${snapshot?.presence_minutes ?? 15} мин, счётчики — переписка за день`
+                                 : 'статусы — смена в «Чатах ОП», счётчики — переписка за день'}
+                         </span>
+                     )}>
                 <VerifiersTable snapshot={snapshot} firstTarget={firstTarget} innerTarget={innerTarget}
                                 scale={scale} selectedId={selectedId} onOpenJournal={onOpenJournal} />
             </Section>
