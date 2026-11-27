@@ -139,20 +139,23 @@ const OUTCOMES = { outcomes: { total: 60, agreements: 30, refusals: 24, items: [
         subtypes: [{ id: null, name: ' ', count: 5 }] },
 ] } };
 
-test('итоги звонков: все итоги настроек по порядку и с нулём; типы отказа — не здесь, а в причинах', () => {
+test('итоги звонков: все итоги настроек и с нулём, по убыванию; типы отказа — не здесь, а в причинах', () => {
     const rows = outcomeRows(OUTCOMES);
+    // По убыванию (владелец 27.11: «нужно сделать список по убыванию»); при равенстве — порядок настроек:
+    // у «Перезвона» и «Недоступен» по нулю — «Перезвон» в настройках раньше.
     assert.deepEqual(rows.map((r) => [r.name, r.count, r.inactive]), [
-        ['Согласен', 30, false], ['Перезвон', 0, false], ['Отказ', 24, false], ['Недоступен', 0, false],
-        ['Уже работает', 1, true], ['Подумает', 5, false]]);
+        ['Согласен', 30, false], ['Отказ', 24, false], ['Подумает', 5, false], ['Уже работает', 1, true],
+        ['Перезвон', 0, false], ['Недоступен', 0, false]]);
+    const row = (name) => rows.find((r) => r.name === name);
     // Цвет — из настроек; негодный — серый.
-    assert.equal(rows[3].color, OUTCOME_COLOR_DEFAULT);
-    assert.equal(rows[0].color, '#34C759');
+    assert.equal(row('Недоступен').color, OUTCOME_COLOR_DEFAULT);
+    assert.equal(row('Согласен').color, '#34C759');
     // Типы: у отказа — пусто (отдельный отчёт рядом), нулевые — не строки, без имени — «Без типа».
-    assert.deepEqual(rows[2].subtypes, []);
-    assert.deepEqual(rows[1].subtypes, []);
-    assert.deepEqual(rows[4].subtypes, [{ key: 's2', name: 'В другом парке', count: 1 }]);
+    assert.deepEqual(row('Отказ').subtypes, []);
+    assert.deepEqual(row('Перезвон').subtypes, []);
+    assert.deepEqual(row('Уже работает').subtypes, [{ key: 's2', name: 'В другом парке', count: 1 }]);
     // Итог без типов: одна запись «без типа» на всё число — не строка, иначе «Подумает 5 → Без типа 5» (стенд 27.11).
-    assert.deepEqual(rows[5].subtypes, []);
+    assert.deepEqual(row('Подумает').subtypes, []);
     // Типы выбирали не всегда — остаток «Без типа» строкой, чтобы типы сходились с итогом.
     const mixed = outcomeRows({ outcomes: { items: [{ outcome_id: 'm', name: 'Перезвон', kind: '', count: 3,
         subtypes: [{ id: 't1', name: 'Занят', count: 2 }, { id: null, name: '', count: 1 }] }] } });
