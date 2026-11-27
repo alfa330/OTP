@@ -66,6 +66,12 @@ class TicketMetaTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertIsNone(helpdesk.parse_ticket_meta(raw))
 
+    def test_deep_nesting_does_not_escape(self):
+        # «[[[[…» глубже предела разбора — RecursionError (наследник RuntimeError, не
+        # ValueError): поле подделанное, но задача уже поставлена — ответ 500 значил бы дубль.
+        self.assertIsNone(helpdesk.parse_ticket_meta('[' * 100000))
+        self.assertIsNone(helpdesk.parse_ticket_meta('{"fields": ' + '[' * 5000 + ']' * 5000 + '}'))
+
 
 class _JournalDb:
     def __init__(self, fail=False):
@@ -126,6 +132,11 @@ class RecordTaskTicketTests(unittest.TestCase):
         with self.assertLogs(level=logging.WARNING):
             self.assertIsNone(self._record(_JournalDb(fail=True), 'ITH-1'))
 
+    def test_deep_json_meta_does_not_raise(self):
+        db = _JournalDb()
+        self.assertIsNone(self._record(db, 'ITH-1', meta='[' * 100000))
+        self.assertEqual(db.calls, [])
+
     def test_helpdesk_code_is_one_constant(self):
         self.assertTrue(task_projects.is_helpdesk_code(' ith '))
         self.assertFalse(task_projects.is_helpdesk_code('IT'))
@@ -163,10 +174,12 @@ class TaskRouteWiringTests(unittest.TestCase):
                         and any(isinstance(t, ast.Name) and t.id == 'response_payload' for t in node.targets))
         self.assertLess(record.lineno, response.lineno)
         keywords = {kw.arg: ast.unparse(kw.value) for kw in record.keywords}
+        self.assertEqual(keywords['raw_meta'], 'it_ticket_raw')
         self.assertEqual(keywords['created'], 'created')
         self.assertEqual(keywords['subject'], 'subject')
         self.assertEqual(keywords['description'], 'description')
         self.assertEqual(keywords['requester_id'], 'requester_id')
+        self.assertEqual(keywords['requester_name'], 'requester[2] if requester else None')
 
     def test_only_when_the_form_carries_it_ticket(self):
         record = self._call('it_ticket_helpdesk.record_task_ticket')
@@ -175,13 +188,29 @@ class TaskRouteWiringTests(unittest.TestCase):
         self.assertEqual(ast.unparse(guard.test), 'it_ticket_raw')
         self.assertIn("it_ticket_raw = request.form.get('it_ticket')", self.source)
 
+    def test_journal_cannot_change_the_answer(self):
+        # Любой сбой журнала — после поставленной задачи — глушится тут же: общий
+        # except ручки ответил бы 500, и человек отправил бы заявку второй раз.
+        record = self._call('it_ticket_helpdesk.record_task_ticket')
+        # Ближайший try вокруг вызова, а не общий try всей ручки (его except — это и есть 500).
+        guard = max((node for node in ast.walk(self.handler)
+                     if isinstance(node, ast.Try) and record in ast.walk(node)), key=lambda node: node.lineno)
+        self.assertGreater(guard.lineno, self._call('db.create_task').lineno)
+        self.assertTrue(any(
+            handler.type is not None and ast.unparse(handler.type) == 'Exception'
+            for handler in guard.handlers))
+        self.assertIn(record, list(ast.walk(ast.Module(body=guard.body, type_ignores=[]))))
+
 
 def _authorize(db, role, *, head=None):
-    """Настоящий _it_ticket_authorize из build_it_tickets_blueprint с заглушками."""
+    """Настоящий _it_ticket_authorize из build_it_tickets_blueprint с заглушками.
+
+    Возвращает (функцию, g): по g видно, прошёл ли человек только по доске."""
     _builder, node = _nested_function(IT_ROUTES, 'build_it_tickets_blueprint', '_it_ticket_authorize')
     node = copy.deepcopy(node)
+    g = types.SimpleNamespace(user_id=7)
     namespace = {
-        'g': types.SimpleNamespace(user_id=7),
+        'g': g,
         'request': types.SimpleNamespace(headers={}),
         'jsonify': lambda payload: payload,
         'db': db,
@@ -193,7 +222,7 @@ def _authorize(db, role, *, head=None):
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(IT_ROUTES), 'exec'), namespace)
     db.role = role
-    return namespace['_it_ticket_authorize']
+    return namespace['_it_ticket_authorize'], g
 
 
 class _AuthDb:
@@ -214,31 +243,76 @@ class _AuthDb:
 
 
 class AuthorizeTests(unittest.TestCase):
+    """Люди доски ITH без роли СВ/админа пускаются только туда, где это нужно форме
+    заявки (темы на чтение и ИИ); настройки, каналы и журнал — по роли, как раньше."""
+
     def test_supervisor_passes_without_board_lookup(self):
         db = _AuthDb()
-        requester_id, _requester, role, error = _authorize(db, 'sv')()
+        authorize, g = _authorize(db, 'sv')
+        requester_id, _requester, role, error = authorize(allow_board_members=True)
         self.assertIsNone(error)
         self.assertEqual((requester_id, role), (7, 'sv'))
         self.assertEqual(db.member_checks, 0, 'роль решает сама — лишнего запроса нет')
+        self.assertFalse(g.it_ticket_board_only)
 
-    def test_helpdesk_board_member_uses_ticket_ai(self):
-        _id, _requester, _role, error = _authorize(_AuthDb(member=True), 'operator')()
-        self.assertIsNone(error)
+    def test_helpdesk_board_member_uses_the_form(self):
+        authorize, g = _authorize(_AuthDb(member=True), 'operator')
+        self.assertIsNone(authorize(allow_board_members=True)[3])
+        self.assertTrue(g.it_ticket_board_only, 'прошёл только по доске — настройки ему не считаются')
+
+    def test_board_member_refused_where_the_form_does_not_need_it(self):
+        db = _AuthDb(member=True)
+        authorize, g = _authorize(db, 'operator')
+        self.assertEqual(authorize()[3][1], 403)
+        self.assertEqual(db.member_checks, 0)
+        self.assertFalse(g.it_ticket_board_only)
 
     def test_stranger_is_refused(self):
-        error = _authorize(_AuthDb(member=False), 'operator')()[3]
-        self.assertEqual(error[1], 403)
+        authorize, _g = _authorize(_AuthDb(member=False), 'operator')
+        self.assertEqual(authorize(allow_board_members=True)[3][1], 403)
 
     def test_failed_lookup_refuses_instead_of_500(self):
+        authorize, g = _authorize(_AuthDb(fail=True), 'operator')
         with self.assertLogs(level=logging.WARNING):
-            error = _authorize(_AuthDb(fail=True), 'operator')()[3]
+            error = authorize(allow_board_members=True)[3]
         self.assertEqual(error[1], 403)
+        self.assertFalse(g.it_ticket_board_only)
 
     def test_board_membership_does_not_open_admin_settings(self):
         db = _AuthDb(member=True)
-        error = _authorize(db, 'operator')(require_admin=True)[3]
-        self.assertEqual(error[1], 403)
+        authorize, _g = _authorize(db, 'operator')
+        self.assertEqual(authorize(require_admin=True)[3][1], 403)
         self.assertEqual(db.member_checks, 0)
+
+    def test_board_only_pass_gets_no_settings_profiles(self):
+        # У не-главы права на темы иначе брались бы от его собственного отдела
+        # (_department_scope_id_for_requester): оператор ОП на доске правил бы темы ОП.
+        _builder, node = _nested_function(IT_ROUTES, 'build_it_tickets_blueprint', '_it_ticket_settings_profiles')
+        g = types.SimpleNamespace(it_ticket_board_only=True)
+        namespace = {'g': g, '_it_ticket_pinnable_profiles': lambda requester_id, role: ['op']}
+        exec(compile(ast.Module(body=[copy.deepcopy(node)], type_ignores=[]), str(IT_ROUTES), 'exec'), namespace)
+        self.assertEqual(namespace['_it_ticket_settings_profiles'](7, 'operator'), [])
+        g.it_ticket_board_only = False
+        self.assertEqual(namespace['_it_ticket_settings_profiles'](7, 'sv'), ['op'])
+
+    def test_only_form_routes_admit_board_members(self):
+        builder, _node = _nested_function(IT_ROUTES, 'build_it_tickets_blueprint', '_it_ticket_authorize')
+        admitting = set()
+        # Ручки — функции прямо в теле строителя (под @bp.route).
+        for function in builder.body:
+            if not isinstance(function, ast.FunctionDef):
+                continue
+            for call in ast.walk(function):
+                if (isinstance(call, ast.Call) and ast.unparse(call.func) == '_it_ticket_authorize'
+                        and any(kw.arg == 'allow_board_members' and ast.unparse(kw.value) == 'True'
+                                for kw in call.keywords)):
+                    admitting.add(function.name)
+        self.assertEqual(admitting, {'it_ticket_catalog', 'it_ticket_ai_assist'})
+        catalog = next(node for node in ast.walk(builder)
+                       if isinstance(node, ast.FunctionDef) and node.name == 'it_ticket_catalog')
+        source = ast.unparse(catalog)
+        self.assertIn("'pinnable_profiles': _it_ticket_settings_profiles(requester_id, role)", source)
+        self.assertIn("'catalog_editable_profiles': _it_ticket_settings_profiles(requester_id, role)", source)
 
 
 class FrontWiringTests(unittest.TestCase):
@@ -254,10 +328,43 @@ class FrontWiringTests(unittest.TestCase):
         view = (ROOT / 'src' / 'components' / 'tasks' / 'TasksView.jsx').read_text(encoding='utf-8')
         submit = view[view.index('const submitTicket = async () => {'):view.index('/* ── Create ── */')]
         self.assertIn("axios.post(`${apiBaseUrl}/api/tasks`", submit)
-        self.assertIn("body.append('it_ticket', JSON.stringify(ticketLogPayload(ticket)))", submit)
-        self.assertIn('ticketTaskDescription(ticket)', submit)
+        # Тело собирает fillTicketTaskBody (её вывод сверяет helpdesk_ticket_render.test.mjs).
+        self.assertIn('fillTicketTaskBody(body, form, selectedFiles);', submit)
+        body = view[view.index('const fillTicketTaskBody = (body, form, files = []) => {'):]
+        body = body[:body.index('\n};\n')]
+        self.assertIn("body.append('it_ticket', JSON.stringify(ticketLogPayload(ticket)));", body)
+        self.assertIn('description: ticketTaskDescription(ticket),', body)
         # Скрытые поля формы задачи заявка не несёт — форма для неё собирается с нуля.
-        self.assertIn('appendTaskFormData(body, buildEmptyTaskForm({', submit)
+        self.assertIn('appendTaskFormData(body, buildEmptyTaskForm({', body)
+
+    def test_ticket_waits_for_the_ai_and_checks_files_first(self):
+        view = (ROOT / 'src' / 'components' / 'tasks' / 'TasksView.jsx').read_text(encoding='utf-8')
+        submit = view[view.index('const submitTicket = async () => {'):view.index('/* ── Create ── */')]
+        # Отправка во время ответа ИИ увела бы заявку без него, а ответ — в следующую заявку.
+        self.assertIn('if (helpdeskAiBusy) return;', submit)
+        self.assertIn('disabled={isCreateLoading || isRecipientsLoading || (createIsHelpdesk && helpdeskAiBusy)}', view)
+        self.assertIn('onBusyChange: setHelpdeskAiBusy,', view)
+        self.assertIn('onBusyChange={helpdesk.onBusyChange}', view)
+        # Пределы файлов — до загрузки и по-русски.
+        self.assertIn('const refusal = taskUploadRefusal(filesFromList(selectedFiles));', submit)
+        self.assertLess(submit.index('taskUploadRefusal'), submit.index('axios.post'))
+
+    def test_issues_and_seed_are_wired(self):
+        view = (ROOT / 'src' / 'components' / 'tasks' / 'TasksView.jsx').read_text(encoding='utf-8')
+        # Пустые обязательные поля заявки краснеют и листаются стрелками подвала.
+        self.assertIn('const createBaseIssues = useMemo(() => (createIsHelpdesk ? ticketIssues(form.ticket) : [', view)
+        # Написанное до выбора доски становится описанием проблемы.
+        self.assertIn('const seed = seedTicketDescription(values);', view)
+        self.assertIn('if (seed) onTicketChange({ description: seed });', view)
+        # Смена доски в окне «Новая задача» — через assigneeBaseForBoardChange («Все» не уезжает с ITH).
+        self.assertIn('const boardBase = helpdesk ? assigneeBaseForBoardChange(values, selectedProject, nextProject) : values;', view)
+        self.assertIn('assigneesAfterProjectChange(boardBase, nextProject, {', view)
+
+    def test_late_ai_answer_does_not_reach_a_closed_form(self):
+        form = (ROOT / 'src' / 'components' / 'tasks' / 'HelpdeskTicketForm.jsx').read_text(encoding='utf-8')
+        run_ai = form[form.index('const runAi = useCallback(async (mode) => {'):form.index('/* ─── Капсулы')]
+        self.assertIn('useEffect(() => () => { aliveRef.current = false; }, []);', form)
+        self.assertLess(run_ai.index('if (!aliveRef.current) return;'), run_ai.index('onChange(patch);'))
 
     def test_only_the_new_task_window_turns_into_a_ticket(self):
         view = (ROOT / 'src' / 'components' / 'tasks' / 'TasksView.jsx').read_text(encoding='utf-8')

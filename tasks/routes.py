@@ -2020,18 +2020,22 @@ def build_tasks_blueprint(
 
             # Заявка в IT (владелец 27.11.2026): задача с доски IT Helpdesk из формы
             # заявки — ещё и строкой журнала it_tickets (тема, отдел, срочность ИИ,
-            # поля). Сбой журнала задачу не трогает: она уже поставлена.
+            # поля). Сбой журнала задачу не трогает: она уже поставлена и разослана,
+            # и ответ 500 здесь значил бы повторную отправку — дубль заявки.
             it_ticket_raw = request.form.get('it_ticket')
             if it_ticket_raw:
-                it_ticket_helpdesk.record_task_ticket(
-                    db,
-                    raw_meta=it_ticket_raw,
-                    created=created,
-                    subject=subject,
-                    description=description,
-                    requester_id=requester_id,
-                    requester_name=requester[2] if requester else None,
-                )
+                try:
+                    it_ticket_helpdesk.record_task_ticket(
+                        db,
+                        raw_meta=it_ticket_raw,
+                        created=created,
+                        subject=subject,
+                        description=description,
+                        requester_id=requester_id,
+                        requester_name=requester[2] if requester else None,
+                    )
+                except Exception:
+                    logging.warning("IT ticket journal skipped for task %s", created.get("id"), exc_info=True)
 
             response_payload = {
                 "status": "success",

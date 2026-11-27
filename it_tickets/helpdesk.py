@@ -40,7 +40,9 @@ def parse_ticket_meta(raw):
         return None
     try:
         data = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
+        # RecursionError — «[[[[…» глубже предела разбора: наследник RuntimeError,
+        # а не ValueError, и без него подделанное поле роняло бы ответ 500.
         return None
     if not isinstance(data, dict):
         return None
@@ -80,10 +82,10 @@ def record_task_ticket(db, *, raw_meta, created, subject, description, requester
     """
     if not is_helpdesk_task(created):
         return None
-    meta = parse_ticket_meta(raw_meta)
-    if meta is None:
-        return None
     try:
+        meta = parse_ticket_meta(raw_meta)
+        if meta is None:
+            return None
         return db.record_it_ticket(
             profile=meta['profile'],
             category=meta['category'],

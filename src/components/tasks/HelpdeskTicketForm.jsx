@@ -17,7 +17,10 @@ import {
   helpdeskProfileLabel,
   isTicketTextFresh,
   ticketAiRequest,
+  ticketDescriptionAddendum,
   ticketExtraLines,
+  ticketNeedsCompose,
+  ticketProfileChange,
   ticketSignature,
   toggleTicketCheck,
 } from './helpdeskTicket';
@@ -166,6 +169,8 @@ const HelpdeskTicketForm = ({
   issueFor = () => '',
   onOpenSettings,
   settingsVersion = 0,
+  // Окну — «ИИ занят»: пока он разбирает или собирает, заявку не отправить.
+  onBusyChange,
 }) => {
   const [meta, setMeta] = useState({ loading: true, catalog: null, defaultProfile: '', editable: [] });
   const [aiMode, setAiMode] = useState(null);
@@ -178,6 +183,17 @@ const HelpdeskTicketForm = ({
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
   const toast = useCallback((message, type) => notifyRef.current?.(message, type), []);
+  /* Ответ ИИ приходит через секунды. Окно за это время могли закрыть (форма снята)
+     — тогда ответ никуда не кладём: в следующую заявку он принёс бы чужой
+     заголовок, тему и текст. */
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
+  const busyRef = useRef(onBusyChange);
+  busyRef.current = onBusyChange;
+  useEffect(() => {
+    busyRef.current?.(aiMode !== null);
+  }, [aiMode]);
+  useEffect(() => () => busyRef.current?.(false), []);
 
   /* Каталог тем, отдел по умолчанию и право настраивать — с сервера, при каждом
      открытии формы и после сохранения настроек. */
@@ -226,6 +242,7 @@ const HelpdeskTicketForm = ({
         ticketAiRequest(base, mode, cabinets),
         { headers: buildHeaders() }
       );
+      if (!aliveRef.current) return;
       if (res?.data?.status !== 'success') {
         toast(aiErrorText(res?.data?.error), 'error');
         return;
@@ -235,9 +252,9 @@ const HelpdeskTicketForm = ({
       setAskedMissing(status === 'need_more_info');
       if (status === 'ready') setEditingText(false);
     } catch (error) {
-      toast(aiErrorText(error?.response?.data?.error), 'error');
+      if (aliveRef.current) toast(aiErrorText(error?.response?.data?.error), 'error');
     } finally {
-      setAiMode(null);
+      if (aliveRef.current) setAiMode(null);
     }
   }, [apiBaseUrl, buildHeaders, cabinets, meta.catalog, onChange, toast]);
 
@@ -280,9 +297,10 @@ const HelpdeskTicketForm = ({
   /* Скриншот из буфера (Ctrl+V в описании) — сразу во вложения. Текст из буфера
      вставляется как обычно: глушим вставку, только если в буфере одни файлы. */
   const handlePaste = (event) => {
+    // Текст (и вставка ячеек Excel с картинкой выделения) вставляется как текст.
     const pasted = clipboardFiles(event.clipboardData);
     if (!pasted.length || typeof onAddFiles !== 'function') return;
-    if (!event.clipboardData?.getData?.('text/plain')) event.preventDefault();
+    event.preventDefault();
     onAddFiles(pasted);
     setOpenIds((prev) => new Set(prev).add('files'));
   };
@@ -302,6 +320,10 @@ const HelpdeskTicketForm = ({
 
   const fresh = isTicketTextFresh(ticket);
   const extraLines = ticketExtraLines(ticket);
+  const addendum = ticketDescriptionAddendum(ticket);
+  const changeProfile = (profile) => {
+    if (profile !== ticket.profile) onChange(ticketProfileChange(profile));
+  };
   const plainText = useMemo(() => stripTelegramTags(ticket.text || ''), [ticket.text]);
   const describeIssue = issueFor('ticket-description');
   const fieldIssue = (field) => issueFor(`ticket-field-${field.key}`)
@@ -337,8 +359,19 @@ const HelpdeskTicketForm = ({
           </button>
           <InfoHint
             side="left"
-            text="ИИ подберёт тему и срочность, спросит недостающее (например, номер рабочего места) и соберёт короткий текст заявки. Можно и без него — заявка уйдёт с вашим описанием. Скриншот вставляется сюда же: Ctrl+V."
+            text="ИИ подберёт тему и срочность, спросит недостающее (например, номер рабочего места) и соберёт короткий текст заявки. Можно и без него — заявка уйдёт с вашим описанием. Скриншот вставляется сюда же: Ctrl+V. Справа — отдел заявки: от него зависят темы, схема кабинетов и подсказки ИИ; сначала стоит ваш."
           />
+          {/* Отдел — на виду с первого взгляда, как «Профиль» в «Тех причинах»: не
+              тот отдел — ИИ разбирал бы по чужому каталогу и показал чужую схему. */}
+          <div className="tv-hd-describe-profile">
+            <Segmented
+              value={ticket.profile}
+              options={HELPDESK_PROFILES.map((profile) => ({ value: profile, label: helpdeskProfileLabel(profile) }))}
+              ariaLabel="Отдел заявки"
+              disabled={locked}
+              onChange={changeProfile}
+            />
+          </div>
         </div>
         {describeIssue && <p className="tv-brief-issue">{describeIssue}</p>}
       </div>
@@ -381,21 +414,6 @@ const HelpdeskTicketForm = ({
         <div className="tv-composer-details">
           {isOpen('topic') && (
             <>
-              <div className="tv-composer-row">
-                <span className="tv-composer-row-label">
-                  Отдел
-                  <InfoHint side="left" text="У ОП и СЗоВ свои темы, своя схема кабинетов и свои подсказки для ИИ. Сначала выбран ваш отдел." />
-                </span>
-                <Segmented
-                  value={ticket.profile}
-                  options={HELPDESK_PROFILES.map((profile) => ({ value: profile, label: helpdeskProfileLabel(profile) }))}
-                  ariaLabel="Отдел заявки"
-                  disabled={locked}
-                  onChange={(profile) => {
-                    if (profile !== ticket.profile) onChange({ profile, category: '', subcategory: '', note: '' });
-                  }}
-                />
-              </div>
               <div className="tv-composer-row tv-hd-topic-row">
                 <span className="tv-composer-row-label">Тема</span>
                 <div className="tv-composer-row-body">
@@ -506,7 +524,7 @@ const HelpdeskTicketForm = ({
               />
             ))}
           </div>
-          {!fresh && (
+          {ticketNeedsCompose(ticket) && (
             <div className="tv-hd-group-foot">
               <button
                 type="button"
@@ -529,9 +547,21 @@ const HelpdeskTicketForm = ({
           <div className="tv-hd-group-head">
             <span className="tv-hd-group-title">Заявка</span>
             <InfoHint side="left" text="Так её увидит IT: задачей на доске IT Helpdesk. Заголовок и текст можно поправить." />
+            {/* Текст устарел (дописали описание), а полей, под которыми стоит
+                «Пересобрать заявку», у этой заявки нет — пересборка здесь. */}
+            {!fresh && !ticket.fields.length && !editingText && (
+              <button
+                type="button"
+                className="tv-hd-link"
+                disabled={locked}
+                onClick={() => runAi('finalize')}
+              >
+                {aiMode === 'finalize' ? 'Собираю…' : 'Пересобрать'}
+              </button>
+            )}
             <button
               type="button"
-              className="tv-hd-link"
+              className={`tv-hd-link${!fresh && !ticket.fields.length && !editingText ? ' is-tight' : ''}`}
               disabled={locked}
               onClick={() => setEditingText((value) => !value)}
             >
@@ -559,10 +589,17 @@ const HelpdeskTicketForm = ({
                 text: escapeTelegram(event.target.value),
                 composed: true,
                 composedSig: ticketSignature(ticketRef.current),
+                composedDescription: String(ticketRef.current.description || '').trim(),
               })}
             />
           ) : (
             <div className="tv-hd-preview-body">{renderTelegram(parseTelegramText(ticket.text))}</div>
+          )}
+          {!editingText && addendum && (
+            <div className="tv-hd-preview-extra">
+              <span className="tv-hd-preview-extra-title">Со слов заявителя</span>
+              <span className="tv-hd-preview-extra-text">{addendum}</span>
+            </div>
           )}
           {!editingText && extraLines.length > 0 && (
             <div className="tv-hd-preview-extra">

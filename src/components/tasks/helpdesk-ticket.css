@@ -20,7 +20,9 @@
 .tv-root .tv-hd-description::placeholder { color: var(--ink-3); font-weight: 500; }
 .tv-root .tv-hd-description[readonly] { color: var(--ink-2); }
 .tv-root .tv-hd-describe.is-invalid .tv-hd-description { box-shadow: inset 0 -2px 0 var(--rose); }
-.tv-root .tv-hd-describe-bar { display: flex; align-items: center; gap: 6px; }
+.tv-root .tv-hd-describe-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+/* Отдел заявки — справа в той же строке, на виду до любого ответа ИИ. */
+.tv-root .tv-hd-describe-profile { margin-left: auto; }
 
 /* Действие ИИ — мягкий голубой: заметно, но не спорит с главной кнопкой окна. */
 .tv-root .tv-hd-ai-btn,
@@ -81,6 +83,8 @@
   font-size: 12.5px; font-weight: 600; color: var(--select-ink);
 }
 .tv-root .tv-hd-link:hover:not(:disabled) { background: var(--select-bg); }
+/* «Пересобрать» и «Изменить» рядом: вправо отодвигает только первая. */
+.tv-root .tv-hd-link.is-tight { margin-left: 0; }
 .tv-root .tv-hd-link:disabled { opacity: .5; cursor: not-allowed; }
 
 /* Попробуйте сначала — строки с кружком-отметкой, как пункты чек-листа iOS. */
@@ -149,6 +153,7 @@
   font-size: 13px; line-height: 1.5; color: var(--ink-2); word-break: break-word;
 }
 .tv-root .tv-hd-preview-extra-title { font-size: 11.5px; font-weight: 600; color: var(--ink-3); }
+.tv-root .tv-hd-preview-extra-text { white-space: pre-wrap; }
 
 /* ── Схема кабинета ── */
 .tv-root .tv-hd-map {

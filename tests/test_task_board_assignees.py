@@ -554,9 +554,10 @@ class WiringTests(unittest.TestCase):
     def test_edit_opens_on_everyone_and_auto_board_filters_people(self):
         self.assertIn("assignAll: isAllBoardAssigneesSelection(nextForm.assigneeIds, taskProject,", TASKS_VIEW)
         # Подставленная доска IT Helpdesk (заявка в IT, 27.11.2026) — сразу «Все», как и при
-        # выборе руками; остальные доски — как раньше, с тем, что было в форме.
+        # выборе руками, а уход с неё «Все» с собой не уносит (assigneeBaseForBoardChange);
+        # остальные доски — как раньше, с тем, что было в форме.
         self.assertIn("...(prev.projectId === composerDefaultProject ? {} : assigneesAfterProjectChange(\n"
-                      "          isHelpdeskProject(nextProject) ? { ...prev, assignAll: true } : prev, nextProject, {",
+                      "          assigneeBaseForBoardChange(prev, findProject(projects, prev.projectId), nextProject), nextProject, {",
                       TASKS_VIEW)
 
 

@@ -77,11 +77,19 @@ def build_it_tickets_blueprint(
     """Собирает Blueprint раздела; все зависимости от bot_schedule2 — аргументами."""
     bp = Blueprint('it_tickets', __name__, url_prefix='/api')
 
-    def _it_ticket_authorize(require_admin=False):
+    def _it_ticket_authorize(require_admin=False, allow_board_members=False):
         """Авторизация для маршрутов IT-тикетов.
 
     Возвращает (requester_id, requester, role, error). error — кортеж (response, code) или None.
+
+    allow_board_members — ручка нужна самой форме заявки (темы на чтение, ИИ): её
+    пускают и людей доски IT Helpdesk без роли СВ/админа (заявки в IT с 27.11.2026
+    ставят в «Задачах»). Остальные ручки — настройки, каналы, журнал — по-прежнему
+    только по роли и отделу: прошедший по доске получает g.it_ticket_board_only, и
+    права на темы и инструкции ему не считаются (у не-главы они иначе брались бы от
+    его собственного отдела).
     """
+        g.it_ticket_board_only = False
         requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
         if not requester_id:
             return None, None, None, (jsonify({"error": "Unauthorized"}), 401)
@@ -97,19 +105,22 @@ def build_it_tickets_blueprint(
         allowed = is_admin or _is_supervisor_role(role) or (_headed_department_id(requester_id) is not None)
         if require_admin and not is_admin:
             return None, None, None, (jsonify({"error": "Only admin can manage IT-ticket channels"}), 403)
-        if not allowed:
-            # Заявки в IT с 27.11.2026 ставят в «Задачах» на доске IT Helpdesk: её
-            # люди пользуются ИИ заявок, даже не будучи СВ или админами. Права на
-            # настройки (темы, инструкции, каналы) это не даёт — они проверяются
-            # отдельно, по роли и отделу.
+        if not allowed and allow_board_members:
             try:
-                allowed = db.is_task_helpdesk_member(requester_id)
+                allowed = bool(db.is_task_helpdesk_member(requester_id))
             except Exception:
                 logging.warning("IT-ticket helpdesk membership check failed", exc_info=True)
                 allowed = False
+            g.it_ticket_board_only = allowed
         if not allowed:
             return None, None, None, (jsonify({"error": "Forbidden"}), 403)
         return requester_id, requester, role, None
+
+    def _it_ticket_settings_profiles(requester_id, role):
+        """Профили, чьи темы/канал правит запросивший; прошедшему только по доске — ничего."""
+        if getattr(g, 'it_ticket_board_only', False):
+            return []
+        return _it_ticket_pinnable_profiles(requester_id, role)
 
     def _resolve_it_ticket_profile_for_requester(requester_id):
         try:
@@ -220,7 +231,7 @@ def build_it_tickets_blueprint(
     @require_api_key
     def it_ticket_catalog():
         try:
-            requester_id, requester, role, err = _it_ticket_authorize()
+            requester_id, requester, role, err = _it_ticket_authorize(allow_board_members=True)
             if err:
                 return err
             profile, dept = _resolve_it_ticket_profile_for_requester(requester_id)
@@ -244,8 +255,8 @@ def build_it_tickets_blueprint(
                 "catalog": db.get_it_ticket_catalog(),
                 "priorities": IT_TICKET_PRIORITY_LABELS,
                 "pinned": pinned,
-                "pinnable_profiles": _it_ticket_pinnable_profiles(requester_id, role),
-                "catalog_editable_profiles": _it_ticket_pinnable_profiles(requester_id, role),
+                "pinnable_profiles": _it_ticket_settings_profiles(requester_id, role),
+                "catalog_editable_profiles": _it_ticket_settings_profiles(requester_id, role),
             }), 200
         except Exception as e:
             logging.error(f"Error fetching IT-ticket catalog: {e}", exc_info=True)
@@ -431,7 +442,7 @@ def build_it_tickets_blueprint(
     @require_api_key
     def it_ticket_ai_assist():
         try:
-            requester_id, requester, role, err = _it_ticket_authorize()
+            requester_id, requester, role, err = _it_ticket_authorize(allow_board_members=True)
             if err:
                 return err
             payload = request.get_json(silent=True) or {}

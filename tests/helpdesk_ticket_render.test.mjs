@@ -48,7 +48,7 @@ await build({
   bundle: true, format: 'esm', platform: 'node', target: 'node18', outfile,
   packages: 'external', loader: { '.js': 'jsx', '.jsx': 'jsx', '.css': 'empty' },
   logLevel: 'silent',
-  footer: { js: 'export { TaskComposerForm as __Composer, buildEmptyTaskForm as __empty, appendTaskFormData as __multipart };' },
+  footer: { js: 'export { TaskComposerForm as __Composer, buildEmptyTaskForm as __empty, appendTaskFormData as __multipart, fillTicketTaskBody as __ticketBody };' },
   plugins: [{
     name: 'stub-pdf-runtime',
     setup(stub) {
@@ -60,7 +60,9 @@ await build({
     },
   }],
 });
-const { __Composer: Composer, __empty: emptyForm, __multipart: appendMultipart } = await import(`file://${outfile.replace(/\\/g, '/')}`);
+const {
+  __Composer: Composer, __empty: emptyForm, __multipart: appendMultipart, __ticketBody: fillTicketBody,
+} = await import(`file://${outfile.replace(/\\/g, '/')}`);
 const { ticketSignature } = await import('../src/components/tasks/helpdeskTicket.js');
 
 const ME = 22;
@@ -107,6 +109,8 @@ test('доска IT Helpdesk в окне «Новая задача» — фор�
   assert.match(text, /ITH · IT Helpdesk/);
   assert.match(text, /Исполнители/);
   for (const chip of ['Тема', 'Срочность', 'Файлы']) assert.match(text, new RegExp(`\\+ ${chip}`));
+  // Отдел заявки — на виду сразу, в строке описания (до любого ответа ИИ).
+  assert.match(html, /class="tv-hd-describe-profile"><div class="tv-composer-segmented" role="group" aria-label="Отдел заявки">/);
   // У заявки нет полей задачи: ни заголовка «Что нужно сделать?», ни «В бэклог», ни «Дедлайна».
   assert.doesNotMatch(html, /Что нужно сделать\?/);
   assert.doesNotMatch(text, /В бэклог/);
@@ -144,6 +148,7 @@ const AI_TICKET = {
   text: '🔧 <b>Что:</b> не слышно водителя\n📍 <b>Где:</b> РМ 27',
   composed: true,
   composedSig: '',
+  composedDescription: 'не слышно водителя на 27 месте',
 };
 
 test('ответ ИИ: тема, советы, поля со схемой и текст заявки', () => {
@@ -183,6 +188,74 @@ test('дозаполнили после сборки — «Пересобрат�
   assert.match(text, /Пересобрать заявку/);
   assert.match(html, /class="tv-hd-preview-extra"/);
   assert.match(text, /Когда началось: с 9 утра/);
+});
+
+const opTicket = (workplace) => ({
+  ...AI_TICKET,
+  profile: 'op',
+  category: '',
+  subcategory: '',
+  note: '',
+  checks: [],
+  done: [],
+  values: { workplace, when: '' },
+});
+
+test('схема ОП открывает кабинет, где ИИ нашёл место, и подсвечивает отдельно стоящие места', () => {
+  // РМ 96 — отдельно стоящее место кабинета «ОП · 17 этаж».
+  const corner = render(emptyForm({ projectId: '4', ticket: opTicket('РМ 96 (ОП · 17 этаж)') }), { helpdesk });
+  assert.match(corner, /class="tv-hd-seat is-selected"[^>]*aria-pressed="true" aria-label="РМ 96"/);
+  // РМ 50 — во втором кабинете: схема открыта на нём, а не на первом.
+  const second = render(emptyForm({ projectId: '4', ticket: opTicket('РМ 50 (ОП 2 · 18 этаж)') }), { helpdesk });
+  assert.match(second, /role="tab" aria-selected="true" class="is-active">ОП 2 · 18 этаж/);
+  assert.match(second, /class="tv-hd-seat is-selected"[^>]*aria-label="РМ 50"/);
+});
+
+test('описание дописали после сборки — в заявке блок «Со слов заявителя» и «Пересобрать»', () => {
+  const ticket = {
+    ...AI_TICKET,
+    fields: [],
+    values: {},
+    checks: [],
+    done: [],
+    description: 'не слышно водителя на 27 месте. И микрофон на 28 тоже',
+  };
+  ticket.composedSig = ticketSignature({ ...ticket, description: AI_TICKET.description });
+  const html = render(emptyForm({ projectId: '4', ticket }), { helpdesk });
+  const text = textOf(html);
+  assert.match(text, /Со слов заявителя не слышно водителя на 27 месте\. И микрофон на 28 тоже/);
+  assert.match(text, /Заявка Пересобрать Изменить/, 'полей нет — пересборка в шапке блока');
+});
+
+test('тело заявки: её поля, файлы и журнал — без скрытых полей формы задачи', () => {
+  const sent = [];
+  const body = { append: (key, value) => sent.push([key, value]) };
+  const file = { name: 'Снимок.png', size: 10 };
+  const ticket = { ...AI_TICKET };
+  ticket.composedSig = ticketSignature(ticket);
+  fillTicketBody(body, emptyForm({
+    projectId: '4',
+    assigneeIds: ['517', '2'],
+    // Заполнено до выбора доски — заявка этого не несёт.
+    dueAt: '2026-12-01T18:00',
+    isBacklog: true,
+    watcherIds: ['55'],
+    tag: 'production',
+    subject: 'старый заголовок задачи',
+    ticket,
+  }), [file]);
+  const get = (key) => sent.find(([name]) => name === key)?.[1];
+  assert.equal(get('subject'), 'Не работают наушники, РМ 27');
+  assert.match(get('description'), /^Тема: Телефония и Oktell → Не работают наушники\/гарнитура\n\n🔧 Что: не слышно водителя/);
+  assert.equal(get('priority'), 'urgent');
+  assert.equal(get('tag'), 'task');
+  assert.equal(get('is_backlog'), '0');
+  assert.equal(get('project_id'), '4');
+  assert.equal(get('assignee_ids'), '517,2');
+  assert.equal(sent.some(([name]) => name === 'due_at' || name === 'watcher_ids' || name === 'production_brief'), false);
+  assert.deepEqual(sent.filter(([name]) => name === 'files').map(([, value]) => value), [file]);
+  const log = JSON.parse(get('it_ticket'));
+  assert.deepEqual([log.profile, log.category, log.priority], ['szov', 'Телефония и Oktell', 'high']);
 });
 
 test('заявка уходит задачей доски: только её поля', () => {

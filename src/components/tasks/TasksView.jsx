@@ -117,6 +117,7 @@ import TaskWatchersSheet from './TaskWatchersSheet';
 import HelpdeskTicketForm from './HelpdeskTicketForm';
 import HelpdeskSettingsPanel from './HelpdeskSettingsPanel';
 import {
+  assigneeBaseForBoardChange,
   emptyHelpdeskTicket,
   isHelpdeskProject,
   seedTicketDescription,
@@ -5115,6 +5116,24 @@ const appendTaskFormData = (body, values) => {
 
 const filesFromList = (files) => Array.from(files || []).filter(Boolean);
 
+/* Заявка в IT (доска IT Helpdesk, 27.11.2026) — тело POST /api/tasks. Форма для
+   неё собирается с нуля, а не из формы окна: срок, тип, чек-лист, бэклог и
+   наблюдатели, заданные до выбора доски, — скрытые поля, заявка их не несёт.
+   it_ticket — тема, отдел, срочность ИИ и поля для журнала заявок. */
+const fillTicketTaskBody = (body, form, files = []) => {
+  const ticket = form?.ticket || emptyHelpdeskTicket();
+  appendTaskFormData(body, buildEmptyTaskForm({
+    subject: ticketTaskSubject(ticket),
+    description: ticketTaskDescription(ticket),
+    priority: ticket.priority || 'normal',
+    assigneeIds: Array.isArray(form?.assigneeIds) ? form.assigneeIds : [],
+    projectId: form?.projectId || '',
+    sectionId: form?.sectionId || '',
+  }));
+  body.append('it_ticket', JSON.stringify(ticketLogPayload(ticket)));
+  filesFromList(files).forEach((file) => body.append('files', file));
+};
+
 /* Пределы сервера (TASK_MAX_FILES / TASK_MAX_FILE_SIZE_BYTES). Проверяем заранее:
    иначе человек ждёт загрузку, чтобы получить отказ, да ещё и по-английски. */
 const TASK_UPLOAD_MAX_FILES = 10;
@@ -6447,8 +6466,9 @@ const TaskComposerForm = ({
     const nextProject = findProject(projects, projectId);
     const sameProject = projectId === String(values.projectId || '');
     /* Заявку в IT берёт любой исполнитель доски — сразу «Все»: заявителю не
-       нужно знать, кто в IT чем занят. Выбрать конкретного можно и здесь. */
-    const toHelpdesk = Boolean(helpdesk) && isHelpdeskProject(nextProject);
+       нужно знать, кто в IT чем занят. Выбрать конкретного можно и здесь. Уходя
+       с доски заявок, «Все» с собой не уносим (assigneeBaseForBoardChange). */
+    const boardBase = helpdesk ? assigneeBaseForBoardChange(values, selectedProject, nextProject) : values;
     // Сменили доску — остаются наблюдатели, у кого есть доступ к новой, а раздел
     // сбрасывается: разделы у каждой доски свои. Исполнители — те, кто исполнитель
     // и новой доски; «Все» — все исполнители уже новой доски. Выбор человека форма
@@ -6458,7 +6478,7 @@ const TaskComposerForm = ({
       projectAuto: false,
       sectionId: sameProject ? values.sectionId : '',
       watcherIds: keepWatchersForProject(watcherIds, nextProject),
-      ...(sameProject ? {} : assigneesAfterProjectChange(toHelpdesk ? { ...values, assignAll: true } : values, nextProject, {
+      ...(sameProject ? {} : assigneesAfterProjectChange(boardBase, nextProject, {
         currentUserId,
         allowedIds: isProduction ? productionPersonIds([...recipients, ...boardAssignees(nextProject)]) : null,
         recipientIds,
@@ -6802,6 +6822,7 @@ const TaskComposerForm = ({
           issueFor={issueFor}
           onOpenSettings={helpdesk.onOpenSettings}
           settingsVersion={helpdesk.settingsVersion}
+          onBusyChange={helpdesk.onBusyChange}
         />
       </div>
     );
@@ -10026,6 +10047,10 @@ const TasksView = ({
      для ИИ); версия растёт после сохранения — форма заявки перечитывает темы. */
   const [helpdeskSettingsOpen, setHelpdeskSettingsOpen] = useState(false);
   const [helpdeskSettingsVersion, setHelpdeskSettingsVersion] = useState(0);
+  // Несохранённые правки на экране настроек — «назад» сначала спросит.
+  const [helpdeskSettingsDirty, setHelpdeskSettingsDirty] = useState(false);
+  // ИИ заявки разбирает или собирает — «Отправить заявку» ждёт его ответа.
+  const [helpdeskAiBusy, setHelpdeskAiBusy] = useState(false);
   const [editModal,         setEditModal]         = useState({ open: false, taskId: null, taskSubject: '' });
   const [deleteModal,       setDeleteModal]       = useState({ open: false, taskId: null, taskSubject: '' });
   const [editForm,          setEditForm]          = useState(() => buildEmptyTaskForm());
@@ -10814,7 +10839,7 @@ const TasksView = ({
         // (24.11.2026). Та же доска — состав не трогаем. Заявку в IT (доска
         // IT Helpdesk) — сразу всем исполнителям доски, как и при выборе руками.
         ...(prev.projectId === composerDefaultProject ? {} : assigneesAfterProjectChange(
-          isHelpdeskProject(nextProject) ? { ...prev, assignAll: true } : prev, nextProject, {
+          assigneeBaseForBoardChange(prev, findProject(projects, prev.projectId), nextProject), nextProject, {
           currentUserId,
           allowedIds: prev.tag === PRODUCTION_TAG
             ? productionPersonIds([...recipients, ...boardAssignees(nextProject)])
@@ -10834,6 +10859,9 @@ const TasksView = ({
      даже если их заполнили до выбора доски. it_ticket — тема, отдел и поля для
      журнала заявок; старый сервер это поле просто не читает. */
   const submitTicket = async () => {
+    // Пока ИИ разбирает или собирает, отправка ждёт: иначе заявка ушла бы без его
+    // ответа, а сам ответ лёг бы в следующую заявку (кнопка на это время выключена).
+    if (helpdeskAiBusy) return;
     const ticket = form.ticket || emptyHelpdeskTicket();
     if (ticketIssues(ticket).length) {
       setCreateIssuesShown(true);
@@ -10841,17 +10869,11 @@ const TasksView = ({
       return;
     }
     if (!(form.assigneeIds || []).length) { notify('Выберите, кому в IT поручить заявку', 'error'); return; }
+    // Пределы файлов задачи — до загрузки, по-русски (иначе отказ сервера после неё).
+    const refusal = taskUploadRefusal(filesFromList(selectedFiles));
+    if (refusal) { notify(refusal, 'error'); return; }
     const body = new FormData();
-    appendTaskFormData(body, buildEmptyTaskForm({
-      subject: ticketTaskSubject(ticket),
-      description: ticketTaskDescription(ticket),
-      priority: ticket.priority || 'normal',
-      assigneeIds: form.assigneeIds,
-      projectId: form.projectId,
-      sectionId: form.sectionId,
-    }));
-    body.append('it_ticket', JSON.stringify(ticketLogPayload(ticket)));
-    selectedFiles.forEach((file) => body.append('files', file));
+    fillTicketTaskBody(body, form, selectedFiles);
 
     setIsCreateLoading(true);
     try {
@@ -10884,6 +10906,8 @@ const TasksView = ({
       createIssueNav.first();
       return;
     }
+    const uploadRefusal = taskUploadRefusal(filesFromList(selectedFiles));
+    if (uploadRefusal) { notify(uploadRefusal, 'error'); return; }
 
     const body = new FormData();
     appendTaskFormData(body, form);
@@ -11427,8 +11451,23 @@ const TasksView = ({
   // выделение с выходом за край окна закрывало его вместе с набранным.
   const closeCreate = useCallback(() => setCreateOpen(false), []);
   const createOverlayProps = useOverlayDismiss(closeCreate);
-  const closeHelpdeskSettings = useCallback(() => setHelpdeskSettingsOpen(false), []);
-  useEffect(() => { if (!createOpen) setHelpdeskSettingsOpen(false); }, [createOpen]);
+  /* Назад к заявке. Несохранённые темы или инструкции молча не теряем: спрашиваем
+     (false — экран остаётся; так его понимает и жест «назад» на телефоне). */
+  const closeHelpdeskSettings = useCallback(() => {
+    if (helpdeskSettingsDirty && typeof window !== 'undefined'
+      && !window.confirm('Изменения в настройках не сохранены. Вернуться к заявке без них?')) {
+      return false;
+    }
+    setHelpdeskSettingsDirty(false);
+    setHelpdeskSettingsOpen(false);
+    return true;
+  }, [helpdeskSettingsDirty]);
+  useEffect(() => {
+    if (createOpen) return;
+    setHelpdeskSettingsOpen(false);
+    setHelpdeskSettingsDirty(false);
+    setHelpdeskAiBusy(false);
+  }, [createOpen]);
   // Поля заявки в IT — функциональным обновлением: ответ ИИ приходит позже набора.
   const updateHelpdeskTicket = useCallback((patch) => {
     setForm((prev) => ({ ...prev, ticket: { ...(prev.ticket || emptyHelpdeskTicket()), ...patch } }));
@@ -11443,6 +11482,7 @@ const TasksView = ({
     onTicketChange: updateHelpdeskTicket,
     onOpenSettings: canConfigureHelpdesk ? () => setHelpdeskSettingsOpen(true) : null,
     settingsVersion: helpdeskSettingsVersion,
+    onBusyChange: setHelpdeskAiBusy,
   }), [apiBaseUrl, buildHeaders, notify, updateHelpdeskTicket, helpdeskSettingsVersion, canConfigureHelpdesk]);
   const createModalTitle = helpdeskSettingsOpen
     ? 'Настройки заявок'
@@ -12186,7 +12226,7 @@ const TasksView = ({
                 <button type="button" className="tv-btn tv-btn-ghost tv-modal-cancel" disabled={isCreateLoading}
                   onClick={() => setCreateOpen(false)}>Отмена</button>
                 <button type="submit" className="tv-btn tv-btn-primary"
-                  disabled={isCreateLoading || isRecipientsLoading}>
+                  disabled={isCreateLoading || isRecipientsLoading || (createIsHelpdesk && helpdeskAiBusy)}>
                   {createIsHelpdesk
                     ? (isCreateLoading ? 'Отправляю…' : 'Отправить заявку')
                     : (isCreateLoading ? 'Создаю...' : (form.isBacklog ? 'Добавить в бэклог' : 'Поставить задачу'))}
@@ -12200,6 +12240,7 @@ const TasksView = ({
                 notify={notify}
                 onBack={closeHelpdeskSettings}
                 onSaved={() => setHelpdeskSettingsVersion((value) => value + 1)}
+                onDirtyChange={setHelpdeskSettingsDirty}
               />
             )}
           </div>

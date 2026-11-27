@@ -1,6 +1,6 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { SEAT_GAP, SEAT_H, SEAT_W, cabinetLabel, cabinetSeatNumbers } from '../technical/workplaceCabinets';
-import { seatKey, selectionFromValue, workplaceValue } from './helpdeskTicket';
+import { seatKey, selectionFromValue, toggleCabinetSeats, workplaceValue } from './helpdeskTicket';
 
 /*
  * Рабочие места на схеме кабинета — поле «Где (№ РМ)» заявки в IT. Клик по
@@ -34,31 +34,42 @@ const Seat = memo(function Seat({ number, selected, disabled, onToggle }) {
 
 const HelpdeskWorkplacePicker = ({ cabinets, value, onChange, disabled = false, invalid = false, labelId }) => {
   const list = useMemo(() => (Array.isArray(cabinets) ? cabinets : []), [cabinets]);
-  const [activeId, setActiveId] = useState(() => list[0]?.id || null);
   const selected = useMemo(() => selectionFromValue(value, list), [value, list]);
-
-  // Выбор на схеме приходит и извне (ИИ распознал «РМ 70»): открываем кабинет, где он есть.
   const firstSelectedCabinet = useMemo(() => {
     const first = [...selected][0];
     return first ? String(first).split(':')[0] : null;
   }, [selected]);
+  /* Выбор на схеме приходит и извне — ИИ распознал «РМ 50» в описании: открываем
+     тот кабинет, где он есть (у ОП их три), а не всегда первый. */
+  const [activeId, setActiveId] = useState(() => firstSelectedCabinet || list[0]?.id || null);
+
+  /* Своё значение — то, что схема отдала сама (клик, «Весь кабинет»). Чужое —
+     пришло извне (ИИ): только на него схема переключает кабинет и подводит
+     прокрутку; под пальцем ничего не двигается. */
+  const emittedRef = useRef(null);
+  const external = String(value ?? '') !== emittedRef.current;
   useEffect(() => {
     setActiveId((prev) => {
-      if (list.some((cabinet) => cabinet.id === prev)) return prev;
-      return firstSelectedCabinet || list[0]?.id || null;
+      const known = list.some((cabinet) => cabinet.id === prev);
+      if (!known) return firstSelectedCabinet || list[0]?.id || null;
+      const prevHasSelection = [...selected].some((key) => String(key).split(':')[0] === prev);
+      if (external && firstSelectedCabinet && !prevHasSelection) return firstSelectedCabinet;
+      return prev;
     });
-  }, [list, firstSelectedCabinet]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list, firstSelectedCabinet, value]);
   const active = list.find((cabinet) => cabinet.id === activeId) || list[0] || null;
 
-  const emit = useCallback((next) => onChange(workplaceValue(next, list)), [list, onChange]);
-  // Выбор сделал сам человек — схему под пальцем не двигаем (см. прокрутку ниже).
-  const ownChangeRef = useRef(false);
+  const emit = useCallback((next) => {
+    const text = workplaceValue(next, list);
+    emittedRef.current = text;
+    onChange(text);
+  }, [list, onChange]);
   const toggle = useCallback((number) => {
     if (!active || disabled) return;
     const next = new Set(selected);
     const key = seatKey(active.id, number);
     if (next.has(key)) next.delete(key); else next.add(key);
-    ownChangeRef.current = true;
     emit(next);
   }, [active, disabled, emit, selected]);
 
@@ -66,13 +77,7 @@ const HelpdeskWorkplacePicker = ({ cabinets, value, onChange, disabled = false, 
   const wholeCabinet = activeSeats.length > 0 && activeSeats.every((number) => selected.has(seatKey(active.id, number)));
   const toggleWholeCabinet = () => {
     if (!active || disabled) return;
-    const next = new Set(selected);
-    activeSeats.forEach((number) => {
-      const key = seatKey(active.id, number);
-      if (wholeCabinet) next.delete(key); else next.add(key);
-    });
-    ownChangeRef.current = true;
-    emit(next);
+    emit(toggleCabinetSeats(selected, active));
   };
 
   // Сколько выбрано в каждом кабинете — счётчиком в его сегменте.
@@ -115,10 +120,7 @@ const HelpdeskWorkplacePicker = ({ cabinets, value, onChange, disabled = false, 
     return numbers.length ? Math.min(...numbers) : null;
   }, [active, selected]);
   useIsoLayoutEffect(() => {
-    if (ownChangeRef.current) {
-      ownChangeRef.current = false;
-      return;
-    }
+    if (!external) return;
     const frame = frameRef.current;
     if (!frame || firstSelected === null || frame.scrollWidth <= frame.clientWidth + 1) return;
     const seat = frame.querySelector(`.tv-hd-seat[aria-label="РМ ${firstSelected}"]`);
@@ -126,7 +128,7 @@ const HelpdeskWorkplacePicker = ({ cabinets, value, onChange, disabled = false, 
     const frameBox = frame.getBoundingClientRect();
     const seatBox = seat.getBoundingClientRect();
     frame.scrollLeft += (seatBox.left + seatBox.width / 2) - (frameBox.left + frameBox.width / 2);
-    // value — в зависимостях, чтобы отметка «выбрал сам» снималась после каждого своего выбора.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.id, firstSelected, scale, value]);
 
   if (!list.length) {

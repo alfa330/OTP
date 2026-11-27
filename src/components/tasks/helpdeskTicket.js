@@ -76,6 +76,8 @@ export const emptyHelpdeskTicket = () => ({
   composed: false,
   // Отпечаток того, из чего текст собран: поменяли данные — текст устарел.
   composedSig: '',
+  // Описание, из которого собран текст: дописали после сборки — дописанное не потеряется.
+  composedDescription: '',
 });
 
 const trimmed = (value) => String(value ?? '').trim();
@@ -379,12 +381,60 @@ export function applyTicketAiResult(ticket, result, catalog) {
     if (markdown) patch.text = markdown;
     patch.composed = Boolean(markdown || trimmed(current.text));
     patch.composedSig = ticketSignature({ ...current, ...patch });
+    patch.composedDescription = trimmed(current.description);
   } else if (status === 'need_more_info') {
     patch.composed = false;
   } else if (markdown && !trimmed(current.text)) {
     patch.text = markdown;
+    patch.composedDescription = trimmed(current.description);
   }
   return { patch, status };
+}
+
+/* Смена отдела заявки: у отдела свой каталог тем и своя схема кабинетов, поэтому
+   разбор ИИ начинается заново — как в «Тех причинах». Иначе в задачу ушло бы
+   «РМ 27 (Тех поддержка)» под отделом ОП, а схема ОП стояла бы пустой. Описание и
+   срочность остаются: их писал и выбирал человек. */
+export const ticketProfileChange = (profile) => ({
+  profile,
+  category: '',
+  subcategory: '',
+  note: '',
+  fields: [],
+  values: {},
+  checks: [],
+  done: [],
+  aiPriority: '',
+  title: '',
+  titleEdited: false,
+  text: '',
+  composed: false,
+  composedSig: '',
+  composedDescription: '',
+});
+
+/* Исполнители при смене доски в окне «Новая задача». Заявку в IT берёт любой
+   исполнитель доски — на доске IT Helpdesk сразу «Все». А уходя с неё, «Все»
+   с собой не уносим: на другой доске это разослало бы обычную задачу всем её
+   исполнителям — выбор там начинается с чистого поля. */
+export const assigneeBaseForBoardChange = (values, currentProject, nextProject) => {
+  if (isHelpdeskProject(nextProject)) return { ...values, assignAll: true };
+  if (isHelpdeskProject(currentProject)) return { ...values, assignAll: false, assigneeIds: [] };
+  return values;
+};
+
+/* «Весь кабинет»: отметить все места активного кабинета (массовый сбой) или,
+   если уже отмечены все, снять их. Места других кабинетов не трогаем. */
+export function toggleCabinetSeats(selected, cabinet) {
+  const next = new Set(selected || []);
+  const seats = cabinetSeatNumbers(cabinet);
+  if (!cabinet || !seats.length) return next;
+  const all = seats.every((number) => next.has(seatKey(cabinet.id, number)));
+  seats.forEach((number) => {
+    const key = seatKey(cabinet.id, number);
+    if (all) next.delete(key); else next.add(key);
+  });
+  return next;
 }
 
 /* ─── Задача из заявки ─── */
@@ -422,12 +472,23 @@ export function ticketExtraLines(ticket) {
     });
 }
 
+/* Описание, дописанное после сборки текста ИИ («и микрофон на РМ 6 тоже»): в
+   собранный текст оно уже не попало, а «Пересобрать» не нажали. Тогда описание
+   идёт в задачу целиком, своим блоком, — какая часть новая, не угадать. */
+export function ticketDescriptionAddendum(ticket) {
+  const description = trimmed(ticket?.description);
+  if (!description || !trimmed(ticket?.text) || isTicketTextFresh(ticket)) return '';
+  return description === trimmed(ticket?.composedDescription) ? '' : description;
+}
+
 export function ticketTaskDescription(ticket) {
   const topic = ticketTopic(ticket?.category, ticket?.subcategory);
+  const addendum = ticketDescriptionAddendum(ticket);
   const extra = ticketExtraLines(ticket);
   return [
     topic ? `Тема: ${topic}` : '',
     ticketBodyText(ticket),
+    addendum ? `Со слов заявителя:\n${addendum}` : '',
     extra.length ? ['Детали:', ...extra].join('\n') : '',
   ].filter(Boolean).join('\n\n');
 }
@@ -486,6 +547,11 @@ export function ticketLogPayload(ticket) {
    у вставленной картинки браузер даёт одинаковое («image.png»), поэтому
    подписываем временем: два снимка подряд не схлопнутся в один. */
 export function clipboardFiles(clipboardData, now = new Date()) {
+  /* Скопировали ячейки Excel или абзац Word — Office кладёт рядом с текстом ещё и
+     картинку выделения. Это вставка текста, а не скриншот: вложением её не берём. */
+  const types = Array.from(clipboardData?.types || []);
+  const text = typeof clipboardData?.getData === 'function' ? clipboardData.getData('text/plain') : '';
+  if (text || types.includes('text/plain') || types.includes('text/html')) return [];
   const items = Array.from(clipboardData?.items || []);
   const stamp = `${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}-${String(now.getSeconds()).padStart(2, '0')}`;
   return items

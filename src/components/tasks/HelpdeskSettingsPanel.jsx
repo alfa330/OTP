@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { ChevronDown, Plus, Trash2, X } from 'lucide-react';
 import InfoHint from '../common/InfoHint';
@@ -151,7 +151,7 @@ const TopicsEditor = ({ draft, setDraft, profile, disabled }) => {
 
 /* ─── Экран настроек ─── */
 
-const HelpdeskSettingsPanel = ({ apiBaseUrl, buildHeaders, notify, onBack, onSaved }) => {
+const HelpdeskSettingsPanel = ({ apiBaseUrl, buildHeaders, notify, onBack, onSaved, onDirtyChange }) => {
   const [tab, setTab] = useState('topics');
   const [loading, setLoading] = useState(true);
   const [catalog, setCatalog] = useState(null);
@@ -161,7 +161,8 @@ const HelpdeskSettingsPanel = ({ apiBaseUrl, buildHeaders, notify, onBack, onSav
   const [instructions, setInstructions] = useState([]);
   const [instructionProfiles, setInstructionProfiles] = useState([]);
   const [instructionProfile, setInstructionProfile] = useState('');
-  const [instructionDraft, setInstructionDraft] = useState('');
+  // Черновики инструкций по отделам: переключили «Общие / ОП / СЗоВ» — набранное на месте.
+  const [instructionDrafts, setInstructionDrafts] = useState({});
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -200,11 +201,20 @@ const HelpdeskSettingsPanel = ({ apiBaseUrl, buildHeaders, notify, onBack, onSav
     () => instructions.find((item) => item.profile === instructionProfile) || null,
     [instructions, instructionProfile]
   );
-  useEffect(() => { setInstructionDraft(instructionItem?.instructions || ''); }, [instructionItem]);
+  const savedInstructions = (profile) => instructions.find((item) => item.profile === profile)?.instructions || '';
+  const instructionDraft = instructionDrafts[instructionProfile] ?? (instructionItem?.instructions || '');
+  const setInstructionDraft = (text) => setInstructionDrafts((prev) => ({ ...prev, [instructionProfile]: text }));
 
   const catalogDirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(catalog), [draft, catalog]);
   const instructionsDirty = (instructionItem?.instructions || '') !== instructionDraft;
   const dirty = tab === 'topics' ? catalogDirty : instructionsDirty;
+  // Окну — есть ли несохранённое хоть где-то: «назад» к заявке тогда спросит.
+  const anyDirty = catalogDirty || Object.entries(instructionDrafts)
+    .some(([profile, text]) => text !== savedInstructions(profile));
+  const dirtyRef = useRef(onDirtyChange);
+  dirtyRef.current = onDirtyChange;
+  useEffect(() => { dirtyRef.current?.(anyDirty); }, [anyDirty]);
+  useEffect(() => () => dirtyRef.current?.(false), []);
 
   const saveCatalog = useCallback(async () => {
     setSaving(true);
@@ -231,7 +241,14 @@ const HelpdeskSettingsPanel = ({ apiBaseUrl, buildHeaders, notify, onBack, onSav
         { headers: buildHeaders() }
       );
       const item = res?.data?.item;
-      if (item) setInstructions((prev) => [...prev.filter((entry) => entry.profile !== item.profile), item]);
+      if (item) {
+        setInstructions((prev) => [...prev.filter((entry) => entry.profile !== item.profile), item]);
+        setInstructionDrafts((prev) => {
+          const next = { ...prev };
+          delete next[item.profile];
+          return next;
+        });
+      }
       notify('Инструкции для ИИ сохранены');
     } catch (error) {
       notify(error?.response?.data?.error || 'Не удалось сохранить инструкции', 'error');

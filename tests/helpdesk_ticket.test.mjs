@@ -12,6 +12,10 @@ import {
   HELPDESK_PROJECT_CODE,
   TICKET_TASK_PRIORITY,
   applyTicketAiResult,
+  assigneeBaseForBoardChange,
+  ticketDescriptionAddendum,
+  ticketProfileChange,
+  toggleCabinetSeats,
   cabinetsForProfile,
   checksAnswer,
   clipboardFiles,
@@ -150,6 +154,7 @@ test('дозаполненное после сборки не теряется',
   ];
   const composed = ticket({
     description: 'нет звука',
+    composedDescription: 'нет звука',
     fields,
     values: { workplace: '', when: 'сегодня' },
     title: 'Нет звука',
@@ -176,6 +181,68 @@ test('масштаб для срочности: доля затронутых Р
   assert.match(text, /Затронуто 15 РМ \(~50% отдела\)/);
   assert.match(text, /Тех поддержка — 15\/30 РМ \(50%\)/);
   assert.equal(massContext([], fields, { workplace: 'РМ 1' }), '');
+  // Числа из других полей («с 9 утра») местами не считаются — иначе ложная массовость.
+  const mixed = massContext(SUPPORT, [...fields, { key: 'when', type: 'text' }], { workplace: 'РМ 3', when: 'с 9 утра, 12 раз' });
+  assert.match(mixed, /Затронуто 1 РМ/);
+});
+
+test('смена отдела — разбор заново, описание и срочность остаются', () => {
+  const patch = ticketProfileChange('op');
+  assert.equal(patch.profile, 'op');
+  for (const key of ['category', 'subcategory', 'note', 'text', 'title', 'composedSig', 'composedDescription', 'aiPriority']) {
+    assert.equal(patch[key], '', key);
+  }
+  assert.deepEqual([patch.fields, patch.values, patch.checks, patch.done], [[], {}, [], []]);
+  assert.equal(patch.composed, false);
+  assert.equal(patch.titleEdited, false);
+  assert.equal('description' in patch, false, 'описание пишет человек — не трогаем');
+  assert.equal('priority' in patch, false);
+});
+
+test('«Все» — только на доске заявок и не уезжает с неё', () => {
+  const ith = { id: 4, code: 'ITH' };
+  const hr = { id: 1, code: 'HR' };
+  const fin = { id: 2, code: 'FIN' };
+  const values = { assignAll: false, assigneeIds: ['7'] };
+  assert.deepEqual(assigneeBaseForBoardChange(values, hr, ith), { assignAll: true, assigneeIds: ['7'] });
+  assert.deepEqual(assigneeBaseForBoardChange({ assignAll: true, assigneeIds: ['517', '2'] }, ith, hr), { assignAll: false, assigneeIds: [] });
+  assert.equal(assigneeBaseForBoardChange(values, hr, fin), values, 'между обычными досками — как было');
+  assert.deepEqual(assigneeBaseForBoardChange(values, null, ith).assignAll, true);
+});
+
+test('«Весь кабинет»: отметить и снять, соседние кабинеты не трогать', () => {
+  const op17 = SALES.find((cabinet) => cabinet.id === 'op17');
+  const start = new Set(['op2:50']);
+  const all = toggleCabinetSeats(start, op17);
+  assert.equal(all.has('op2:50'), true);
+  assert.equal(all.has('op17:96'), true, 'и отдельно стоящие места кабинета');
+  // 6 + 12 + 7 мест в рядах и 4 отдельно стоящих.
+  assert.equal([...all].filter((key) => key.startsWith('op17:')).length, 29);
+  const off = toggleCabinetSeats(all, op17);
+  assert.deepEqual([...off], ['op2:50']);
+  assert.deepEqual([...toggleCabinetSeats(start, null)], ['op2:50']);
+});
+
+test('дописанное в описание после сборки идёт в задачу своим блоком', () => {
+  const base = ticket({
+    description: 'нет звука на РМ 5',
+    text: '🔧 <b>Что:</b> нет звука\n📍 <b>Где:</b> РМ 5',
+    composed: true,
+  });
+  const { patch } = applyTicketAiResult(base, { status: 'ready', ticket: { title: 'Нет звука', markdown: base.text } }, CATALOG);
+  const composed = { ...base, ...patch };
+  assert.equal(composed.composedDescription, 'нет звука на РМ 5');
+  assert.equal(ticketDescriptionAddendum(composed), '', 'свежий текст — ничего не дописываем');
+  const edited = { ...composed, description: 'нет звука на РМ 5. И микрофон на РМ 6 тоже' };
+  assert.equal(ticketDescriptionAddendum(edited), 'нет звука на РМ 5. И микрофон на РМ 6 тоже');
+  assert.equal(
+    ticketTaskDescription(edited),
+    '🔧 Что: нет звука\n📍 Где: РМ 5\n\nСо слов заявителя:\nнет звука на РМ 5. И микрофон на РМ 6 тоже',
+  );
+  // Черновик ИИ без «ready» тоже запоминает, из какого описания собран.
+  const draft = applyTicketAiResult(ticket({ description: 'сломан ПК' }), { status: 'draft', ticket: { markdown: 'ПК' } }, CATALOG).patch;
+  assert.equal(draft.composedDescription, 'сломан ПК');
+  assert.equal(ticketDescriptionAddendum(ticket({ description: 'без ИИ' })), '', 'без текста ИИ описание и так уходит целиком');
 });
 
 test('ИИ: тема из каталога, выбранную человеком не трогает без пометки', () => {
@@ -260,6 +327,7 @@ test('задача из заявки: тема и текст без размет
     title: '  Не работают наушники,   РМ 27 ',
     text: '🔧 <b>Что:</b> не слышно &lt;оператора&gt;\n📍 <b>Где:</b> РМ 27 <code>Тех поддержка</code>',
     description: 'исходный текст человека',
+    composedDescription: 'исходный текст человека',
   });
   assert.equal(ticketTaskSubject(composed), 'Не работают наушники, РМ 27');
   assert.equal(
@@ -319,4 +387,23 @@ test('скриншот из буфера получает своё имя', () =
   assert.deepEqual(files.map((file) => file.name), ['Снимок 09-05-07.png', 'отчёт.pdf']);
   assert.deepEqual(clipboardFiles({ items: [] }), []);
   assert.deepEqual(clipboardFiles(null), []);
+  // Два снимка одной вставкой — разные имена.
+  const two = clipboardFiles({
+    items: [{ kind: 'file', getAsFile: () => png }, { kind: 'file', getAsFile: () => new File(['y'], 'image.png', { type: 'image/png' }) }],
+  }, new Date(2026, 10, 27, 9, 5, 7));
+  assert.deepEqual(two.map((file) => file.name), ['Снимок 09-05-07.png', 'Снимок 09-05-07-2.png']);
+});
+
+test('вставка ячеек Excel или текста Word — текст, а не вложение', () => {
+  const picture = new File(['x'], 'image.png', { type: 'image/png' });
+  const excel = {
+    types: ['text/plain', 'text/html', 'Files'],
+    getData: (type) => (type === 'text/plain' ? 'РМ 12\tнет звука' : ''),
+    items: [{ kind: 'string' }, { kind: 'string' }, { kind: 'file', getAsFile: () => picture }],
+  };
+  assert.deepEqual(clipboardFiles(excel), []);
+  const htmlOnly = { types: ['text/html', 'Files'], getData: () => '', items: [{ kind: 'file', getAsFile: () => picture }] };
+  assert.deepEqual(clipboardFiles(htmlOnly), []);
+  const screenshot = { types: ['Files'], getData: () => '', items: [{ kind: 'file', getAsFile: () => picture }] };
+  assert.equal(clipboardFiles(screenshot).length, 1, 'снимок экрана без текста — вложение');
 });
