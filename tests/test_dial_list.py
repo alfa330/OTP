@@ -1202,7 +1202,8 @@ class OutcomeSubtypesTests(unittest.TestCase):
     def _save_cursor(self, stored=('Дорого', 'Далеко')):
         import uuid
         return _RoutedCursor([
-            ('SELECT id FROM dial_list_outcomes WHERE', {'all': [(self.R,)]}),
+            # Замок строк итогов отдела перед сохранением: id и вкладка (27.11.2026; у отдела без вкладок — '').
+            ('SELECT id, group_key FROM dial_list_outcomes WHERE', {'all': [(self.R, '')]}),
             # Типы есть только у «Отказа».
             ('SELECT id FROM dial_list_outcome_subtypes',
              {'all': lambda params: [(self.S1,), (self.S2,)] if params[0] == self.R else []}),
@@ -5293,11 +5294,14 @@ class AnnouncementTests(unittest.TestCase):
             ('answered', '', False, True),
         ])
         attempts_sql = cur.sql_with('os.id, os.name')[0][0]
-        # За ними — только колонки автообзвона Тез (15.10.2026): прежние номера не сдвинуты.
+        # За ними — только колонки автообзвона Тез (15.10.2026) и итоги вкладок (27.11.2026, последней): прежние
+        # номера не сдвинуты.
         self.assertIn('os.id, os.name, t.ring_timeout_at, t.auto_hangup, t.talk_detected,\n'
                       "                       t.due_at, t.auto, t.operator_status, t.wrapup_expired_at, "
-                      "COALESCE(o.due_kind, '')\n",
+                      "COALESCE(o.due_kind, ''),\n"
+                      "                       (SELECT COALESCE(json_agg(json_build_object(\n",
                       attempts_sql)
+        self.assertIn("WHERE ao.attempt_id = t.id)\n                FROM dial_list_attempts t\n", attempts_sql)
         # Ручка записи судит так же, как recording_available: по ответу Binotel с длительностью.
         recording = inspect.getsource(dial_service.DialListService.attempt_recording)
         self.assertIn('map_disposition(disposition) != "answered"', recording)

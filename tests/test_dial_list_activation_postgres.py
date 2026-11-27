@@ -216,11 +216,20 @@ class _Env:
         self.binotel.live[attempt["general_call_id"]] = {"disposition": 'ANSWER', "billsec": billsec, "waitsec": 5}
         self.poll_now()
         self.svc.get_state(OPERATOR, phone_version=GUARDED)
-        # Итог разговора — «Перейдёт на Sapar» (без даты): без итога следующий звонок сервер не даст.
-        outcome = str(self.one("SELECT id FROM dial_list_outcomes WHERE department_id = %s AND name = %s",
-                               (ACT, 'Перейдёт на Sapar'))[0])
-        self.svc.set_attempt_outcome(OPERATOR, attempt["attempt_id"], outcome)
+        # Итог разговора: без итога следующий звонок сервер не даст.
+        self.svc.set_attempt_outcome(OPERATOR, attempt["attempt_id"], self.talked_outcome())
         return attempt
+
+    def talked_outcome(self, department_id=ACT):
+        """Итог главной вкладки «Поездки» без даты и с возвратом в список (как «Перейдёт на Sapar» до вкладок
+        итогов, 27.11.2026): проверкам и режимам нужен разговор, после которого водитель остаётся в обзвоне, а у
+        стартовых итогов главной вкладки возврат — только с датой."""
+        row = self.one("SELECT id FROM dial_list_outcomes WHERE department_id = %s AND name = 'Поговорили'",
+                       (department_id,))
+        if row:
+            return str(row[0])
+        return str(self.one("INSERT INTO dial_list_outcomes (department_id, name, position, requeue, group_key) "
+                            "VALUES (%s, 'Поговорили', 99, TRUE, 'trips') RETURNING id", (department_id,))[0])
 
     def refused(self, fn, *args, **kwargs):
         try:
@@ -339,7 +348,7 @@ def test_run_finds_goal_and_sapar_switch_and_credits_the_last_talk(env):
     assert env.crm.asked[0][0] == 'orders' and env.crm.asked[0][1] == sorted([D1, D2, D3])
     by_name = {i["lead_id"]: i for i in items}
     l1, l2, l3 = env.lead(D1), env.lead(D2), env.lead(D3)
-    assert by_name[l1]["driver"]["label"] == '34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)'
+    assert by_name[l1]["driver"]["label"] == f'34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы) · ID: {D1}'
     # Разговоры с первым и третьим (перед звонком — свежие поездки из карточки CRM).
     # Провайдер из файла карточкой ещё не проверяли — перед звонком его спрашивают заодно.
     env.crm.cards = {D1: {'park_id': PARK, 'total': 34, 'created_date': None},
@@ -403,8 +412,9 @@ def test_phone_gets_tez_mode_driver_line_and_no_number(env):
     assert (state["profile"], state["goal"], state["direct_dial"], state["auto"]["enabled"]) == (
         'tez', 'activation', False, True)
     item = state["portion"]["items"][0]
-    assert (item["driver"]["label"], item["driver"]["city"]) == (
-        '34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)', 'Алматы')
+    # ID водителя (владелец 27.11.2026): телефону до 3.22.67 — последним в строке, отдельным полем — всем.
+    assert (item["driver"]["label"], item["driver"]["city"], item["driver"]["driver_id"]) == (
+        f'34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы) · ID: {D1}', 'Алматы', D1)
     assert '77001110001' not in json.dumps(state, ensure_ascii=False)
     # Звонок — через АТС, номер телефону не уходит. Поездки, проверенные при выдаче, свежее 15 минут — не
     # переспрашиваются; час назад — перед звонком освежаются карточкой CRM.
@@ -413,7 +423,13 @@ def test_phone_gets_tez_mode_driver_line_and_no_number(env):
     call = env.svc.start_call(OPERATOR, item["assignment_id"], operator_status='outbound', phone_version='3.22.66')
     assert 'dial' not in call and env.binotel.originated == [('911', '77001110001')]
     active = env.svc.get_state(OPERATOR, phone_version='3.22.66')["active_attempt"]
-    assert active["driver"]["label"] == '35 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)'
+    assert active["driver"]["label"] == f'35 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы) · ID: {D1}'
+    # Телефон 3.22.67+ показывает ID сам: в строке его нет, поле — то же.
+    new_phone = env.svc.get_state(OPERATOR, phone_version='3.22.67')
+    assert (new_phone["active_attempt"]["driver"]["label"], new_phone["active_attempt"]["driver"]["driver_id"]) == (
+        '35 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)', D1)
+    assert [(i["driver"]["label"], i["driver"]["driver_id"]) for i in new_phone["portion"]["items"]] == [
+        ('35 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)', D1)]
     # Блок dial_list для /api/operator/sip_settings: телефон в режиме автообзвона, номера спрятаны.
     env.svc.dial_operator = lambda uid, *a, **k: {"department_id": ACT, "department_provider": 'binotel'}
     block = env.svc.phone_settings(OPERATOR, member=None)
@@ -782,7 +798,8 @@ def test_switching_a_line_moves_the_operator_between_bases_without_touching_the_
     state = svc.issue_next_portion(RCC_OWN, phone_version=GUARDED)
     assert (state["profile"], state["goal"]) == ('tez', 'activation')
     assert sorted(i["driver"]["label"] for i in state["portion"]["items"]) == [
-        '12 из 50 поездок · ЭДО: Payda · Парк: Jana (Алматы)', '34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)']
+        f'12 из 50 поездок · ЭДО: Payda · Парк: Jana (Алматы) · ID: {D2}',
+        f'34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы) · ID: {D1}']
     block = svc.phone_settings(RCC_OWN, member=None)
     assert (block["enabled"], block["profile"], block["goal"], block["auto"], block["no_active"]) == (
         True, 'tez', 'activation', True, False)
@@ -865,7 +882,7 @@ def test_phone_tabs_and_progress_show_only_the_current_mode(hosted):
     hosted.crm.counts = {D1: 34, D2: 12}
     items = svc.issue_next_portion(RCC_OWN, phone_version=GUARDED)["portion"]["items"]
     first = next(i for i in items if i["full_name"] == 'Тестов Тест')
-    _talk_with_outcome(hosted, RCC_OWN, first["assignment_id"], SZOV, 'Перейдёт на Sapar')
+    _talk_with_outcome(hosted, RCC_OWN, first["assignment_id"], SZOV, 'Работает в другом парке')
 
     def phone_view():
         worked = svc.operator_worked(RCC_OWN)
@@ -874,13 +891,13 @@ def test_phone_tabs_and_progress_show_only_the_current_mode(hosted):
                 [o["name"] for o in progress["outcomes"]], progress["month"]["attempts"])
 
     # В «Активации» — только её водитель, её итоги и её звонок.
-    assert phone_view() == ({'Перейдёт на Sapar'}, 1, ['Перейдёт на Sapar'], 1)
+    assert phone_view() == ({'Работает в другом парке'}, 1, ['Работает в другом парке'], 1)
     assert 'Отказ РКЦ' not in {t["name"] for t in svc.operator_worked(RCC_OWN)["tabs"]}
 
     # Назад в удалённый КЦ — только его.
     svc.set_line_modes(RCC, 'host', user_ids=[RCC_OWN], changed_by=1)
     assert phone_view() == ({'Отказ РКЦ'}, 1, ['Отказ РКЦ'], 1)
-    assert 'Перейдёт на Sapar' not in {t["name"] for t in svc.operator_worked(RCC_OWN)["tabs"]}
+    assert 'Работает в другом парке' not in {t["name"] for t in svc.operator_worked(RCC_OWN)["tabs"]}
 
     # Отдел без режима линий: водители отдела, где оператор работал раньше, на вкладках остаются (как было).
     hosted.q("DELETE FROM dial_list_department_settings WHERE department_id = %s", (SZOV,))
@@ -937,9 +954,9 @@ def test_release_and_reseat_keep_the_mode_while_the_outcome_is_owed(hosted):
     assert svc.operator_mode(SZOV_GUEST) == (SZOV, RCC)
     state = svc.get_state(SZOV_GUEST, phone_version=GUARDED)
     assert (state["profile"], state["pending_outcome"]["attempt_id"]) == ('tez', attempt["attempt_id"])
-    assert 'Перейдёт на Sapar' in [o["name"] for o in state["outcomes"]]
+    assert 'Работает в другом парке' in [o["name"] for o in state["outcomes"]]
     outcome = str(hosted.one("SELECT id FROM dial_list_outcomes WHERE department_id = %s AND name = %s",
-                             (SZOV, 'Перейдёт на Sapar'))[0])
+                             (SZOV, 'Работает в другом парке'))[0])
     svc.set_attempt_outcome(SZOV_GUEST, attempt["attempt_id"], outcome)
     # Итог поставлен — снятие режим снимает.
     svc.release_line(RCC, SZOV_GUEST, changed_by=1, seat_anyone=True)
@@ -1000,3 +1017,209 @@ def test_line_settings_follow_the_line_in_activation_mode(hosted):
     assert svc.get_state(RCC_OWN, phone_version=GUARDED)["ring_timeout_sec"] == 0
     ctx = svc.operator_context(RCC_OWN)
     assert (ctx["department_id"], svc._line_department(ctx)) == (SZOV, RCC)
+
+
+# ── вкладки итогов: у звонка три цели (владелец 27.11.2026) ─────────────────────────────────────────────────
+
+TABS_PHONE = '3.22.67'
+
+
+def _outcome_id(env, name, group):
+    return str(env.one("SELECT id FROM dial_list_outcomes WHERE department_id = %s AND name = %s AND group_key = %s",
+                       (ACT, name, group))[0])
+
+
+def _tabs_talk(env, driver_id=D1, trips=34, phone='77001110001'):
+    """Водитель в пачке и разговор с ним, итога ещё нет. Возвращает (попытку, лид)."""
+    env.upload([_row(driver_id, phone, trips, 'Бумажный документооборот')])
+    env.crm.counts = {driver_id: trips}
+    item = env.svc.issue_next_portion(OPERATOR, phone_version=TABS_PHONE)["portion"]["items"][0]
+    return _talk(env, OPERATOR, item["assignment_id"]), env.lead(driver_id)
+
+
+def test_activation_gets_three_required_tabs_and_new_phone_sees_them(env):
+    env.enroll()
+    groups = env.svc.department_settings(ACT)["outcome_groups"]
+    assert groups == [{"key": 'trips', "name": 'Поездки', "required": True},
+                      {"key": 'provider', "name": 'Провайдер ЭДО', "required": True},
+                      {"key": 'promo', "name": 'Акции', "required": True}]
+    by_group = {}
+    for o in env.svc.outcomes(ACT):
+        by_group.setdefault(o["group"], []).append(o["name"])
+    assert by_group == {
+        'trips': ['Будет ездить', 'Перезвонить', 'Отказ', 'Неверный номер', 'Работает в другом парке'],
+        'provider': ['Перейдёт на Sapar', 'Уже на Sapar', 'Подумает', 'Отказался переходить', 'Не обсуждали'],
+        'promo': ['Рассказали', 'Не интересно', 'Не успели рассказать']}
+    env.upload([_row(D1, '77001110001', 34, 'Бумажный документооборот')])
+    env.crm.counts = {D1: 34}
+    # Телефон до 3.22.67 вкладок не знает: ему — итоги главной вкладки, без group, и вкладок в состоянии нет.
+    old = env.svc.issue_next_portion(OPERATOR, phone_version='3.22.66')
+    assert [o["name"] for o in old["outcomes"]] == by_group['trips']
+    assert 'group' not in old["outcomes"][0] and 'outcome_groups' not in old
+    new = env.svc.get_state(OPERATOR, phone_version=TABS_PHONE)
+    assert new["outcome_groups"] == groups
+    assert [(o["group"], o["name"]) for o in new["outcomes"]][:6] == [
+        ('trips', 'Будет ездить'), ('trips', 'Перезвонить'), ('trips', 'Отказ'), ('trips', 'Неверный номер'),
+        ('trips', 'Работает в другом парке'), ('provider', 'Перейдёт на Sapar')]
+    assert len(new["outcomes"]) == 13
+
+
+def test_outcome_of_each_tab_is_checked_and_saved_with_the_attempt(env):
+    env.enroll()
+    attempt, lead = _tabs_talk(env)
+    att = attempt["attempt_id"]
+    refusal = _outcome_id(env, 'Отказ', 'trips')
+    sapar = _outcome_id(env, 'Перейдёт на Sapar', 'provider')
+    thinks = _outcome_id(env, 'Подумает', 'provider')
+    told = _outcome_id(env, 'Рассказали', 'promo')
+    # Тип у итога вкладки «Провайдер ЭДО» — обязателен, если у итога типы есть.
+    (sub_id,) = env.one("INSERT INTO dial_list_outcome_subtypes (outcome_id, department_id, name) "
+                        "VALUES (%s, %s, 'Через неделю') RETURNING id", (thinks, ACT))
+    sub_id = str(sub_id)
+
+    def save(main, extra):
+        return env.refused(env.svc.set_attempt_outcome, OPERATOR, att, main, group_outcomes=extra)
+
+    # Главный итог — только с главной вкладки; без обязательной вкладки, два итога на одной, главный среди
+    # остальных, чужой тип, тип не выбран — 400 словами, и ничего не записано.
+    assert save(sapar, [])[:2] == ('Выберите итог на вкладке «Поездки»', 400)
+    assert save(refusal, [{"outcome_id": sapar}])[:2] == ('Выберите итог на вкладке «Акции»', 400)
+    assert save(refusal, [{"outcome_id": sapar}, {"outcome_id": thinks, "subtype_id": sub_id},
+                          {"outcome_id": told}])[:2] == ('На вкладке «Провайдер ЭДО» выберите один итог', 400)
+    assert save(refusal, [{"outcome_id": refusal}, {"outcome_id": told}])[:2] == (
+        'Итог «Отказ» — с другой вкладки, обновите список', 400)
+    assert save(refusal, [{"outcome_id": thinks}, {"outcome_id": told}])[:2] == (
+        'Выберите тип итога «Подумает» на вкладке «Провайдер ЭДО»', 400)
+    assert save(refusal, [{"outcome_id": sapar, "subtype_id": sub_id}, {"outcome_id": told}])[:2] == (
+        'Такого типа итога нет — обновите список', 400)
+    assert save(refusal, [{"outcome_id": 'не uuid'}, {"outcome_id": told}])[:2] == (
+        'Такого итога нет — обновите список', 400)
+    assert save(refusal, {"outcome_id": sapar})[:2] == ('group_outcomes: ожидается список итогов вкладок', 400)
+    assert env.one("SELECT outcome_id FROM dial_list_attempts WHERE id = %s", (att,)) == (None,)
+    assert env.q("SELECT 1 FROM dial_list_attempt_outcomes") == []
+
+    assert save(refusal, [{"outcome_id": thinks, "subtype_id": sub_id}, {"outcome_id": told}]) is None
+    assert env.q("SELECT group_key, outcome_id::text, outcome_subtype_id::text FROM dial_list_attempt_outcomes "
+                 "WHERE attempt_id = %s ORDER BY group_key", (att,)) == [
+        ('promo', told, None), ('provider', thinks, sub_id)]
+    # Повторное сохранение заменяет итоги вкладок целиком.
+    assert save(refusal, [{"outcome_id": sapar}, {"outcome_id": told}]) is None
+    assert env.q("SELECT group_key, outcome_id::text FROM dial_list_attempt_outcomes WHERE attempt_id = %s "
+                 "ORDER BY group_key", (att,)) == [('promo', told), ('provider', sapar)]
+
+    # Карточка водителя: итоги вкладок у звонка — по порядку вкладок.
+    card = env.svc.lead_card(lead)
+    assert [(g["group"], g["group_name"], g["name"]) for g in card["attempts"][0]["group_outcomes"]] == [
+        ('provider', 'Провайдер ЭДО', 'Перейдёт на Sapar'), ('promo', 'Акции', 'Рассказали')]
+    # Аналитика: по каждой неглавной вкладке — итоги и их число; главная — в основном дашборде.
+    tabs = env.svc.analytics(ACT)["outcome_groups"]
+    assert [(t["key"], t["total"], [(i["name"], i["count"]) for i in t["items"]]) for t in tabs] == [
+        ('provider', 1, [('Перейдёт на Sapar', 1)]), ('promo', 1, [('Рассказали', 1)])]
+    # Справочник считает и выбор на вкладках: выбранный итог редактор не спутает с невыбранным.
+    used = {o["name"]: o["used"] for o in env.svc.outcomes(ACT)}
+    assert (used['Перейдёт на Sapar'], used['Рассказали'], used['Отказ'], used['Подумает']) == (1, 1, 1, 0)
+    # Вкладки отработанных в телефоне — по итогу главной вкладки (и служебная «Не дозвонились»): итогов
+    # «Провайдера ЭДО» и «Акций» там нет, звонок — под «Отказом».
+    worked = env.svc.operator_worked(OPERATOR)["tabs"]
+    assert not {t["name"] for t in worked} & {'Перейдёт на Sapar', 'Подумает', 'Рассказали', 'Не интересно'}
+    assert {t["name"]: t["count"] for t in worked}['Отказ'] == 1
+
+
+def test_old_phone_saves_only_the_main_outcome_and_optional_tab_may_stay_empty(env):
+    env.enroll()
+    attempt, lead = _tabs_talk(env)
+    refusal = _outcome_id(env, 'Отказ', 'trips')
+    # Телефон без вкладок ключа group_outcomes не шлёт — обязательность вкладок не проверяется.
+    env.svc.set_attempt_outcome(OPERATOR, attempt["attempt_id"], refusal)
+    assert env.one("SELECT outcome_id::text FROM dial_list_attempts WHERE id = %s", (attempt["attempt_id"],)) == (
+        refusal,)
+    assert env.q("SELECT 1 FROM dial_list_attempt_outcomes") == []
+    assert env.svc.lead_card(lead)["attempts"][0]["group_outcomes"] == []
+    # Необязательная вкладка: без её итога сохранить можно.
+    rows, version = env.svc.outcomes(ACT, with_version=True)
+    env.svc.save_outcomes(ACT, [{"id": o["id"], "name": o["name"]} for o in rows], version=version, groups=[
+        {"key": 'trips', "name": 'Поездки'}, {"key": 'provider', "name": 'Провайдер ЭДО'},
+        {"key": 'promo', "name": 'Акции', "required": False}])
+    attempt2, _lead2 = _tabs_talk(env, D2, 12, '77001110002')
+    assert env.refused(env.svc.set_attempt_outcome, OPERATOR, attempt2["attempt_id"], refusal,
+                       group_outcomes=[{"outcome_id": _outcome_id(env, 'Уже на Sapar', 'provider')}]) is None
+
+
+def test_editor_moves_outcomes_between_tabs_and_guards_each_tab(env):
+    env.enroll()
+    rows, version = env.svc.outcomes(ACT, with_version=True)
+    groups = env.svc.department_settings(ACT)["outcome_groups"]
+    items = [{"id": o["id"], "name": o["name"], "color": o["color"], "is_active": o["is_active"],
+              "group": o["group"]} for o in rows]
+
+    def put(new_items, new_groups=dial_service.VALUE_NOT_SENT, ver=None):
+        kw = {} if new_groups is dial_service.VALUE_NOT_SENT else {"groups": new_groups}
+        return env.refused(env.svc.save_outcomes, ACT, new_items, version=ver, with_version=True, **kw)
+
+    # Одинаковое название — на разных вкладках можно, на одной — нет.
+    assert put(items + [{"name": 'Отказ', "group": 'promo'}]) is None
+    rows, version = env.svc.outcomes(ACT, with_version=True)
+    assert sorted(o["group"] for o in rows if o["name"] == 'Отказ') == ['promo', 'trips']
+    items = [{"id": o["id"], "name": o["name"], "is_active": o["is_active"], "group": o["group"]} for o in rows]
+    assert put(items + [{"name": 'Рассказали', "group": 'promo'}])[0] == 'Итог «Рассказали» повторяется'
+    # Вкладки нет у отдела — отказ; новый итог без вкладки — на главную; без ключа group — вкладка прежняя.
+    assert put(items + [{"name": 'Новый', "group": 'nope'}])[0] == 'Итог «Новый»: такой вкладки итогов у отдела нет'
+    keep = [{"id": o["id"], "name": o["name"], "is_active": o["is_active"]} for o in rows]
+    assert put(keep + [{"name": 'Без вкладки'}]) is None
+    groups_of = {(o["name"], o["group"]) for o in env.svc.outcomes(ACT)}
+    assert ('Без вкладки', 'trips') in groups_of and ('Рассказали', 'promo') in groups_of
+    # На обязательной вкладке не осталось включённых итогов — отказ; вкладку сделали необязательной — можно.
+    rows, version = env.svc.outcomes(ACT, with_version=True)
+    no_promo = [{"id": o["id"], "name": o["name"], "group": o["group"],
+                 "is_active": o["is_active"] and o["group"] != 'promo'} for o in rows]
+    assert put(no_promo)[0] == 'На вкладке «Акции» нет ни одного включённого итога'
+    optional = [dict(g, required=g["key"] != 'promo') for g in groups]
+    assert put(no_promo, optional) is None
+    assert env.svc.department_settings(ACT)["outcome_groups"][2] == {"key": 'promo', "name": 'Акции',
+                                                                     "required": False}
+    # Вкладки — тоже содержимое справочника: их правка меняет версию (открытый редактор получит 409). Итоги уходят
+    # целиком, как их шлёт сайт: меняется только название вкладки.
+    rows, version = env.svc.outcomes(ACT, with_version=True)
+    rows = sorted(rows, key=lambda o: o["position"])   # выдача — включённые первыми; порядок номеров — свой
+    same_rows = [{"id": o["id"], "name": o["name"], "color": o["color"], "requeue": o["requeue"],
+                  "is_active": o["is_active"], "due_kind": o["due_kind"], "group": o["group"]} for o in rows]
+    renamed = [dict(g, name='Акции месяца') if g["key"] == 'promo' else g for g in optional]
+    assert put(same_rows, renamed, ver=version) is None
+    look = lambda items: sorted((o["id"], o["name"], o["color"], o["requeue"], o["is_active"], o["group"])  # noqa: E731
+                                for o in items)
+    assert look(env.svc.outcomes(ACT)) == look(rows), 'итоги не тронуты — изменилась только вкладка'
+    assert put(same_rows, optional, ver=version)[1:] == (409, 'stale')
+    # Главная вкладка без включённых итогов — отказ, даже необязательная.
+    no_main = [dict(i, is_active=i["is_active"] and o["group"] != 'trips') for i, o in zip(same_rows, rows)]
+    assert put(no_main, [dict(g, required=False) for g in renamed])[0] == (
+        'На вкладке «Поездки» нет ни одного включённого итога')
+    # Ключи вкладок — латиница и без повторов; пустое название — отказ.
+    assert put(same_rows, [{"key": 'Поездки', "name": 'x'}])[0] == 'Ключ вкладки — латиница и цифры, с буквы'
+    assert put(same_rows, [{"key": 'trips', "name": 'a'}, {"key": 'trips', "name": 'b'}])[0] == (
+        'Вкладки итогов повторяются')
+    assert put(same_rows, [{"key": 'trips', "name": '  '}])[0] == 'У вкладки итогов должно быть название'
+    # Вкладки убрали совсем — справочник снова один: одинаковые названия с разных вкладок теперь повтор; без
+    # повтора у итогов вкладки нет, телефону — все включённые итоги.
+    assert put(same_rows, [])[0] == 'Итог «Отказ» повторяется'
+    unique = [dict(i, name='Отказ от акций') if i["name"] == 'Отказ' and o["group"] == 'promo' else i
+              for i, o in zip(same_rows, rows)]
+    assert put(unique, []) is None
+    assert env.svc.department_settings(ACT)["outcome_groups"] == []
+    assert {o["group"] for o in env.svc.outcomes(ACT)} == {''}
+    env.upload([_row(D1, '77001110001', 34, 'Бумажный документооборот')])
+    env.crm.counts = {D1: 34}
+    state = env.svc.issue_next_portion(OPERATOR, phone_version=TABS_PHONE)
+    assert 'outcome_groups' not in state and 'group' not in state["outcomes"][0]
+    assert len(state["outcomes"]) == len([o for o in env.svc.outcomes(ACT) if o["is_active"]])
+
+
+def test_tez_seed_clears_activation_tabs(env):
+    """Стартовый набор Тез — без вкладок: прежние вкладки «Активации» спрятали бы от старого телефона все итоги
+    (их вкладка '' не главная)."""
+    env.enroll()
+    assert env.svc.department_settings(ACT)["outcome_groups"]
+    env.q("DELETE FROM dial_list_outcomes WHERE department_id = %s", (ACT,))
+    with env.db._get_cursor() as cur:
+        env.svc._seed_outcomes(cur, ACT, profile='tez')
+    assert env.svc.department_settings(ACT)["outcome_groups"] == []
+    assert {o["group"] for o in env.svc.outcomes(ACT)} == {''}

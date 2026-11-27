@@ -312,23 +312,34 @@ def provider_label(provider, source):
     return f"ЭДО: {name}" if name else "ЭДО: не знаем"
 
 
-def driver_label(trips_total, goal, reached_at, provider, source, park=""):
+def driver_label(trips_total, goal, reached_at, provider, source, park="", driver_id=""):
     """Строка водителя в телефоне (driver.label): «34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)».
     Парк — «Диспетчерская» из файла (владелец 27.11.2026: «срочно надо добавить парк водителя в отображаемой
-    информации у операторов»); в конце строки: телефон показывает label как есть, длинную строку режет с хвоста."""
+    информации у операторов»); в конце строки: телефон показывает label как есть, длинную строку режет с хвоста.
+    driver_id — ID водителя последним («… · ID: 0f1e…», владелец 27.11.2026: «так же в отображение и id водителя»):
+    только телефону, который не показывает его отдельным полем (driver_block, id_in_label)."""
     label = f"{trips_label(trips_total, goal, reached_at)} · {provider_label(provider, source)}"
     park = " ".join(str(park or "").split())
-    return f"{label} · Парк: {park}" if park else label
+    if park:
+        label = f"{label} · Парк: {park}"
+    driver_id = clean_account_id(driver_id)
+    return f"{label} · ID: {driver_id}" if driver_id else label
 
 
-def driver_block(trips_total, goal, reached_at, provider, source, city="", park=""):
+def driver_block(trips_total, goal, reached_at, provider, source, city="", park="", driver_id="",
+                 id_in_label=True):
     """Блок driver для телефона (тот же, что у Тез: label, profile_url, city, registered, registration_label).
-    Ссылки в админку нет: кабинета Fleet у операторов нет. Номера нет."""
-    return {"label": driver_label(trips_total, goal, reached_at, provider, source, park=park),
+    Ссылки в админку нет: кабинета Fleet у операторов нет. Номера нет. driver_id — ID водителя (32 hex): телефон
+    3.22.67+ показывает его отдельной строкой с копированием (id_in_label=False — в label его тогда нет), старый —
+    в конце label."""
+    driver_id = clean_account_id(driver_id)
+    return {"label": driver_label(trips_total, goal, reached_at, provider, source, park=park,
+                                  driver_id=driver_id if id_in_label else ""),
             "profile_url": "",
             "city": (city or "").strip(),
             "registered": None,
-            "registration_label": ""}
+            "registration_label": "",
+            "driver_id": driver_id}
 
 
 def fleet_url(driver_id, park_id):

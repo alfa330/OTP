@@ -37,6 +37,12 @@ import {
     subtypesToggleLabel,
     toEditable,
     validateOutcomes,
+    OUTCOME_GROUPS_MAX,
+    mainGroupKey,
+    newGroupKey,
+    outcomeGroupOf,
+    serializeGroups,
+    toEditableGroups,
 } from '../src/components/dial_list/outcomeFormat.js';
 
 const REFUSAL = { id: 'o-1', name: 'Отказ', color: '#FF3B30' };
@@ -390,7 +396,108 @@ test('«в счёт попыток» (24.11.2026): ключ — только к�
     items[0].requeue_counts = false;
     assert.notEqual(outcomesSnapshot(items), saved);
     const panel = readFileSync(new URL('../src/components/dial_list/DialListOutcomesPanel.jsx', import.meta.url), 'utf8');
-    assert.match(panel, /\{!dueKinds && 'requeue_counts' in o && !!o\.requeue && \(/);
+    // drivesDial — итог главной вкладки (вкладки итогов, 27.11.2026); без вкладок — любой итог.
+    assert.match(panel, /\{drivesDial && !dueKinds && 'requeue_counts' in o && !!o\.requeue && \(/);
     assert.match(panel, /onChange=\{\(v\) => patch\(idx, \{ requeue_counts: v \}\)\}/);
     assert.match(panel, /в счёт попыток/);
+});
+
+/* Вкладки итогов (владелец 27.11.2026, «Активация водителей»): у звонка три цели — вкладки «Поездки», «Провайдер
+   ЭДО», «Акции». Вкладки — содержимое справочника: они в снимке «сохранено», в запросе и в проверке; у отдела без
+   вкладок запрос прежний до байта. */
+const TABS = [
+    { key: 'trips', name: 'Поездки', required: true },
+    { key: 'provider', name: 'Провайдер ЭДО', required: true },
+    { key: 'promo', name: 'Акции', required: true },
+];
+const TAB_OUTCOMES = [
+    { id: 'o-1', name: 'Отказ', color: '#FF3B30', requeue: false, is_active: true, group: 'trips', subtypes: [] },
+    { id: 'o-2', name: 'Перейдёт на Sapar', color: '#007AFF', requeue: false, is_active: true, group: 'provider', subtypes: [] },
+    { id: 'o-3', name: 'Отказ', color: '#FF3B30', requeue: false, is_active: true, group: 'promo', subtypes: [] },
+];
+
+test('вкладки: из ответа сервера, старый сервер — null, главная — первая, новый ключ — свободный', () => {
+    assert.equal(toEditableGroups(undefined), null);
+    assert.deepEqual(toEditableGroups([]), []);
+    assert.deepEqual(toEditableGroups([{ key: 'trips', name: 'Поездки' }, { key: 'promo', name: 'Акции', required: false }, 'x']),
+        [{ key: 'trips', name: 'Поездки', required: true }, { key: 'promo', name: 'Акции', required: false }]);
+    assert.equal(mainGroupKey(TABS), 'trips');
+    assert.equal(mainGroupKey([]), '');
+    assert.equal(newGroupKey(TABS), 'tab2');
+    assert.equal(newGroupKey([...TABS, { key: 'tab2', name: 'x' }]), 'tab3');
+    // Итог без вкладки или с исчезнувшей — на главной.
+    assert.equal(outcomeGroupOf({ group: 'promo' }, TABS), 'promo');
+    assert.equal(outcomeGroupOf({}, TABS), 'trips');
+    assert.equal(outcomeGroupOf({ group: 'gone' }, TABS), 'trips');
+    assert.deepEqual(serializeGroups([{ key: 'promo', name: '  Акции  ', required: false }]),
+        [{ key: 'promo', name: 'Акции', required: false }]);
+});
+
+test('вкладки: группа у каждого итога в запросе; без вкладок — ключа нет, запрос прежний', () => {
+    const items = toEditable(TAB_OUTCOMES);
+    assert.deepEqual(serializeOutcomes(items, { dueKinds: true, groups: TABS }).map((o) => o.group),
+        ['trips', 'provider', 'promo']);
+    assert.equal('group' in serializeOutcomes(items, { dueKinds: true, groups: [] })[0], false);
+    assert.equal('group' in serializeOutcomes(items, { dueKinds: true })[0], false);
+    // Снимок без вкладок — прежний (строка списка), с вкладками — и правка вкладки «изменено».
+    assert.equal(outcomesSnapshot(items, { dueKinds: true, groups: [] }), outcomesSnapshot(items, { dueKinds: true }));
+    const saved = outcomesSnapshot(items, { dueKinds: true, groups: TABS });
+    assert.equal(outcomesSnapshot(toEditable(TAB_OUTCOMES), { dueKinds: true, groups: TABS }), saved);
+    const renamed = TABS.map((g) => (g.key === 'promo' ? { ...g, name: 'Акции месяца' } : g));
+    assert.notEqual(outcomesSnapshot(items, { dueKinds: true, groups: renamed }), saved);
+    const optional = TABS.map((g) => (g.key === 'promo' ? { ...g, required: false } : g));
+    assert.notEqual(outcomesSnapshot(items, { dueKinds: true, groups: optional }), saved);
+    const moved = items.map((o) => (o.id === 'o-2' ? { ...o, group: 'promo' } : o));
+    assert.notEqual(outcomesSnapshot(moved, { dueKinds: true, groups: TABS }), saved);
+});
+
+test('вкладки: проверка — повтор названия внутри вкладки, пустая обязательная и главная, ключи и название', () => {
+    const payload = (items, groups = TABS) => serializeOutcomes(toEditable(items), { dueKinds: true, groups });
+    // «Отказ» на «Поездках» и на «Акциях» — можно.
+    assert.equal(validateOutcomes(payload(TAB_OUTCOMES), TABS), '');
+    const twice = [...TAB_OUTCOMES, { id: 'new-1', name: 'отказ', color: '#FF3B30', group: 'promo', subtypes: [] }];
+    assert.equal(validateOutcomes(payload(twice), TABS), 'Итог «отказ» повторяется');
+    // Без вкладок те же два «Отказа» — повтор, как и было.
+    assert.equal(validateOutcomes(serializeOutcomes(toEditable(TAB_OUTCOMES))), 'Итог «Отказ» повторяется');
+    const noPromo = TAB_OUTCOMES.map((o) => (o.group === 'promo' ? { ...o, is_active: false } : o));
+    assert.equal(validateOutcomes(payload(noPromo), TABS), 'На вкладке «Акции» нет ни одного включённого итога');
+    const optional = TABS.map((g) => (g.key === 'promo' ? { ...g, required: false } : g));
+    assert.equal(validateOutcomes(payload(noPromo, optional), optional), '');
+    // Главная без включённых — отказ, даже «необязательная».
+    const noMain = TAB_OUTCOMES.map((o) => (o.group === 'trips' ? { ...o, is_active: false } : o));
+    const allOptional = TABS.map((g) => ({ ...g, required: false }));
+    assert.equal(validateOutcomes(payload(noMain, allOptional), allOptional),
+        'На вкладке «Поездки» нет ни одного включённого итога');
+    const unnamed = TABS.map((g) => (g.key === 'promo' ? { ...g, name: '  ' } : g));
+    assert.equal(validateOutcomes(payload(TAB_OUTCOMES, unnamed), unnamed), 'У вкладки итогов должно быть название');
+    const badKey = [...TABS, { key: 'Акции', name: 'x', required: false }];
+    assert.equal(validateOutcomes(payload(TAB_OUTCOMES, badKey), badKey), 'Ключ вкладки — латиница и цифры, с буквы');
+    const many = Array.from({ length: OUTCOME_GROUPS_MAX + 1 }, (_, n) => ({ key: `t${n}`, name: `В${n}`, required: false }));
+    assert.equal(validateOutcomes([], many), `Вкладок итогов не больше ${OUTCOME_GROUPS_MAX}`);
+});
+
+test('вкладки: новый итог получает id своего двойника по вкладке и названию', () => {
+    const sent = [
+        { id: 'new-a', name: 'Не дозвонились', group: 'trips', subtypes: [] },
+        { id: 'new-b', name: 'Не дозвонились', group: 'promo', subtypes: [] },
+    ];
+    const server = [
+        { id: 'r-1', name: 'Не дозвонились', group: 'trips', subtypes: [] },
+        { id: 'r-2', name: 'Не дозвонились', group: 'promo', subtypes: [] },
+    ];
+    assert.deepEqual(savedIdMap(sent, server, TABS), { 'new-a': 'r-1', 'new-b': 'r-2' });
+    // Без вкладок — по названию, как было.
+    assert.deepEqual(savedIdMap([{ id: 'new-a', name: 'Отказ', subtypes: [] }], [{ id: 'r-1', name: 'отказ', subtypes: [] }]),
+        { 'new-a': 'r-1' });
+});
+
+test('вкладки в редакторе: полоса вкладок, «обязательна», перенос итога, «перезвонить» и дата — у главной', () => {
+    const panel = readFileSync(new URL('../src/components/dial_list/DialListOutcomesPanel.jsx', import.meta.url), 'utf8');
+    assert.match(panel, /ariaLabel="Вкладки итогов"/);
+    assert.match(panel, /обязательна/);
+    assert.match(panel, /title="Перенести итог на другую вкладку"/);
+    assert.match(panel, /\{dueKinds && drivesDial && \(/);
+    assert.match(panel, /\{drivesDial && \(\s*<label className="flex shrink-0 items-center gap-2 text-\[12px\] text-slate-600" title=\{requeueTitle\}>/);
+    // Вкладки уходят только у отдела с вкладками.
+    assert.match(panel, /\.\.\.\(tabsNow \? \{ groups: serializeGroups\(gs\) \} : \{\}\)/);
 });

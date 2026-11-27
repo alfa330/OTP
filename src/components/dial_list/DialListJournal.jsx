@@ -601,6 +601,7 @@ const AttemptItem = ({ attempt, recording, onRecording, last = false, tez = fals
     // момент, звонок — разговор, и подпись была бы неправдой (attemptHints.js).
     const autoHint = autoHangupHint(attempt);
     const rec = recording || {};
+    const groupOutcomes = Array.isArray(attempt.group_outcomes) ? attempt.group_outcomes.filter((g) => g?.name) : [];
     return (
         <li className="relative flex gap-3 py-3">
             <TimelineLine last={last} />
@@ -635,7 +636,22 @@ const AttemptItem = ({ attempt, recording, onRecording, last = false, tez = fals
                     {cancelledHint}
                     {autoHint}
                 </div>
-                {attempt.outcome && <OutcomeBadge outcome={attempt.outcome} className="mt-2" />}
+                {attempt.outcome && !groupOutcomes.length && <OutcomeBadge outcome={attempt.outcome} className="mt-2" />}
+                {groupOutcomes.length > 0 && (
+                    // Вкладки итогов (27.11.2026): итог главной вкладки и итоги остальных — подписью вкладки.
+                    <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+                        {attempt.outcome && <OutcomeBadge outcome={attempt.outcome} />}
+                        {groupOutcomes.map((g) => (
+                            <span key={g.group} className="inline-flex min-w-0 items-center gap-1.5 text-[12px] text-slate-500">
+                                {g.group_name}
+                                <OutcomeBadge
+                                    small
+                                    outcome={{ name: g.name, color: g.color, subtype: g.subtype ? { name: g.subtype } : null }}
+                                />
+                            </span>
+                        ))}
+                    </div>
+                )}
                 {tez && attemptDueText(attempt) && (
                     <div className="mt-1.5 flex items-center gap-1.5 text-[12.5px] text-slate-600">
                         <CalendarClock size={13} className="shrink-0 text-slate-400" />

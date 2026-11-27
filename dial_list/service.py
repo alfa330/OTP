@@ -275,6 +275,12 @@ DIRECT_DIAL_MIN_VERSION = (3, 22, 46)
 # снова через АТС, кнопки QR в телефоне нет (читается на каждый запрос).
 REMOTE_DIRECT_MIN_VERSION = (3, 22, 66)
 REMOTE_DIRECT_QR_ENV = "DIAL_REMOTE_DIRECT_QR"
+# Вкладки итогов в окне итога (27.11.2026, «Активация водителей»): телефон с этой версии рисует вкладки и шлёт итоги
+# остальных вкладок (group_outcomes). Старому — только итоги главной вкладки, как было.
+OUTCOME_GROUPS_MIN_VERSION = (3, 22, 67)
+# ID водителя отдельной строкой с копированием (27.11.2026, «Активация водителей»): с этой версии телефон показывает
+# driver.driver_id сам, и в driver.label его нет; старому — в конце label («… · ID: 0f1e…»).
+DRIVER_ID_MIN_VERSION = (3, 22, 67)
 # Телефон, который на 403 qr_locked рисует QR своей сессии (замок Тез до QR, владелец 06.11.2026). Отказ
 # получают все версии — старой сервер лишь пишет «обновите телефон»: показать QR ей нечем.
 QR_LOCK_MIN_VERSION = (3, 22, 47)
@@ -829,15 +835,34 @@ DEFAULT_TEZ_OUTCOMES = (
     ("Неверный номер", "#8E8E93", False, ""),
     ("Уже работает", "#5856D6", False, ""),
 )
-# Стартовый набор итогов «Активации водителей»: «Будет ездить» — с датой, когда выйдет на линию (дожим),
-# «Перейдёт на Sapar» — вернуть в список (поездки ещё добирать, переход проверит прогон по карточке Fleet).
+# Вкладки итогов «Активации водителей» (владелец 27.11.2026: «у звонка 3 цели, узнать будет ли водитель делать заказы,
+# будет ли он переводить провайдер на правильный и рассказали ли ему про акции, лучше чтобы выходили табы»; все три
+# обязательны, у итогов любой вкладки — подтипы). (ключ, название, обязательна). Первая — главная: её итог ведёт обзвон.
+OUTCOME_GROUP_MAIN = "trips"
+ACTIVATION_OUTCOME_GROUPS = (
+    (OUTCOME_GROUP_MAIN, "Поездки", True),
+    ("provider", "Провайдер ЭДО", True),
+    ("promo", "Акции", True),
+)
+OUTCOME_GROUPS_MAX = 6
+OUTCOME_GROUP_NAME_MAX = 32
+OUTCOME_GROUP_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# Стартовый набор итогов «Активации водителей» (имя, цвет, вернуть в список, дата, вкладка): «Будет ездить» — с датой,
+# когда выйдет на линию (дожим), «Перезвонить» — с датой и временем. Итоги «Провайдера» и «Акций» обзвон не ведут.
 DEFAULT_ACTIVATION_OUTCOMES = (
-    ("Будет ездить", "#34C759", True, DUE_ONLINE),
-    ("Перейдёт на Sapar", "#007AFF", True, ""),
-    ("Перезвонить", "#FF9F0A", True, DUE_CALLBACK),
-    ("Отказ", "#FF3B30", False, ""),
-    ("Неверный номер", "#8E8E93", False, ""),
-    ("Работает в другом парке", "#5856D6", False, ""),
+    ("Будет ездить", "#34C759", True, DUE_ONLINE, OUTCOME_GROUP_MAIN),
+    ("Перезвонить", "#FF9F0A", True, DUE_CALLBACK, OUTCOME_GROUP_MAIN),
+    ("Отказ", "#FF3B30", False, "", OUTCOME_GROUP_MAIN),
+    ("Неверный номер", "#8E8E93", False, "", OUTCOME_GROUP_MAIN),
+    ("Работает в другом парке", "#5856D6", False, "", OUTCOME_GROUP_MAIN),
+    ("Перейдёт на Sapar", "#007AFF", False, "", "provider"),
+    ("Уже на Sapar", "#34C759", False, "", "provider"),
+    ("Подумает", "#FF9F0A", False, "", "provider"),
+    ("Отказался переходить", "#FF3B30", False, "", "provider"),
+    ("Не обсуждали", "#8E8E93", False, "", "provider"),
+    ("Рассказали", "#34C759", False, "", "promo"),
+    ("Не интересно", "#FF3B30", False, "", "promo"),
+    ("Не успели рассказать", "#8E8E93", False, "", "promo"),
 )
 # Пределы настроек автообзвона.
 CALL_INTERVAL_MAX_SEC = 600
@@ -1457,6 +1482,48 @@ def phone_dials_direct_remote(value):
     return version is not None and version >= REMOTE_DIRECT_MIN_VERSION
 
 
+def phone_shows_outcome_groups(value):
+    """Телефон рисует вкладки итогов — версия в заголовке не ниже OUTCOME_GROUPS_MIN_VERSION (3.22.67): ему итоги всех
+    вкладок с group и outcome_groups; старому — только итоги главной вкладки (get_state)."""
+    version = parse_phone_version(value)
+    return version is not None and version >= OUTCOME_GROUPS_MIN_VERSION
+
+
+def phone_shows_driver_id(value):
+    """Телефон показывает ID водителя «Активации» отдельной строкой — версия не ниже DRIVER_ID_MIN_VERSION (3.22.67);
+    старому ID дописывается в конец driver.label."""
+    version = parse_phone_version(value)
+    return version is not None and version >= DRIVER_ID_MIN_VERSION
+
+
+def clean_outcome_groups(raw):
+    """Вкладки итогов отдела из базы или редактора → [{key, name, required}] по порядку; мусор — пропуск (из базы) —
+    поэтому редактор проверяет строже, в save_outcomes. None, не список — []."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    groups, seen = [], set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip().lower()
+        name = " ".join(str(item.get("name") or "").split())[:OUTCOME_GROUP_NAME_MAX]
+        if not OUTCOME_GROUP_KEY_RE.match(key) or key in seen or not name:
+            continue
+        seen.add(key)
+        groups.append({"key": key, "name": name, "required": item.get("required", True) is not False})
+    return groups[:OUTCOME_GROUPS_MAX]
+
+
+def main_outcome_group(groups):
+    """Ключ главной вкладки (первой) или '' — у отдела вкладок нет."""
+    return groups[0]["key"] if groups else ""
+
+
 def remote_direct_qr_enabled():
     """Рубильник прямого звонка удалённого КЦ по QR (REMOTE_DIRECT_QR_ENV, по умолчанию включён)."""
     return (os.getenv(REMOTE_DIRECT_QR_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
@@ -1855,6 +1922,27 @@ def _row_label(row_number):
     """Номер строки файла для руководителя: число — строка Excel; текст — уже с именем листа («Более 50»: 3 —
     activation.parse_activation_file, файл с несколькими листами)."""
     return row_number if isinstance(row_number, str) else int(row_number)
+
+
+def _group_outcomes_of(raw, groups):
+    """Итоги остальных вкладок звонка (json из lead_card) → [{group, group_name, id, name, color, subtype}] по порядку
+    вкладок отдела (вкладки итогов, 27.11.2026)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = []
+    order = {g["key"]: i for i, g in enumerate(groups)}
+    names = {g["key"]: g["name"] for g in groups}
+    items = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("group") or "")
+        items.append({"group": key, "group_name": names.get(key, key), "id": _sid(item.get("id")),
+                      "name": item.get("name") or "", "color": item.get("color") or "#8E8E93",
+                      "subtype": item.get("subtype") or ""})
+    return sorted(items, key=lambda x: order.get(x["group"], len(order)))
 
 
 def _subtypes_from_json(value):
@@ -3209,7 +3297,7 @@ class DialListService:
                        caller_id_for_employee, updated_at, binotel_company, active_period,
                        profile, auto_dial, call_interval_sec, wrapup_sec, retry_schedule_min,
                        callback_own_minutes, followup_after_min, wa_license_id, wa_templates,
-                       repeat_share_pct, trips_goal, host_department_id
+                       repeat_share_pct, trips_goal, host_department_id, outcome_groups
                 FROM dial_list_department_settings WHERE department_id = %s
             """, (int(department_id),))
             row = cur.fetchone()
@@ -3257,6 +3345,8 @@ class DialListService:
         # Режим линий (26.11.2026): отдел без своих линий работает на линиях этого отдела; None — свои линии.
         host = row[19] if row and len(row) > 19 else None
         settings["host_department_id"] = int(host) if host is not None else None
+        # Вкладки итогов (27.11.2026): [{key, name, required}] по порядку; [] — справочник один.
+        settings["outcome_groups"] = clean_outcome_groups(row[20] if row and len(row) > 20 else None)
         return settings
 
     def save_department_settings(self, department_id, payload, changed_by=None):
@@ -3414,7 +3504,10 @@ class DialListService:
                     SELECT EXISTS (SELECT 1 FROM dial_list_attempts t
                                    JOIN dial_list_outcomes o ON o.id = t.outcome_id
                                    WHERE o.department_id = %s)
-                """, (int(department_id),))
+                        OR EXISTS (SELECT 1 FROM dial_list_attempt_outcomes ao
+                                   JOIN dial_list_outcomes o ON o.id = ao.outcome_id
+                                   WHERE o.department_id = %s)
+                """, (int(department_id), int(department_id)))
                 if not cur.fetchone()[0]:
                     cur.execute("DELETE FROM dial_list_outcomes WHERE department_id = %s", (int(department_id),))
                     self._seed_outcomes(cur, department_id, profile=profile)
@@ -4251,15 +4344,18 @@ class DialListService:
         # due_kind (15.10.2026) — последней колонкой: дата с итогом у отдела автообзвона Тез.
         cur.execute("""
             SELECT id, name, color, position, requeue, is_active,
-                   (SELECT COUNT(*) FROM dial_list_attempts t WHERE t.outcome_id = o.id) AS used,
+                   (SELECT COUNT(*) FROM dial_list_attempts t WHERE t.outcome_id = o.id)
+                   + (SELECT COUNT(*) FROM dial_list_attempt_outcomes ao WHERE ao.outcome_id = o.id) AS used,
                    (SELECT COALESCE(json_agg(json_build_object(
                                'id', s.id, 'name', s.name, 'position', s.position, 'is_active', s.is_active,
                                'used', (SELECT COUNT(*) FROM dial_list_attempts t2
-                                        WHERE t2.outcome_subtype_id = s.id))
+                                        WHERE t2.outcome_subtype_id = s.id)
+                                       + (SELECT COUNT(*) FROM dial_list_attempt_outcomes ao2
+                                          WHERE ao2.outcome_subtype_id = s.id))
                            ORDER BY s.is_active DESC, s.position, s.created_at), '[]'::json)
                     FROM dial_list_outcome_subtypes s
                     WHERE s.outcome_id = o.id {sub_active}) AS subtypes,
-                   due_kind, requeue_counts
+                   due_kind, requeue_counts, group_key
             FROM dial_list_outcomes o
             WHERE department_id = %s {active}
             ORDER BY is_active DESC, position, created_at
@@ -4277,7 +4373,9 @@ class DialListService:
                  "subtypes": _subtypes_from_json(r[7]),
                  "due_kind": ((r[8] if len(r) > 8 else "") or ""),
                  # «Перезвонить» в счёт попыток (24.11.2026): возврат без обнуления попыток.
-                 "requeue_counts": bool(r[9]) if len(r) > 9 else False} for r in rows]
+                 "requeue_counts": bool(r[9]) if len(r) > 9 else False,
+                 # Вкладка итога (27.11.2026): '' — у отдела вкладок нет.
+                 "group": ((r[10] if len(r) > 10 else "") or "")} for r in rows]
 
     def _seed_outcomes(self, cur, department_id, profile=None):
         """Стартовый набор итогов отдела. У отдела автообзвона Тез — свой, с датами (DEFAULT_TEZ_OUTCOMES);
@@ -4286,11 +4384,26 @@ class DialListService:
             profile = self._department_profile(cur, department_id)
         if profile in AUTODIAL_PROFILES:
             seed = DEFAULT_TEZ_OUTCOMES if profile == PROFILE_TEZ else DEFAULT_ACTIVATION_OUTCOMES
-            for position, (name, color, requeue, due_kind) in enumerate(seed, start=1):
+            for position, item in enumerate(seed, start=1):
+                name, color, requeue, due_kind = item[:4]
                 cur.execute("""
-                    INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue, due_kind)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (int(department_id), name, color, position, requeue, due_kind))
+                    INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue, due_kind, group_key)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (int(department_id), name, color, position, requeue, due_kind, item[4] if len(item) > 4 else ""))
+            if profile == PROFILE_ACTIVATION:
+                # Вкладки итогов (27.11.2026): «Поездки», «Провайдер ЭДО», «Акции» — у отдела, где их ещё не задали.
+                cur.execute("""
+                    UPDATE dial_list_department_settings SET outcome_groups = %s::jsonb
+                    WHERE department_id = %s AND (outcome_groups IS NULL OR outcome_groups = '[]'::jsonb)
+                """, (json.dumps([{"key": k, "name": n, "required": r} for k, n, r in ACTIVATION_OUTCOME_GROUPS],
+                                 ensure_ascii=False), int(department_id)))
+            else:
+                # Набор Тез — без вкладок: прежние вкладки (отдел был «Активацией») спрятали бы от старого телефона
+                # все итоги — их вкладка '' не главная.
+                cur.execute("""
+                    UPDATE dial_list_department_settings SET outcome_groups = NULL
+                    WHERE department_id = %s AND outcome_groups IS NOT NULL
+                """, (int(department_id),))
             log.info("dial_list: отделу %s заведён стартовый набор итогов профиля %s", department_id, profile)
             return
         for position, (name, color, requeue) in enumerate(DEFAULT_OUTCOMES, start=1):
@@ -4322,12 +4435,23 @@ class DialListService:
             SELECT o.id::text, o.name, o.color, o.position, o.requeue, o.is_active, o.due_kind, o.requeue_counts,
                    COALESCE((SELECT json_agg(json_build_array(s.id::text, s.name, s.position, s.is_active)
                                              ORDER BY s.id)
-                             FROM dial_list_outcome_subtypes s WHERE s.outcome_id = o.id), '[]'::json)
+                             FROM dial_list_outcome_subtypes s WHERE s.outcome_id = o.id), '[]'::json),
+                   o.group_key
             FROM dial_list_outcomes o
             WHERE o.department_id = %s
             ORDER BY o.id
         """, (int(department_id),))
-        rows = [list(r) for r in cur.fetchall()]
+        fetched = cur.fetchall()
+        # Вкладки итогов (27.11.2026) — тоже содержимое справочника: их правка меняет версию. У отдела без вкладок
+        # отпечаток прежний до буквы: открытые редакторы удалённого КЦ и Тез не получат «справочник уже другой».
+        cur.execute("SELECT outcome_groups FROM dial_list_department_settings WHERE department_id = %s",
+                    (int(department_id),))
+        groups_row = cur.fetchone()
+        groups = clean_outcome_groups(groups_row[0] if groups_row else None)
+        if groups or any(len(r) > 9 and r[9] for r in fetched):
+            rows = [list(r) for r in fetched] + [["groups", groups]]
+        else:
+            rows = [list(r[:9]) for r in fetched]
         digest = hashlib.sha1(json.dumps(rows, ensure_ascii=False, default=str, sort_keys=True).encode("utf-8"))
         return digest.hexdigest()[:16]
 
@@ -4398,7 +4522,63 @@ class DialListService:
             raise DialListError(f"Тип у итога «{outcome_name}» повторяется с сохранённым "
                                 f"в другой вкладке — обновите страницу")
 
-    def save_outcomes(self, department_id, items, changed_by=None, version=None, with_version=False):
+    @staticmethod
+    def _clean_groups_input(raw):
+        """Вкладки итогов из редактора — строго: список [{key, name, required}], ключи — латиница, без повторов.
+        [] — вкладок у отдела больше нет."""
+        if not isinstance(raw, list):
+            raise DialListError("groups: ожидается список вкладок {key, name, required}")
+        if len(raw) > OUTCOME_GROUPS_MAX:
+            raise DialListError(f"Вкладок итогов не больше {OUTCOME_GROUPS_MAX}")
+        cleaned, seen = [], set()
+        for item in raw:
+            if not isinstance(item, dict):
+                raise DialListError("Каждая вкладка — объект {key, name, required}")
+            key = str(item.get("key") or "").strip().lower()
+            if not OUTCOME_GROUP_KEY_RE.match(key):
+                raise DialListError("Ключ вкладки — латиница и цифры, с буквы")
+            if key in seen:
+                raise DialListError("Вкладки итогов повторяются")
+            seen.add(key)
+            name = " ".join(str(item.get("name") or "").split())[:OUTCOME_GROUP_NAME_MAX]
+            if not name:
+                raise DialListError("У вкладки итогов должно быть название")
+            cleaned.append({"key": key, "name": name, "required": item.get("required", True) is not False})
+        return cleaned
+
+    @staticmethod
+    def _resolve_outcome_groups(cur, department_id, cleaned, stored_group, new_groups):
+        """Вкладка каждого итога из редактора (c["group"] — так и уйдёт в базу) и вкладки отдела (new_groups — в базу,
+        если прислали; None — прежние). Вкладки итога не прислали — прежняя, у нового — главная. Проверки: такая вкладка
+        у отдела есть; на главной и на каждой обязательной — хотя бы один включённый итог."""
+        if new_groups is None:
+            cur.execute("SELECT outcome_groups FROM dial_list_department_settings WHERE department_id = %s",
+                        (department_id,))
+            row = cur.fetchone()
+            groups = clean_outcome_groups(row[0] if row else None)
+        else:
+            groups = new_groups
+            cur.execute("UPDATE dial_list_department_settings SET outcome_groups = %s::jsonb WHERE department_id = %s",
+                        (json.dumps(groups, ensure_ascii=False) if groups else None, department_id))
+        keys = {g["key"] for g in groups}
+        main = main_outcome_group(groups)
+        for c in cleaned:
+            if not groups:
+                c["group"] = ""
+                continue
+            if c["group"] is None:
+                c["group"] = stored_group.get(c["id"], main) if c["id"] else main
+                if c["group"] not in keys:
+                    c["group"] = main
+            if c["group"] not in keys:
+                raise DialListError(f"Итог «{c['name']}»: такой вкладки итогов у отдела нет")
+        for g in groups:
+            if (g["required"] or g["key"] == main) and not any(
+                    c["is_active"] and c["group"] == g["key"] for c in cleaned):
+                raise DialListError(f"На вкладке «{g['name']}» нет ни одного включённого итога")
+
+    def save_outcomes(self, department_id, items, changed_by=None, version=None, with_version=False,
+                      groups=VALUE_NOT_SENT):
         """Полный список от редактора: с id — обновить, без id — добавить, отсутствующие
         в списке — выключить (не удалить). Порядок — как в списке.
 
@@ -4408,12 +4588,17 @@ class DialListService:
 
         version — версия справочника, с которой редактор начинал (20.11.2026, редактор сохраняет сам по
         каждой правке): справочник уже другой — 409 kind 'stale', ничего не меняется. None — старая
-        сборка сайта, проверки нет. with_version — ответ (итоги, новая версия)."""
+        сборка сайта, проверки нет. with_version — ответ (итоги, новая версия).
+
+        Вкладки итогов (27.11.2026): groups — вкладки отдела по порядку (не прислано — прежние), group у итога —
+        его вкладка (не прислано — прежняя, новый итог — на главную). На каждой обязательной вкладке и на главной —
+        хотя бы один включённый итог: иначе оператору нечего выбрать. Названия не повторяются внутри вкладки."""
         department_id = int(department_id)
         if not isinstance(items, list):
             raise DialListError("items: ожидается список итогов")
         if len(items) > OUTCOMES_MAX:
             raise DialListError(f"Итогов не больше {OUTCOMES_MAX}")
+        new_groups = None if groups is VALUE_NOT_SENT else self._clean_groups_input(groups)
         cleaned = []
         seen_names = set()
         for raw in items:
@@ -4422,9 +4607,14 @@ class DialListService:
             name = str(raw.get("name") or "").strip()[:OUTCOME_NAME_MAX]
             if not name:
                 raise DialListError("У итога должно быть название")
-            if name.lower() in seen_names:
+            group = str(raw.get("group") or "").strip().lower() if "group" in raw else None
+            # Повтор названия — внутри вкладки. До базы ловим те, чья вкладка уже известна: присланная или, у нового
+            # итога без неё, главная; вкладка прежнего итога без ключа group — из базы, их проверка — после неё.
+            early = (group, name.lower()) if group is not None else None if raw.get("id") else ("", name.lower())
+            if early is not None and early in seen_names:
                 raise DialListError(f"Итог «{name}» повторяется")
-            seen_names.add(name.lower())
+            if early is not None:
+                seen_names.add(early)
             color = str(raw.get("color") or "#8E8E93").strip().upper()
             if not OUTCOME_COLOR_RE.match(color):
                 raise DialListError(f"Цвет итога «{name}»: ожидается #RRGGBB")
@@ -4444,6 +4634,7 @@ class DialListService:
                 "is_active": raw.get("is_active", True) is not False,
                 "subtypes": self._clean_subtypes(name, raw["subtypes"]) if "subtypes" in raw else None,
                 "due_kind": due_kind,
+                "group": group,
             })
         if not any(c["is_active"] for c in cleaned):
             raise DialListError("Хотя бы один итог должен быть включён")
@@ -4451,11 +4642,18 @@ class DialListService:
             # Строки итогов отдела — под замком до конца сохранения: два сохранения справочника идут друг за
             # другом, и проверка версии ниже видит уже записанное первым. FOR NO KEY UPDATE не мешает
             # телефонам ставить итог попытке (проверке внешнего ключа хватает KEY SHARE).
-            cur.execute("SELECT id FROM dial_list_outcomes WHERE department_id = %s FOR NO KEY UPDATE",
+            cur.execute("SELECT id, group_key FROM dial_list_outcomes WHERE department_id = %s FOR NO KEY UPDATE",
                         (department_id,))
-            existing = {str(r[0]) for r in cur.fetchall()}
+            stored_group = {str(r[0]): (r[1] if len(r) > 1 else "") or "" for r in cur.fetchall()}
+            existing = set(stored_group)
             if version is not None and str(version) != self._outcomes_version(cur, department_id):
                 raise DialListError(OUTCOMES_STALE, 409, kind="stale")
+            self._resolve_outcome_groups(cur, department_id, cleaned, stored_group, new_groups)
+            in_group = set()
+            for c in cleaned:
+                if (c["group"], c["name"].lower()) in in_group:
+                    raise DialListError(f"Итог «{c['name']}» повторяется")
+                in_group.add((c["group"], c["name"].lower()))
             kept = set()
             for position, c in enumerate(cleaned, start=1):
                 if c["id"] and c["id"] in existing:
@@ -4467,18 +4665,19 @@ class DialListService:
                             due_kind = COALESCE(%s, due_kind),
                             requeue = %s OR COALESCE(%s, due_kind) <> '',
                             requeue_counts = COALESCE(%s, requeue_counts),
+                            group_key = %s,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s AND department_id = %s
                     """, (c["name"], c["color"], position, c["is_active"], c["due_kind"], c["requeue"],
-                          c["due_kind"], c["requeue_counts"], c["id"], department_id))
+                          c["due_kind"], c["requeue_counts"], c["group"], c["id"], department_id))
                     outcome_id = c["id"]
                 else:
                     cur.execute("""
                         INSERT INTO dial_list_outcomes (department_id, name, color, position, requeue, is_active,
-                                                        due_kind, requeue_counts)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                                                        due_kind, requeue_counts, group_key)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                     """, (department_id, c["name"], c["color"], position, c["requeue"], c["is_active"],
-                          c["due_kind"] or "", bool(c["requeue_counts"])))
+                          c["due_kind"] or "", bool(c["requeue_counts"]), c["group"]))
                     outcome_id = str(cur.fetchone()[0])
                 kept.add(outcome_id)
                 if c["subtypes"] is not None:
@@ -4555,8 +4754,62 @@ class DialListService:
             raise DialListError(
                 f"Сначала укажите итог звонка: {pending['full_name'] or 'предыдущий разговор'}", 409)
 
+    @staticmethod
+    def _clean_group_outcomes(cur, department_id, groups, raw):
+        """Итоги остальных вкладок от телефона (group_outcomes: [{outcome_id, subtype_id?}]) → [(вкладка, итог, тип)].
+        Итог — включённый, этого отдела и НЕ главной вкладки (главный — outcome_id); на вкладке — один; у итога с типами
+        тип обязателен; на каждой обязательной вкладке — итог. Ошибки — 400 словами, их покажет телефон."""
+        if not isinstance(raw, list):
+            raise DialListError("group_outcomes: ожидается список итогов вкладок", 400)
+        main = main_outcome_group(groups)
+        names = {g["key"]: g["name"] for g in groups}
+        picked = {}
+        for item in raw[:OUTCOME_GROUPS_MAX * 2]:
+            if not isinstance(item, dict):
+                raise DialListError("group_outcomes: каждый итог — объект {outcome_id, subtype_id?}", 400)
+            try:
+                extra_id = str(uuid.UUID(str(item.get("outcome_id") or "")))
+            except (ValueError, AttributeError, TypeError):
+                raise DialListError("Такого итога нет — обновите список", 400)
+            cur.execute("""
+                SELECT id, name, group_key FROM dial_list_outcomes
+                WHERE id = %s AND department_id = %s AND is_active
+            """, (extra_id, int(department_id)))
+            row = cur.fetchone()
+            if not row:
+                raise DialListError("Такого итога нет — обновите список", 400)
+            group = (row[2] if len(row) > 2 else "") or ""
+            if group == main or group not in names:
+                raise DialListError(f"Итог «{row[1]}» — с другой вкладки, обновите список", 400)
+            if group in picked:
+                raise DialListError(f"На вкладке «{names[group]}» выберите один итог", 400)
+            subtype_text = str(item.get("subtype_id") or "").strip()
+            subtype_id = None
+            if subtype_text:
+                try:
+                    subtype_text = str(uuid.UUID(subtype_text))
+                except (ValueError, AttributeError, TypeError):
+                    raise DialListError("Такого типа итога нет — обновите список", 400)
+                cur.execute("""
+                    SELECT id FROM dial_list_outcome_subtypes
+                    WHERE id = %s AND outcome_id = %s AND department_id = %s AND is_active
+                """, (subtype_text, extra_id, int(department_id)))
+                if not cur.fetchone():
+                    raise DialListError("Такого типа итога нет — обновите список", 400)
+                subtype_id = subtype_text
+            else:
+                cur.execute("SELECT 1 FROM dial_list_outcome_subtypes WHERE outcome_id = %s AND is_active LIMIT 1",
+                            (extra_id,))
+                if cur.fetchone():
+                    raise DialListError(f"Выберите тип итога «{row[1]}» на вкладке «{names[group]}»", 400)
+            picked[group] = (group, extra_id, subtype_id)
+        for g in groups:
+            if g["key"] != main and g["required"] and g["key"] not in picked:
+                raise DialListError(f"Выберите итог на вкладке «{g['name']}»", 400)
+        return list(picked.values())
+
     def set_attempt_outcome(self, user_id, attempt_id, outcome_id, comment="", subtype_id=SUBTYPE_NOT_SENT,
-                            due_at=VALUE_NOT_SENT, offer_ids=VALUE_NOT_SENT):
+                            due_at=VALUE_NOT_SENT, offer_ids=VALUE_NOT_SENT, group_outcomes=VALUE_NOT_SENT):
         """Оператор указал итог разговора (и, возможно, комментарий).
 
         subtype_id — тип итога (29.09.2026). SUBTYPE_NOT_SENT — телефон до типов
@@ -4621,12 +4874,21 @@ class DialListService:
                 raise DialListError("Разговор не подтверждён: итог нужен, только если водитель "
                                     "ответил. Дождитесь исхода от АТС", 409)
             cur.execute("""
-                SELECT id, name, color, requeue, due_kind, requeue_counts FROM dial_list_outcomes
+                SELECT id, name, color, requeue, due_kind, requeue_counts, group_key FROM dial_list_outcomes
                 WHERE id = %s AND department_id = %s AND is_active
             """, (outcome_id, ctx["department_id"]))
             outcome = cur.fetchone()
             if not outcome:
                 raise DialListError("Такого итога нет — обновите список", 400)
+            # Вкладки итогов (27.11.2026): outcome_id — итог ГЛАВНОЙ вкладки (он ведёт обзвон), остальные —
+            # group_outcomes. Проверяем до записи, как и всё ниже.
+            outcome_groups = (ctx.get("settings") or {}).get("outcome_groups") or []
+            if outcome_groups and ((outcome[6] if len(outcome) > 6 else "") or "") != main_outcome_group(outcome_groups):
+                raise DialListError(f"Выберите итог на вкладке «{outcome_groups[0]['name']}»", 400)
+            extra_outcomes = None
+            if outcome_groups and group_outcomes is not VALUE_NOT_SENT:
+                extra_outcomes = self._clean_group_outcomes(cur, ctx["department_id"], outcome_groups,
+                                                            group_outcomes)
             # Автообзвон Тез: срок итога с датой и офферы — проверяем до записи.
             due_kind = (str(outcome[4] or "").strip().lower() if len(outcome) > 4 else "") if tez else ""
             if due_kind and due_at is VALUE_NOT_SENT:
@@ -4671,6 +4933,14 @@ class DialListService:
                     outcome_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
             """, (outcome_id, _sid(subtype[0]) if subtype else None, comment, attempt_id))
+            if extra_outcomes is not None:
+                # Итоги остальных вкладок — целиком заново: повторное сохранение заменяет прежние.
+                cur.execute("DELETE FROM dial_list_attempt_outcomes WHERE attempt_id = %s", (attempt_id,))
+                for group_key, extra_id, extra_subtype in extra_outcomes:
+                    cur.execute("""
+                        INSERT INTO dial_list_attempt_outcomes (attempt_id, group_key, outcome_id, outcome_subtype_id)
+                        VALUES (%s, %s, %s, %s)
+                    """, (attempt_id, group_key, extra_id, extra_subtype))
             if outcome[3] and len(outcome) > 5 and outcome[5]:
                 # «Перезвонить» в счёт попыток (24.11.2026, «Сброс»): лид снова в работе, но попытки не обнуляются —
                 # пока не кончились. Исход от АТС, пришедший раньше, попытку уже засчитал (_touch_lead); пришедший
@@ -5268,6 +5538,7 @@ class DialListService:
         sql = self._JOURNAL_SQL.format(scope="l.id = %(lead_id)s", filters="TRUE", order="created_at")
         tez = is_autodial(settings)
         goal = settings.get("trips_goal") if is_activation(settings) else None
+        groups = settings.get("outcome_groups") or []
         with self.db._get_cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
@@ -5285,7 +5556,14 @@ class DialListService:
                        o.id, o.name, o.color, COALESCE(t.operator_comment, ''), t.outcome_at,
                        t.cancelled, t.operator_hangup_at, t.leg_sec,
                        os.id, os.name, t.ring_timeout_at, t.auto_hangup, t.talk_detected,
-                       t.due_at, t.auto, t.operator_status, t.wrapup_expired_at, COALESCE(o.due_kind, '')
+                       t.due_at, t.auto, t.operator_status, t.wrapup_expired_at, COALESCE(o.due_kind, ''),
+                       (SELECT COALESCE(json_agg(json_build_object(
+                                   'group', ao.group_key, 'id', ao.outcome_id, 'name', go.name, 'color', go.color,
+                                   'subtype', gs.name)), '[]'::json)
+                        FROM dial_list_attempt_outcomes ao
+                        JOIN dial_list_outcomes go ON go.id = ao.outcome_id
+                        LEFT JOIN dial_list_outcome_subtypes gs ON gs.id = ao.outcome_subtype_id
+                        WHERE ao.attempt_id = t.id)
                 FROM dial_list_attempts t
                 JOIN dial_list_assignments a ON a.id = t.assignment_id
                 LEFT JOIN users u ON u.id = t.operator_id
@@ -5339,6 +5617,9 @@ class DialListService:
                                   and lead["sign"]["success"]["attempt_id"] == _sid(r[0]),
                     # «Активация водителей»: этому разговору засчитан переход на Sapar.
                     **({"is_sapar_success": _sapar_success_attempt(lead) == _sid(r[0])} if goal is not None else {}),
+                    # Вкладки итогов (27.11.2026): итоги остальных вкладок этого звонка — по порядку вкладок.
+                    **({"group_outcomes": _group_outcomes_of(r[37] if len(r) > 37 else None, groups)}
+                       if groups else {}),
                     # Автообзвон Тез: срок с итогом и его вид (callback | online — подпись «перезвонить» /
                     # «выйдет на линию»), кто начал звонок, просрочка постобработки; у удалённого КЦ нет.
                     **({"due_at": _iso(r[32]), "due_kind": (r[36] if len(r) > 36 else "") or "",
@@ -6193,7 +6474,8 @@ class DialListService:
         У автообзвона Тез (свои сроки перезвона через границу месяца) — None: всё как было."""
         return None if is_autodial(settings) else settings.get("_period")
 
-    def _portion_items(self, cur, portion_id, today=None, tez=False, with_phone=False, period=None, goal=None):
+    def _portion_items(self, cur, portion_id, today=None, tez=False, with_phone=False, period=None, goal=None,
+                       driver_id_in_label=True):
         # Новые колонки — только в конец (строки читаются по номерам): r[18] — почему плечо
         # последней попытки положил сам телефон, r[19:22] — _LAST_COMMENT_COLUMNS, r[22] — текст
         # отказа АТС у последней попытки (наружу — только его вид, last_error_kind); у Тез —
@@ -6263,9 +6545,11 @@ class DialListService:
                 **({"phone": phone_display(r[34])} if with_phone else {}),
             })
             if tez and goal is not None:
-                # «Активация водителей»: строка водителя — «34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)».
+                # «Активация водителей»: строка водителя — «34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)»;
+                # ID водителя — отдельным полем, старому телефону ещё и в конце строки (driver_id_in_label).
                 items[-1]["driver"] = activation.driver_block(r[34], goal, r[35], r[36], r[37], city=r[31] or "",
-                                                              park=(r[38] if len(r) > 38 else "") or "")
+                                                              park=(r[38] if len(r) > 38 else "") or "",
+                                                              driver_id=r[30], id_in_label=driver_id_in_label)
         return items
 
     # «Активация водителей» (26.11.2026): поездки, добрал ли и провайдер ЭДО — для строки водителя телефону.
@@ -6298,9 +6582,10 @@ class DialListService:
                                    city=city, registered_at=registered_at, account_checked_at=account_checked_at),
         }
 
-    def _tez_lead_fields(self, cur, lead_id, operator_id, goal=None):
+    def _tez_lead_fields(self, cur, lead_id, operator_id, goal=None, driver_id_in_label=True):
         """То же для одного водителя (идущий звонок), в транзакции вызывающего. goal — цель «Активации водителей»:
-        строка водителя — поездки и провайдер."""
+        строка водителя — поездки и провайдер; driver_id_in_label — ID водителя ещё и в конце строки (старый
+        телефон, phone_shows_driver_id)."""
         cur.execute("""
             SELECT (owner_operator_id = %s), due_kind, owner_call_at, promised_online_at,
                    month_first_order_at, last_order_before_at, trip_checked_at, driver_id,
@@ -6314,7 +6599,8 @@ class DialListService:
         block = self._tez_lead_block(bool(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10])
         if goal is not None:
             block["driver"] = activation.driver_block(r[11], goal, r[12], r[13], r[14], city=r[8] or "",
-                                                      park=(r[15] if len(r) > 15 else "") or "")
+                                                      park=(r[15] if len(r) > 15 else "") or "",
+                                                      driver_id=r[7], id_in_label=driver_id_in_label)
         return block
 
     def _active_attempt(self, cur, user_id, include_ended=False):
@@ -6399,6 +6685,8 @@ class DialListService:
         tez = is_autodial(settings)
         goal = settings.get("trips_goal") if is_activation(settings) else None
         direct = dials_direct(tez, phone_version, qr_granted) if goal is None else False
+        # ID водителя «Активации»: телефон 3.22.67+ показывает его сам (driver.driver_id), старому — в конце строки.
+        id_in_label = not phone_shows_driver_id(phone_version)
         with self.db._get_cursor() as cur:
             # Открытая выдача либо последняя закрытая: обработанная пачка остаётся на
             # экране с итогами, пока оператор не возьмёт следующую («Ещё»). Номер в строках — только
@@ -6406,7 +6694,7 @@ class DialListService:
             portion = self._last_portion(cur, user_id, ctx["department_id"])
             base = self._dial_base(settings)
             items = (self._portion_items(cur, portion["id"], today, tez=tez, with_phone=direct and tez,
-                                         period=base, goal=goal)
+                                         period=base, goal=goal, driver_id_in_label=id_in_label)
                      if portion else [])
             if portion and base and not items:
                 # Пачка целиком из прошлой базы месяца (_dial_base) — на экране её нет: оператор
@@ -6418,7 +6706,8 @@ class DialListService:
                 active.update(self._last_comment(cur, user_id, active["lead_id"], today))
                 # Автообзвон Тез: что известно о водителе звонка и зачем звоним по сроку.
                 if tez and active.get("lead_id"):
-                    active.update(self._tez_lead_fields(cur, active["lead_id"], user_id, goal=goal))
+                    active.update(self._tez_lead_fields(cur, active["lead_id"], user_id, goal=goal,
+                                                        driver_id_in_label=id_in_label))
                     if direct:
                         active["phone"] = self._lead_phone_display(cur, active["lead_id"])
             offers = self._offer_rows(cur, ctx["department_id"], active_only=True) if tez else []
@@ -6443,6 +6732,9 @@ class DialListService:
         ring_timeout_sec = (self._ring_timeout_sec(self._line_department(ctx),
                                                    lead_in=DIRECT_RING_LEAD_IN_SEC if direct else RING_LEAD_IN_SEC)
                             if phone_has_ring_timer(phone_version) else 0)
+        # Вкладки итогов (27.11.2026, «Активация водителей»): у отдела они есть и телефон их рисует.
+        outcome_groups = (ctx.get("settings") or {}).get("outcome_groups") or []
+        outcome_tabs = bool(outcome_groups) and phone_shows_outcome_groups(phone_version)
         state = {
             "enabled": True,
             # Профиль отдела и часы сервера (15.10.2026): по профилю телефон включает автообзвон
@@ -6474,13 +6766,22 @@ class DialListService:
             # ещё не указан (телефон не даст звонить дальше, сервер — тоже). subtypes —
             # включённые типы итога по порядку: есть хоть один — телефон просит выбрать тип.
             # Дата у итога (автообзвон Тез): due_kind callback | online | ''; у удалённого КЦ ключа нет.
+            # Вкладки итогов (27.11.2026): телефону с вкладками — итоги всех вкладок с group (и outcome_groups ниже),
+            # старому — только главной вкладки: её итог он и пришлёт.
             "outcomes": [dict({"id": o["id"], "name": o["name"], "color": o["color"], "requeue": o["requeue"],
                                "subtypes": [{"id": s["id"], "name": s["name"]} for s in o["subtypes"]]},
-                              **({"due_kind": o.get("due_kind") or ""} if tez else {}))
-                         for o in outcomes],
+                              **({"due_kind": o.get("due_kind") or ""} if tez else {}),
+                              **({"group": o.get("group") or ""} if outcome_tabs else {}))
+                         for o in outcomes
+                         if outcome_tabs or not outcome_groups or o.get("group") == main_outcome_group(outcome_groups)],
             "pending_outcome": pending_outcome,
             "script_version": script_version,
         }
+        if outcome_tabs:
+            # Вкладки окна итога по порядку: первая — главная (её итог ведёт обзвон), required — без итога на ней
+            # сохранить нельзя (сервер проверит и сам, set_attempt_outcome).
+            state["outcome_groups"] = [{"key": g["key"], "name": g["name"], "required": g["required"]}
+                                       for g in outcome_groups]
         if tez:
             # Автообзвон Тез (15.10.2026): настройки автоцикла и постобработки, офферы для карточки и
             # шаблоны WhatsApp (номер водителя сюда не попадает: шлёт сервер).
@@ -7097,6 +7398,10 @@ class DialListService:
         with_phone = is_tez(ctx.get("settings") or {}) and phone_dials_direct(phone_version)
         with self.db._get_cursor() as cur:
             outcomes = self._outcome_rows(cur, ctx["department_id"], active_only=True)
+            # Вкладки итогов (27.11.2026): вкладка отработанных — на итог ГЛАВНОЙ вкладки, он у попытки и стоит.
+            groups = (ctx.get("settings") or {}).get("outcome_groups") or []
+            if groups:
+                outcomes = [o for o in outcomes if o.get("group") == main_outcome_group(groups)]
             hidden = self._other_mode_departments(cur, ctx)
             cur.execute(self._WORKED_PHONE_SQL if with_phone else self._WORKED_SQL,
                         {"operator_id": ctx["user_id"], "month": month,
@@ -9222,6 +9527,9 @@ class DialListService:
                 data = dial_analytics.tez_department_analytics(cur, department_id, period)
                 if is_activation(settings):
                     data.update(dial_analytics.activation_sapar(cur, department_id, period))
+                    # Итоги по целям звонка — вкладки итогов (27.11.2026).
+                    data.update(dial_analytics.activation_groups(cur, department_id, period,
+                                                                 settings.get("outcome_groups") or []))
                     data["profile"] = PROFILE_ACTIVATION
                     data["trips_goal"] = settings.get("trips_goal", activation.TRIPS_GOAL_DEFAULT)
             data.update({"department_id": department_id, "period": period.isoformat(),

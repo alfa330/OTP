@@ -510,6 +510,50 @@ _ACTIVATION_SAPAR_OPERATORS_SQL = """
 """
 
 
+# Итоги по целям звонка (вкладки итогов «Активации», владелец 27.11.2026): по каждой неглавной вкладке — сколько раз
+# выбран каждый итог и его тип в звонках водителей базы месяца. Главная вкладка — итог самой попытки, его считает
+# основной дашборд (outcomes).
+_ACTIVATION_GROUP_OUTCOMES_SQL = """
+    SELECT ao.group_key, o.id, o.name, o.color, o.position, COALESCE(s.name, ''), COUNT(*)
+    FROM dial_list_attempt_outcomes ao
+    JOIN dial_list_attempts t ON t.id = ao.attempt_id
+    JOIN dial_list_assignments a ON a.id = t.assignment_id
+    JOIN dial_list_leads l ON l.id = a.lead_id
+    JOIN dial_list_outcomes o ON o.id = ao.outcome_id
+    LEFT JOIN dial_list_outcome_subtypes s ON s.id = ao.outcome_subtype_id
+    WHERE l.department_id = %(department_id)s AND l.period = %(period)s
+      AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+    GROUP BY ao.group_key, o.id, o.name, o.color, o.position, s.name
+    ORDER BY o.position, o.name, s.name
+"""
+
+
+def activation_groups(cur, department_id, period, groups):
+    """Блок «итоги по целям» к дашборду «Активации»: {outcome_groups: [{key, name, total, items: [{id, name, color,
+    count, subtypes: [{name, count}]}]}]} — по неглавным вкладкам отдела в их порядке; вкладок нет — []."""
+    extra = [g for g in (groups or [])[1:]]
+    if not extra:
+        return {"outcome_groups": []}
+    cur.execute(_ACTIVATION_GROUP_OUTCOMES_SQL, {"department_id": int(department_id), "period": period})
+    by_group = {g["key"]: {"key": g["key"], "name": g["name"], "total": 0, "items": {}} for g in extra}
+    for key, outcome_id, name, color, _position, subtype, count in cur.fetchall():
+        group = by_group.get(key)
+        if group is None:
+            continue
+        item = group["items"].setdefault(str(outcome_id), {"id": str(outcome_id), "name": name or "",
+                                                           "color": color or "#8E8E93", "count": 0, "subtypes": []})
+        item["count"] += int(count or 0)
+        group["total"] += int(count or 0)
+        if subtype:
+            item["subtypes"].append({"name": subtype, "count": int(count or 0)})
+    result = []
+    for g in extra:
+        group = by_group[g["key"]]
+        result.append({"key": group["key"], "name": group["name"], "total": group["total"],
+                       "items": list(group["items"].values())})
+    return {"outcome_groups": result}
+
+
 def activation_sapar(cur, department_id, period):
     """Блок Sapar к дашборду «Активации водителей»: {sapar: {on_sapar, switched, successes, provider_checked,
     trips_checked}, sapar_by_operator: {operator_id: успешек}}."""

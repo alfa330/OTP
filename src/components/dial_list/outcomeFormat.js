@@ -54,6 +54,47 @@ export const DUE_KIND_OPTIONS = [
     { value: 'online', label: 'Выход на линию' },
 ];
 
+/* Вкладки итогов (владелец 27.11.2026, «Активация водителей»: у звонка три цели — будет ли водитель ездить,
+   переведёт ли провайдера ЭДО, рассказали ли про акции; «лучше чтобы выходили табы и переключаясь по табам он
+   выбирал итоги звонка по каждому табу»). Вкладки отдела — [{key, name, required}] по порядку; первая — главная:
+   её итог ведёт обзвон (даты, «перезвонить»), на остальных оператор выбирает по итогу на вкладке. Пределы — те же,
+   что у сервера (dial_list/service.py: OUTCOME_GROUPS_MAX, OUTCOME_GROUP_NAME_MAX, OUTCOME_GROUP_KEY_RE). */
+export const OUTCOME_GROUPS_MAX = 6;
+export const OUTCOME_GROUP_NAME_MAX = 32;
+const GROUP_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
+
+/** Вкладки из ответа сервера → копия для редактора; старый сервер (ключа нет) — null: вкладок он не знает. */
+export const toEditableGroups = (list) => (Array.isArray(list)
+    ? list.filter((g) => g && typeof g.key === 'string').map((g) => ({
+        key: g.key, name: String(g.name ?? ''), required: g.required !== false,
+    }))
+    : null);
+
+/** Вкладки в том виде, в каком уходят на сервер (и в снимок «сохранено»). */
+export const serializeGroups = (groups) => (Array.isArray(groups) ? groups : []).map((g) => ({
+    key: g.key,
+    name: String(g.name ?? '').trim().slice(0, OUTCOME_GROUP_NAME_MAX),
+    required: g.required !== false,
+}));
+
+/** Ключ главной вкладки или '' — вкладок нет. */
+export const mainGroupKey = (groups) => (Array.isArray(groups) && groups.length ? groups[0].key : '');
+
+/** Вкладка итога: своя, а нет или такой вкладки уже нет — главная. */
+export const outcomeGroupOf = (outcome, groups) => {
+    const own = String(outcome?.group ?? '');
+    return (Array.isArray(groups) ? groups : []).some((g) => g.key === own) ? own : mainGroupKey(groups);
+};
+
+/** Ключ новой вкладки: tab2, tab3… — латиница, не занятый. */
+export const newGroupKey = (groups) => {
+    const taken = new Set((Array.isArray(groups) ? groups : []).map((g) => g.key));
+    for (let n = 2; ; n += 1) {
+        const key = `tab${n}`;
+        if (!taken.has(key)) return key;
+    }
+};
+
 /** Вид даты итога: '' | 'callback' | 'online'; всё прочее — ''. */
 export const normalizeDueKind = (value) => {
     const kind = String(value ?? '').trim().toLowerCase();
@@ -106,8 +147,11 @@ export const serverHasSubtypes = (list) => {
  * и там всегда, '' тоже: ключа нет — сервер дату итога не трогает, и снятая в редакторе
  * дата осталась бы. Итог с датой всегда «перезвонить» — см. DUE_KINDS. У удалённого КЦ
  * ключа нет вовсе: его запрос — прежний.
+ *
+ * groups — вкладки отдела (27.11.2026), когда они есть: у каждого итога тогда ключ group (нет своей — главная).
+ * Без вкладок ключа нет: запрос прежний.
  */
-export const serializeOutcomes = (items, { dueKinds = false } = {}) => (Array.isArray(items) ? items : [])
+export const serializeOutcomes = (items, { dueKinds = false, groups = null } = {}) => (Array.isArray(items) ? items : [])
     .filter((o) => !isDraftOutcome(o))
     .map((o) => {
         const dueKind = dueKinds ? normalizeDueKind(o.due_kind) : '';
@@ -118,6 +162,7 @@ export const serializeOutcomes = (items, { dueKinds = false } = {}) => (Array.is
             requeue: !!o.requeue || dueKind !== '',
             is_active: o.is_active !== false,
             ...(dueKinds ? { due_kind: dueKind } : {}),
+            ...(Array.isArray(groups) && groups.length ? { group: outcomeGroupOf(o, groups) } : {}),
             // «В счёт попыток» (владелец, 24.11.2026: «Сброс тоже нужно перевести на 3 попытки»): возврат в список без
             // обнуления попыток. Ключ — только когда сервер его прислал (знает поле) и не у Тез (у Тез свои сроки);
             // без «перезвонить» не имеет смысла и уходит false.
@@ -132,24 +177,56 @@ export const serializeOutcomes = (items, { dueKinds = false } = {}) => (Array.is
     });
 
 /** Строка-снимок для сравнения «сохранено / в редакторе». Собирается тем же
-    serializeOutcomes с теми же опциями, поэтому новое поле итога (due_kind) попадает и сюда. */
-export const outcomesSnapshot = (items, options) => JSON.stringify(serializeOutcomes(items, options));
+    serializeOutcomes с теми же опциями, поэтому новое поле итога (due_kind) попадает и сюда.
+    Вкладки (options.groups) — тоже содержимое справочника: их правка — тоже «изменено». */
+export const outcomesSnapshot = (items, options) => {
+    const groups = options?.groups;
+    if (Array.isArray(groups) && groups.length) {
+        return JSON.stringify({ items: serializeOutcomes(items, options), groups: serializeGroups(groups) });
+    }
+    return JSON.stringify(serializeOutcomes(items, options));
+};
+
+/** Проверка вкладок: названия, ключи, предел; на главной и на каждой обязательной — включённый итог. */
+const validateGroups = (payload, groups) => {
+    if (groups.length > OUTCOME_GROUPS_MAX) return `Вкладок итогов не больше ${OUTCOME_GROUPS_MAX}`;
+    const keys = new Set();
+    for (const g of groups) {
+        if (!GROUP_KEY_RE.test(String(g.key ?? ''))) return 'Ключ вкладки — латиница и цифры, с буквы';
+        if (keys.has(g.key)) return 'Вкладки итогов повторяются';
+        keys.add(g.key);
+        if (!String(g.name ?? '').trim()) return 'У вкладки итогов должно быть название';
+    }
+    const main = mainGroupKey(groups);
+    for (const g of groups) {
+        if ((g.required !== false || g.key === main)
+            && !payload.some((o) => o.is_active !== false && (o.group ?? main) === g.key)) {
+            return `На вкладке «${String(g.name).trim()}» нет ни одного включённого итога`;
+        }
+    }
+    return '';
+};
 
 /**
  * Проверка перед PUT — те же правила, что у сервера, чтобы руководитель видел
  * ошибку сразу, а не после запроса. Возвращает текст ошибки или ''.
+ * groups — вкладки отдела (есть — названия не повторяются только внутри вкладки).
  */
-export const validateOutcomes = (payload) => {
+export const validateOutcomes = (payload, groups = null) => {
     for (const o of payload) {
         if (!o.name) return 'У каждого итога должно быть название';
     }
     const seenOutcomes = new Set();
     for (const o of payload) {
-        const key = o.name.toLowerCase();
+        const key = `${o.group ?? ''}\u0000${o.name.toLowerCase()}`;
         if (seenOutcomes.has(key)) return `Итог «${o.name}» повторяется`;
         seenOutcomes.add(key);
     }
     if (payload.length && !payload.some((o) => o.is_active !== false)) return 'Хотя бы один итог должен быть включён';
+    if (Array.isArray(groups) && groups.length) {
+        const problem = validateGroups(payload, groups);
+        if (problem) return problem;
+    }
     for (const o of payload) {
         // Свёрнутое serializeOutcomes значение всегда допустимо; проверка — для
         // списка, собранного мимо него (а сервер ответил бы 400 уже после запроса).
@@ -176,20 +253,24 @@ export const validateOutcomes = (payload) => {
  * редактора в том виде, в каком ушли на сервер (по ним и ищем), server — список из
  * ответа. Итог узнаётся по названию (сервер не даёт двух итогов с одним названием без
  * учёта регистра), тип — по названию внутри своего итога. Ответ — { временный: настоящий }.
+ * Вкладки итогов (27.11.2026): название не повторяется только внутри вкладки — итог узнаётся по вкладке и
+ * названию (у отдела без вкладок вкладка у всех '').
  *
  * Редактор сохраняет сам (20.11.2026), и пока ответ шёл, оператор мог продолжить
  * печатать: рабочую копию ответом не заменяем, а только переписываем в ней id — иначе
  * набранное после отправки пропало бы.
  */
-export const savedIdMap = (sent, server) => {
+export const savedIdMap = (sent, server, groups = null) => {
     const map = {};
     const byName = new Map();
+    const tabs = Array.isArray(groups) && groups.length ? groups : null;
+    const nameKey = (group, name) => `${group}\u0000${String(name ?? '').trim().toLowerCase()}`;
     for (const o of Array.isArray(server) ? server : []) {
-        byName.set(String(o?.name ?? '').trim().toLowerCase(), o);
+        byName.set(nameKey(tabs ? String(o?.group ?? '') : '', o?.name), o);
     }
     for (const o of Array.isArray(sent) ? sent : []) {
         if (isDraftOutcome(o)) continue;
-        const match = byName.get(String(o.name ?? '').trim().toLowerCase());
+        const match = byName.get(nameKey(tabs ? outcomeGroupOf(o, tabs) : '', o.name));
         if (!match) continue;
         if (isNewId(o.id)) map[o.id] = match.id;
         const subs = new Map((Array.isArray(match.subtypes) ? match.subtypes : [])

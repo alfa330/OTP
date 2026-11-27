@@ -2,6 +2,7 @@
 // итог загрузки, пределы цели. Сервер шлёт подписи готовыми; здесь — что сайт делает без них и с ними.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
     ACTIVATION_STAGES, activationStageLabel, activationUploadSummary, checkWarning, providerLabel, providerShort,
@@ -87,4 +88,16 @@ test('предупреждение о проверках', () => {
     assert.match(checkWarning({ activation_check: { configured: true, fleet_configured: false } }), /Fleet/);
     assert.equal(checkWarning({ activation_check: { configured: true, fleet_configured: true, fleet_error: 'протухла' } }),
         'Кабинет Fleet: протухла');
+});
+
+test('вкладки итогов (27.11.2026): итоги вкладок — в карточке водителя и отдельными карточками аналитики', () => {
+    const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+    const journal = read('../src/components/dial_list/DialListJournal.jsx');
+    // Итог главной вкладки и итоги остальных — подписью вкладки, с типом.
+    assert.match(journal, /Array\.isArray\(attempt\.group_outcomes\)/);
+    assert.match(journal, /\{g\.group_name\}/);
+    assert.match(journal, /subtype: g\.subtype \? \{ name: g\.subtype \} : null/);
+    const analytics = read('../src/components/dial_list/TezAutodialAnalytics.jsx');
+    assert.match(analytics, /data\.outcome_groups\.map\(\(g\) => <GroupOutcomesCard key=\{g\.key\} group=\{g\} \/>\)/);
+    assert.match(analytics, /activation && Array\.isArray\(data\?\.outcome_groups\)/);
 });

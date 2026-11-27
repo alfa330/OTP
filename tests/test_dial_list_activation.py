@@ -155,6 +155,21 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(block['label'], '34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)')
         self.assertEqual(block['profile_url'], '')
         self.assertNotIn('phone', block)
+        self.assertEqual(block['driver_id'], '')
+        # ID водителя (владелец 27.11.2026): отдельным полем всегда; старому телефону — ещё и последним в строке.
+        block = activation.driver_block(34, 50, None, 'Бумажный документооборот', 'file', park='Jana (Алматы)',
+                                        driver_id=' ' + ID1.upper() + ' ')
+        self.assertEqual(block['label'], f'34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы) · ID: {ID1}')
+        self.assertEqual(block['driver_id'], ID1)
+        block = activation.driver_block(34, 50, None, 'Бумажный документооборот', 'file', park='Jana (Алматы)',
+                                        driver_id=ID1, id_in_label=False)
+        self.assertEqual((block['label'], block['driver_id']),
+                         ('34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)', ID1))
+        # Без парка ID идёт сразу за провайдером; не ID (мусор из файла) — не показываем.
+        self.assertEqual(activation.driver_label(34, 50, None, '', 'none', driver_id=ID2),
+                         f'34 из 50 поездок · ЭДО: нет · ID: {ID2}')
+        self.assertEqual(activation.driver_block(34, 50, None, '', 'none', driver_id='12345')['label'],
+                         '34 из 50 поездок · ЭДО: нет')
 
     def test_fleet_url_and_city(self):
         self.assertEqual(activation.fleet_url(ID1, ID2),

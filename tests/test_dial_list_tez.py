@@ -94,7 +94,11 @@ class _Svc:
         return {"department_id": department_id, "profile": extra.get('profile', 'remote_cc')}
 
     def department_settings(self, department_id):
-        return {"department_id": department_id, "profile": self.department_profile(department_id)}
+        return {"department_id": department_id, "profile": self.department_profile(department_id),
+                "outcome_groups": self.groups}
+
+    # Вкладки итогов отдела (27.11.2026): ответ ручки итогов берёт их из настроек.
+    groups = []
 
     def save_department_settings(self, department_id, payload, changed_by=None):
         self.calls.append(('settings', department_id, payload))
@@ -106,8 +110,8 @@ class _Svc:
         rows = [{"id": "o-1", "name": "Отказ"}]
         return (rows, "v-1") if with_version else rows
 
-    def save_outcomes(self, department_id, items, changed_by=None, version=None, with_version=False):
-        self.calls.append(('save_outcomes', department_id, items, version, with_version))
+    def save_outcomes(self, department_id, items, changed_by=None, version=None, with_version=False, **extra):
+        self.calls.append(('save_outcomes', department_id, items, version, with_version, *extra.items()))
         if version == 'old':
             raise dial_service.DialListError(dial_service.OUTCOMES_STALE, 409, kind='stale')
         rows = [{"id": "o-1", "name": "Отказ"}]
@@ -351,6 +355,7 @@ class OperatorRoutesTests(unittest.TestCase):
         self.assertIn(('outcomes', TEZ, True), svc.calls)
         put = client.put(f'/api/dial_list/departments/{TEZ}/outcomes', json={"items": [{"name": "Отказ"}], "version": 'v-1'})
         self.assertEqual((put.status_code, put.get_json()["version"]), (200, 'v-2'))
+        # Вкладки (27.11.2026) не присланы — сервису ключа нет: старая сборка сайта их не трогает.
         self.assertEqual(svc.calls[-1], ('save_outcomes', TEZ, [{"name": "Отказ"}], 'v-1', True))
         stale = client.put(f'/api/dial_list/departments/{TEZ}/outcomes', json={"items": [], "version": 'old'})
         self.assertEqual((stale.status_code, stale.get_json().get("error_kind")), (409, 'stale'))
@@ -399,6 +404,27 @@ class OperatorRoutesTests(unittest.TestCase):
             ('call', 'asg-2', {"auto": True, "operator_status": "active"}),
             # auto — только настоящий true: строка «yes» — ручной звонок.
             ('call', 'asg-3', {"auto": False, "operator_status": "outbound"})])
+
+    def test_outcome_tabs_go_both_ways_only_when_sent(self):
+        """Вкладки итогов (27.11.2026): ручка итогов отдаёт вкладки отдела и передаёт присланные; телефон — итоги
+        остальных вкладок (group_outcomes), ключа нет — сервису его нет (телефон без вкладок)."""
+        svc = _Svc()
+        svc.groups = [{"key": 'trips', "name": 'Поездки', "required": True}]
+        client = _client(svc, role='admin')
+        got = client.get(f'/api/dial_list/departments/{TEZ}/outcomes').get_json()
+        self.assertEqual(got["groups"], svc.groups)
+        tabs = [{"key": 'trips', "name": 'Поездки'}, {"key": 'promo', "name": 'Акции', "required": False}]
+        put = client.put(f'/api/dial_list/departments/{TEZ}/outcomes',
+                         json={"items": [{"name": "Отказ", "group": 'trips'}], "groups": tabs})
+        self.assertEqual((put.status_code, put.get_json()["groups"]), (200, svc.groups))
+        self.assertEqual(svc.calls[-1], ('save_outcomes', TEZ, [{"name": "Отказ", "group": 'trips'}], None, True,
+                                         ('groups', tabs)))
+        client.post('/api/operator/dial_list/attempts/att-1/outcome', json={"outcome_id": "o1"})
+        client.post('/api/operator/dial_list/attempts/att-2/outcome',
+                    json={"outcome_id": "o1", "group_outcomes": [{"outcome_id": "o7", "subtype_id": None}]})
+        self.assertEqual([c for c in svc.calls if c[0] == 'outcome'], [
+            ('outcome', 'att-1', 'o1', {}),
+            ('outcome', 'att-2', 'o1', {"group_outcomes": [{"outcome_id": "o7", "subtype_id": None}]})])
 
     def test_outcome_passes_due_and_offers_only_when_sent(self):
         svc = _Svc()

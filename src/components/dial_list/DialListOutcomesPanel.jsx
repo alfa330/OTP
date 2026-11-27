@@ -2,9 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import FaIcon from '../common/FaIcon';
 import { iosCard, iosInput, iosGroupLabel, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosSegmented, IosToggle } from '../ui/ios';
 import {
-    DUE_KIND_OPTIONS, SUBTYPES_MAX, SUBTYPE_NAME_MAX, applyIdMap, isNewId, normalizeDueKind, outcomeLabel,
-    outcomeSubtypeName, outcomesSnapshot, rowKey, savedIdMap, serializeOutcomes, serverHasSubtypes, subtypesOpen,
-    subtypesToggleLabel, toEditable, validateOutcomes,
+    DUE_KIND_OPTIONS, OUTCOME_GROUPS_MAX, OUTCOME_GROUP_NAME_MAX, SUBTYPES_MAX, SUBTYPE_NAME_MAX, applyIdMap, isNewId,
+    mainGroupKey, newGroupKey, normalizeDueKind, outcomeGroupOf, outcomeLabel, outcomeSubtypeName, outcomesSnapshot,
+    rowKey, savedIdMap, serializeGroups, serializeOutcomes, serverHasSubtypes, subtypesOpen, subtypesToggleLabel,
+    toEditable, toEditableGroups, validateOutcomes,
 } from './outcomeFormat';
 
 /*
@@ -47,6 +48,13 @@ import {
  *     а свёрнутое и раскрытое руками помнится до перезагрузки страницы (expandedByDepartment);
  *   • вернулся на вкладку раньше, чем дошло досохранение при уходе, — загрузка показала бы список без
  *     последней причины. Загрузка теперь ждёт сохранение своего отдела (pendingSaves).
+ *
+ * Вкладки итогов (владелец 27.11.2026, «Активация водителей»: у звонка три цели — «табы, и переключаясь по табам
+ * он выбирал итоги звонка по каждому табу», у итогов любой вкладки — типы). Когда у отдела вкладки есть, список
+ * показывается по вкладкам; у вкладки — название и «обязательна» (без итога на ней звонок не сохранится). Первая
+ * вкладка — главная: её итог ведёт обзвон, поэтому «перезвонить» и «нужна дата» — только у её итогов. Итог
+ * переносят на другую вкладку выбором в строке; вкладку убирают, пока на ней нет сохранённых итогов (на них ссылается
+ * история). Вкладки сохраняются вместе со списком и входят в его версию.
  */
 const AUTOSAVE_MS = 600;
 
@@ -269,6 +277,11 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
     useEffect(() => { expandedByDepartment.set(String(departmentId), expanded); }, [departmentId, expanded]);
     // Старый сервер (раскатка/откат по частям) типы не хранит — не предлагаем их.
     const [typesSupported, setTypesSupported] = useState(true);
+    // Вкладки итогов отдела (рабочая копия): null — сервер их не знает, [] — у отдела их нет.
+    const [groups, setGroups] = useState(null);
+    // Открытая вкладка — ключ.
+    const [tab, setTab] = useState('');
+    const tabsOn = Array.isArray(groups) && groups.length > 0;
     // Версия справочника, с которой работаем (сервер отклонит сохранение, если список уже другой).
     const versionRef = useRef(null);
     // Сохранения идут по одному: правка во время запроса уйдёт следующим.
@@ -277,7 +290,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
     // Ушли со вкладки, пока шёл запрос: досохранить, когда он вернётся.
     const flushAfterRef = useRef(false);
     // Последнее, что на экране, — для сохранения из таймера, при уходе со вкладки и закрытии страницы.
-    const latestRef = useRef({ items: null, saved: null, dueKinds, canEdit });
+    const latestRef = useRef({ items: null, saved: null, dueKinds, canEdit, groups: null });
     const sendRef = useRef(null);
 
     const toast = useCallback((msg, kind = 'success') => {
@@ -296,10 +309,13 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
             if (!resp.ok) throw new Error(await readError(resp));
             const data = await resp.json();
             const list = toEditable(data.outcomes);
+            const tabs = toEditableGroups(data.groups);
             versionRef.current = data.version ?? null;
             setTypesSupported(serverHasSubtypes(data.outcomes));
             setItems(list);
-            setSaved(outcomesSnapshot(list, { dueKinds }));
+            setGroups(tabs);
+            setTab((cur) => ((tabs || []).some((g) => g.key === cur) ? cur : mainGroupKey(tabs)));
+            setSaved(outcomesSnapshot(list, { dueKinds, groups: tabs }));
             setError('');
         } catch (e) {
             setError(e.message || 'Не удалось загрузить итоги');
@@ -308,20 +324,23 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
 
     useEffect(() => { load(); }, [load]);
 
-    // Один и тот же снимок для сохранённого и для рабочей копии (outcomeFormat.js).
-    const snapshot = useMemo(() => (items ? outcomesSnapshot(items, { dueKinds }) : null), [items, dueKinds]);
+    // Один и тот же снимок для сохранённого и для рабочей копии (outcomeFormat.js); вкладки — его часть.
+    const snapshot = useMemo(() => (items ? outcomesSnapshot(items, { dueKinds, groups }) : null), [items, dueKinds, groups]);
     const dirty = !!items && snapshot !== saved;
     // Что не даст сохранить (те же правила, что у сервера) — показываем сразу, запрос не шлём.
-    const problem = useMemo(() => (items ? validateOutcomes(serializeOutcomes(items, { dueKinds })) : ''), [items, dueKinds]);
-    latestRef.current = { items, saved, dueKinds, canEdit };
+    const problem = useMemo(() => (items
+        ? validateOutcomes(serializeOutcomes(items, { dueKinds, groups }), tabsOn ? groups : null) : ''),
+    [items, dueKinds, groups, tabsOn]);
+    latestRef.current = { items, saved, dueKinds, canEdit, groups };
 
     // Отправить рабочую копию. keepalive — запрос переживёт закрытие страницы.
     const send = useCallback(async ({ keepalive = false } = {}) => {
-        const { items: current, saved: savedNow, dueKinds: dk, canEdit: editable } = latestRef.current;
+        const { items: current, saved: savedNow, dueKinds: dk, canEdit: editable, groups: gs } = latestRef.current;
         if (!current || !editable || inFlightRef.current) return;
-        const payload = serializeOutcomes(current, { dueKinds: dk });
-        if (validateOutcomes(payload)) return;
-        if (outcomesSnapshot(current, { dueKinds: dk }) === savedNow) return;
+        const tabsNow = Array.isArray(gs) && gs.length > 0;
+        const payload = serializeOutcomes(current, { dueKinds: dk, groups: gs });
+        if (validateOutcomes(payload, tabsNow ? gs : null)) return;
+        if (outcomesSnapshot(current, { dueKinds: dk, groups: gs }) === savedNow) return;
         inFlightRef.current = true;
         // Видно панели, рождённой заново для этого отдела (load ждёт его).
         const deptKey = String(departmentId);
@@ -333,7 +352,10 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/outcomes`, {
                 method: 'PUT', credentials: 'include', keepalive,
                 headers: authHeaders({ 'Content-Type': 'application/json' }),
-                body: JSON.stringify({ items: payload, version: versionRef.current }),
+                // Вкладки — только у отдела с вкладками: без них запрос прежний.
+                body: JSON.stringify({
+                    items: payload, version: versionRef.current, ...(tabsNow ? { groups: serializeGroups(gs) } : {}),
+                }),
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) {
@@ -343,8 +365,8 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
             }
             versionRef.current = data.version ?? null;
             // Рабочую копию ответом не заменяем: пока он шёл, могли печатать дальше.
-            const idMap = savedIdMap(current, data.outcomes);
-            const nowSaved = outcomesSnapshot(applyIdMap(current, idMap), { dueKinds: dk });
+            const idMap = savedIdMap(current, data.outcomes, tabsNow ? gs : null);
+            const nowSaved = outcomesSnapshot(applyIdMap(current, idMap), { dueKinds: dk, groups: gs });
             if (!mountedRef.current) {
                 latestRef.current = { ...latestRef.current, items: applyIdMap(latestRef.current.items || [], idMap), saved: nowSaved };
                 return;
@@ -396,8 +418,8 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
     useEffect(() => {
         mountedRef.current = true;
         const flush = () => {
-            const { items: current, saved: savedNow, dueKinds: dk, canEdit: editable } = latestRef.current;
-            if (!current || !editable || outcomesSnapshot(current, { dueKinds: dk }) === savedNow) return;
+            const { items: current, saved: savedNow, dueKinds: dk, canEdit: editable, groups: gs } = latestRef.current;
+            if (!current || !editable || outcomesSnapshot(current, { dueKinds: dk, groups: gs }) === savedNow) return;
             if (inFlightRef.current) { flushAfterRef.current = true; return; }
             sendRef.current?.({ keepalive: true });
         };
@@ -410,9 +432,12 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
     }, []);
 
     const patch = (idx, changes) => setItems((list) => list.map((o, i) => (i === idx ? { ...o, ...changes } : o)));
+    // Выше/ниже — внутри открытой вкладки: соседом считается ближайший итог той же вкладки.
     const move = (idx, dir) => setItems((list) => {
         const next = [...list];
-        const j = idx + dir;
+        const own = tabsOn ? outcomeGroupOf(list[idx], groups) : '';
+        let j = idx + dir;
+        while (tabsOn && j >= 0 && j < next.length && outcomeGroupOf(next[j], groups) !== own) j += dir;
         if (j < 0 || j >= next.length) return list;
         [next[idx], next[j]] = [next[j], next[idx]];
         return next;
@@ -423,9 +448,32 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
         return [...(list || []), {
             id, _key: id, name: '', color: OUTCOME_PALETTE[(list?.length || 0) % OUTCOME_PALETTE.length],
             requeue: false, requeue_counts: false, is_active: true, used: 0, subtypes: [], due_kind: '',
+            ...(tabsOn ? { group: openTab.key } : {}),
         }];
     });
     const remove = (idx) => setItems((list) => list.filter((_, i) => i !== idx));
+
+    // Вкладки: открытая, главная, правка, новая и убрать (пока на ней нет сохранённых итогов).
+    const mainKey = mainGroupKey(groups);
+    const openTab = tabsOn ? (groups.find((g) => g.key === tab) || groups[0]) : null;
+    const patchGroup = (key, changes) => setGroups((list) => list.map((g) => (g.key === key ? { ...g, ...changes } : g)));
+    const addGroup = () => {
+        const key = newGroupKey(groups);
+        setGroups((list) => [...list, { key, name: 'Новая вкладка', required: false }]);
+        setTab(key);
+    };
+    const groupRemovable = (key) => key !== mainKey
+        && !(items || []).some((o) => outcomeGroupOf(o, groups) === key && !isNewId(o.id));
+    const removeGroup = (key) => {
+        if (!groupRemovable(key)) return;
+        setItems((list) => list.filter((o) => outcomeGroupOf(o, groups) !== key));
+        setGroups((list) => list.filter((g) => g.key !== key));
+        setTab(mainKey);
+    };
+    const activeIn = (key) => (items || []).filter((o) => o.is_active !== false && outcomeGroupOf(o, groups) === key).length;
+    // Строки открытой вкладки — с их местом в общем списке (правка и порядок идут по нему).
+    const visible = (items || []).map((o, idx) => ({ o, idx }))
+        .filter(({ o }) => !tabsOn || outcomeGroupOf(o, groups) === openTab.key);
 
     // Типы итога idx: те же операции, что у итогов, но внутри его subtypes.
     const patchSubs = (idx, fn) => setItems((list) => list.map((o, i) => (i === idx ? { ...o, subtypes: fn(o.subtypes || []) } : o)));
@@ -456,7 +504,9 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                 ) : (
                     <div className={iosGroupLabel}>Итоги звонка</div>
                 )}
-                <span className="text-[11.5px] text-slate-500">Оператор выбирает один после каждого разговора</span>
+                <span className="text-[11.5px] text-slate-500">
+                    {tabsOn ? 'Оператор выбирает итог на каждой вкладке' : 'Оператор выбирает один после каждого разговора'}
+                </span>
             </div>
             <div className={`${iosCard} overflow-hidden`}>
                 {error ? (
@@ -465,10 +515,70 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                     <div className="px-4 py-4 text-[13px] text-slate-500"><FaIcon className="fas fa-spinner fa-spin" /> Загрузка…</div>
                 ) : (
                     <>
+                        {tabsOn && (
+                            <div className="flex items-center gap-2 border-b border-slate-100 px-3 py-2.5">
+                                <div className="min-w-0 overflow-x-auto">
+                                    <IosSegmented
+                                        value={openTab.key}
+                                        options={groups.map((g) => ({
+                                            value: g.key, label: String(g.name).trim() || 'Без названия', count: activeIn(g.key),
+                                        }))}
+                                        onChange={setTab}
+                                        ariaLabel="Вкладки итогов"
+                                        slide
+                                    />
+                                </div>
+                                {canEdit && groups.length < OUTCOME_GROUPS_MAX && (
+                                    <button type="button" onClick={addGroup} className={`${iosBtnGhost} shrink-0 px-2 py-1.5 text-[12.5px]`}>
+                                        <FaIcon className="fas fa-plus" style={{ width: 10, height: 10 }} /> Вкладка
+                                    </button>
+                                )}
+                            </div>
+                        )}
+                        {tabsOn && (
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-100 bg-slate-50/60 px-3 py-2">
+                                <input
+                                    value={openTab.name}
+                                    onChange={(e) => patchGroup(openTab.key, { name: e.target.value })}
+                                    disabled={!canEdit}
+                                    maxLength={OUTCOME_GROUP_NAME_MAX}
+                                    placeholder="Название вкладки"
+                                    aria-label="Название вкладки"
+                                    className={`${iosInput} w-52 py-1.5 text-[13px]`}
+                                />
+                                {openTab.key === mainKey ? (
+                                    <span className="text-[12px] text-slate-500">Главная: её итог ведёт обзвон — дата и «перезвонить» только здесь</span>
+                                ) : (
+                                    <label
+                                        className="flex items-center gap-2 text-[12px] text-slate-600"
+                                        title="Без итога на этой вкладке оператор не сохранит звонок"
+                                    >
+                                        <IosToggle
+                                            checked={openTab.required !== false}
+                                            disabled={!canEdit}
+                                            onChange={(v) => patchGroup(openTab.key, { required: v })}
+                                        />
+                                        обязательна
+                                    </label>
+                                )}
+                                {canEdit && groupRemovable(openTab.key) && (
+                                    <button
+                                        type="button"
+                                        onClick={() => removeGroup(openTab.key)}
+                                        className={`${iosBtnGhost} ml-auto px-2 py-1 text-[12.5px] text-rose-500`}
+                                    >
+                                        Убрать вкладку
+                                    </button>
+                                )}
+                            </div>
+                        )}
                         <ul className="divide-y divide-slate-100">
-                            {items.map((o, idx) => {
+                            {visible.map(({ o, idx }, pos) => {
                                 const typesLabel = typesSupported ? subtypesToggleLabel(o, canEdit) : '';
                                 const open = subtypesOpen(o, expanded);
+                                // Обзвон ведёт итог главной вкладки: «перезвонить» и дата — только у него.
+                                const rowGroup = tabsOn ? outcomeGroupOf(o, groups) : '';
+                                const drivesDial = !tabsOn || rowGroup === mainKey;
                                 // Итог с датой всегда «перезвонить» (outcomeFormat.js, DUE_KINDS).
                                 const dueKind = dueKinds ? normalizeDueKind(o.due_kind) : '';
                                 const requeueForced = dueKind !== '';
@@ -489,15 +599,17 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                                 placeholder="Название итога"
                                                 className={`${iosInput} min-w-[140px] flex-1 py-2 text-[13.5px] ${o.is_active ? '' : 'text-slate-400 line-through'}`}
                                             />
-                                            <label className="flex shrink-0 items-center gap-2 text-[12px] text-slate-600" title={requeueTitle}>
-                                                <IosToggle
-                                                    checked={!!o.requeue || requeueForced}
-                                                    disabled={!canEdit || requeueForced}
-                                                    onChange={(v) => patch(idx, { requeue: v })}
-                                                />
-                                                перезвонить
-                                            </label>
-                                            {!dueKinds && 'requeue_counts' in o && !!o.requeue && (
+                                            {drivesDial && (
+                                                <label className="flex shrink-0 items-center gap-2 text-[12px] text-slate-600" title={requeueTitle}>
+                                                    <IosToggle
+                                                        checked={!!o.requeue || requeueForced}
+                                                        disabled={!canEdit || requeueForced}
+                                                        onChange={(v) => patch(idx, { requeue: v })}
+                                                    />
+                                                    перезвонить
+                                                </label>
+                                            )}
+                                            {drivesDial && !dueKinds && 'requeue_counts' in o && !!o.requeue && (
                                                 <label
                                                     className="flex shrink-0 items-center gap-2 text-[12px] text-slate-600"
                                                     title="Водитель возвращается в список, но каждый такой итог — попытка: когда попытки на номер кончились, ему больше не звонят. Выключено — попытки после итога с нуля."
@@ -515,12 +627,25 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                                 {o.is_active !== false ? 'включён' : 'выключен'}
                                             </label>
                                             {o.used > 0 && <IosBadge tone="slate">{o.used}</IosBadge>}
+                                            {tabsOn && canEdit && groups.length > 1 && (
+                                                <select
+                                                    value={rowGroup}
+                                                    onChange={(e) => patch(idx, { group: e.target.value })}
+                                                    title="Перенести итог на другую вкладку"
+                                                    aria-label={`Вкладка итога «${o.name || 'новый'}»`}
+                                                    className={`${iosInput} w-auto max-w-[150px] shrink-0 py-1.5 text-[12px]`}
+                                                >
+                                                    {groups.map((g) => (
+                                                        <option key={g.key} value={g.key}>{String(g.name).trim() || 'Без названия'}</option>
+                                                    ))}
+                                                </select>
+                                            )}
                                             {canEdit && (
                                                 <div className="flex shrink-0 items-center gap-0.5">
-                                                    <button type="button" onClick={() => move(idx, -1)} disabled={idx === 0} className={`${iosBtnGhost} px-2 py-1.5`} aria-label="Выше">
+                                                    <button type="button" onClick={() => move(idx, -1)} disabled={pos === 0} className={`${iosBtnGhost} px-2 py-1.5`} aria-label="Выше">
                                                         <FaIcon className="fas fa-chevron-up" style={{ width: 11, height: 11 }} />
                                                     </button>
-                                                    <button type="button" onClick={() => move(idx, 1)} disabled={idx === items.length - 1} className={`${iosBtnGhost} px-2 py-1.5`} aria-label="Ниже">
+                                                    <button type="button" onClick={() => move(idx, 1)} disabled={pos === visible.length - 1} className={`${iosBtnGhost} px-2 py-1.5`} aria-label="Ниже">
                                                         <FaIcon className="fas fa-chevron-down" style={{ width: 11, height: 11 }} />
                                                     </button>
                                                     {String(o.id).startsWith('new-') && (
@@ -531,7 +656,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                                 </div>
                                             )}
                                         </div>
-                                        {dueKinds && (
+                                        {dueKinds && drivesDial && (
                                             <div className="ml-[38px] mt-1.5 flex flex-wrap items-center gap-2">
                                                 <span className="text-[12px] text-slate-500">Нужна дата</span>
                                                 <div className={canEdit ? '' : 'pointer-events-none opacity-60'}>
@@ -569,8 +694,10 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                     </li>
                                 );
                             })}
-                            {items.length === 0 && (
-                                <li className="px-4 py-5 text-center text-[13px] text-slate-500">Итогов пока нет — добавьте хотя бы один.</li>
+                            {visible.length === 0 && (
+                                <li className="px-4 py-5 text-center text-[13px] text-slate-500">
+                                    {tabsOn ? 'На этой вкладке итогов пока нет — добавьте хотя бы один.' : 'Итогов пока нет — добавьте хотя бы один.'}
+                                </li>
                             )}
                         </ul>
                         {canEdit && (
@@ -590,6 +717,13 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                 Выключенный итог пропадает из телефона, но остаётся в истории. Число справа — сколько раз итог уже выбирали.
                 {' '}Если у итога есть включённые типы, оператор после итога обязан выбрать и тип. Выключенный тип тоже
                 пропадает из телефона и остаётся в истории.
+                {tabsOn && (
+                    <>
+                        {' '}Вкладки — цели звонка: в iCORE Phone оператор переключает их и выбирает итог на каждой; без итога
+                        на обязательной вкладке звонок не сохранится. Телефон старше 3.22.67 вкладок не показывает — в нём
+                        только итоги главной.
+                    </>
+                )}
             </div>
         </section>
     );

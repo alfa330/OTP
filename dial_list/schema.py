@@ -678,6 +678,29 @@ DDL = [
         set_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
+    # Вкладки итогов (владелец 27.11.2026, «Активация водителей»: у звонка три цели — будет ли водитель ездить,
+    # переведёт ли провайдера ЭДО на правильный, рассказали ли ему про акции; «лучше чтобы выходили табы и
+    # переключаясь по табам он выбирал итоги звонка по каждому табу», и у итогов любой вкладки — подтипы):
+    #   dial_list_department_settings.outcome_groups — вкладки отдела по порядку [{key, name, required}]; NULL или []
+    #                                                 — вкладок нет, справочник один, как было
+    #   dial_list_outcomes.group_key                  — вкладка итога ('' — у отдела без вкладок). Первая вкладка —
+    #                                                 главная: её итог — outcome_id попытки, он ведёт обзвон (даты,
+    #                                                 возврат в список, вкладки итогов в телефоне)
+    #   dial_list_attempt_outcomes                    — итоги попытки на остальных вкладках, строка на вкладку. FK на
+    #                                                 попытку нет намеренно (горячая таблица: стартовый DDL не должен
+    #                                                 ждать её блокировки); на итог и тип — есть.
+    "ALTER TABLE dial_list_department_settings ADD COLUMN IF NOT EXISTS outcome_groups JSONB",
+    "ALTER TABLE dial_list_outcomes ADD COLUMN IF NOT EXISTS group_key VARCHAR(32) NOT NULL DEFAULT ''",
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_attempt_outcomes (
+        attempt_id UUID NOT NULL,
+        group_key VARCHAR(32) NOT NULL,
+        outcome_id UUID NOT NULL REFERENCES dial_list_outcomes(id),
+        outcome_subtype_id UUID REFERENCES dial_list_outcome_subtypes(id),
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (attempt_id, group_key)
+    )
+    """,
     # Индексов по отметкам проверок (sign_checked_at, trip_checked_at) нет НАМЕРЕННО.
     # Отметку пишет каждая проверка подписи и поездок — у каждого неподписавшего раз в
     # час-три, ~100 тыс. обновлений в сутки. Пока отметка стояла в индексе, обновление было
@@ -786,6 +809,7 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_dial_list_batch_leads_lead ON dial_list_batch_leads(lead_id)",
     # Режим линий: кто сейчас работает в обзвоне отдела (сводка «Операторы», вкладка «Линии»).
     "CREATE INDEX IF NOT EXISTS idx_dial_list_operator_modes_department ON dial_list_operator_modes(department_id)",
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_attempt_outcomes_outcome ON dial_list_attempt_outcomes(outcome_id)",
 ]
 
 

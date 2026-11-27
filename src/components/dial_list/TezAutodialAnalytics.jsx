@@ -317,6 +317,41 @@ const SaparCard = ({ sapar }) => (
     </section>
 );
 
+/* «Активация водителей», вкладки итогов (владелец 27.11.2026: у звонка три цели): по каждой неглавной вкладке — что
+   выбирали операторы и сколько раз (сервер: analytics.activation_groups). Главная вкладка — в карточке «Итоги». */
+const GroupOutcomesCard = ({ group }) => {
+    const items = (Array.isArray(group.items) ? group.items : []).filter((o) => Number(o.count) > 0);
+    const whole = Number(group.total) || 0;
+    return (
+        <section className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+                <span className={iosGroupLabel}>{group.name}</span>
+                <IosHint text={`Что оператор выбрал на вкладке «${group.name}» в окне итога, по звонкам водителей этой базы. Считаются звонки из iCORE Phone с вкладками итогов (3.22.67 и новее).`} />
+            </div>
+            <div className={`${iosCard} px-4 py-2`}>
+                {whole === 0 ? (
+                    <div className="py-4 text-center text-[13px] text-slate-500">На этой вкладке итогов ещё нет</div>
+                ) : (
+                    <ul className="divide-y divide-slate-100">
+                        {items.map((o) => {
+                            const color = HEX_RE.test(o.color || '') ? o.color : '#8E8E93';
+                            const subs = (Array.isArray(o.subtypes) ? o.subtypes : []).filter((s) => Number(s.count) > 0);
+                            return (
+                                <React.Fragment key={o.id || o.name}>
+                                    <ListRow label={o.name} value={o.count} whole={whole} color={color} />
+                                    {subs.map((s) => (
+                                        <ListRow key={s.name} indent label={s.name} value={s.count} color={color} />
+                                    ))}
+                                </React.Fragment>
+                            );
+                        })}
+                    </ul>
+                )}
+            </div>
+        </section>
+    );
+};
+
 export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
     const words = wordsOf(data);
     const activation = data?.profile === 'activation';
@@ -383,6 +418,12 @@ export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
             </div>
 
             {activation && data?.sapar && <SaparCard sapar={data.sapar} />}
+
+            {activation && Array.isArray(data?.outcome_groups) && data.outcome_groups.length > 0 && (
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 [&>*]:min-w-0">
+                    {data.outcome_groups.map((g) => <GroupOutcomesCard key={g.key} group={g} />)}
+                </div>
+            )}
 
             <ByDayCard days={Array.isArray(data?.by_day) ? data.by_day : []} words={words} />
 

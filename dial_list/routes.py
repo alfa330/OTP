@@ -689,8 +689,9 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         payload = request.get_json(silent=True) or {}
         # Ключ subtype_id шлёт только телефон с типами итога; его отсутствие (старый
         # телефон) и null (тип не выбран) сервис различает — пропуск ключа передаём как есть.
-        # due_at и offer_ids (автообзвон Тез) — так же: ключа нет — телефон их не знает.
-        extra = {key: payload[key] for key in ('due_at', 'offer_ids') if key in payload}
+        # due_at и offer_ids (автообзвон Тез) — так же: ключа нет — телефон их не знает. group_outcomes (вкладки
+        # итогов, 27.11.2026) — итоги остальных вкладок: ключа нет — телефон вкладок не рисует.
+        extra = {key: payload[key] for key in ('due_at', 'offer_ids', 'group_outcomes') if key in payload}
         result = svc.set_attempt_outcome(user_id, attempt_id, payload.get('outcome_id'), payload.get('comment', ''),
                                          subtype_id=payload.get('subtype_id', SUBTYPE_NOT_SENT), **extra)
         return jsonify({"status": "success", **result}), 200
@@ -1211,12 +1212,16 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             payload = request.get_json(silent=True) or {}
             items = payload.get('items')
             version = payload.get('version')
+            # Вкладки итогов (27.11.2026): ключа нет — прежние (старая сборка сайта их не знает).
+            extra = {"groups": payload['groups']} if 'groups' in payload else {}
             rows, current = svc.save_outcomes(department_id, items, changed_by=requester_id,
                                               version=None if version is None else str(version),
-                                              with_version=True)
-            return jsonify({"status": "success", "outcomes": rows, "version": current}), 200
+                                              with_version=True, **extra)
+            return jsonify({"status": "success", "outcomes": rows, "version": current,
+                            "groups": svc.department_settings(department_id).get("outcome_groups") or []}), 200
         rows, current = svc.outcomes(department_id, with_version=True)
-        return jsonify({"status": "success", "outcomes": rows, "version": current}), 200
+        return jsonify({"status": "success", "outcomes": rows, "version": current,
+                        "groups": svc.department_settings(department_id).get("outcome_groups") or []}), 200
 
     # ── автообзвон Тез: офферы, WhatsApp, поездки (15.10.2026) ─────────────────
     def _tez_department(department_id):
