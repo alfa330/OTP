@@ -653,9 +653,10 @@ def attachment_extension(file_name, content_type='', data=b''):
 def safe_attachment_filename(attachment, data=b''):
     """Имя для диска: с восстановленным расширением и без сюрпризов в путях.
 
-    Расширение приходится дописывать чаще, чем кажется: werkzeug пропускает имя
-    через secure_filename, а тот выбрасывает не-ASCII — файл «проверка.xlsx»
-    доезжает до базы под именем «xlsx». Для кириллических имён это норма, не край.
+    Расширение приходится дописывать у старых вложений: до 27.11.2026 сервер
+    пропускал имя через secure_filename, а тот выбрасывает не-ASCII — файл
+    «проверка.xlsx» лежит в базе под именем «xlsx». Новые вложения хранят имя
+    целиком (common/file_names.py).
     """
     raw = str(attachment.get('file_name') or '') or f'attachment_{attachment.get("id")}'
     raw = os.path.basename(raw.replace('\\', '/'))

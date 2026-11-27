@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover
     Image = None
 
 import task_photos  # noqa: E402
+from common import file_names  # noqa: E402
 from tests import source_cache  # noqa: E402
 from wiki import images as wiki_images  # noqa: E402
 
@@ -114,12 +115,15 @@ class PrepareTest(unittest.TestCase):
         self.assertEqual(wiki_images.to_webp(source, 'image/jpeg', keep_smaller=False)[1],
                          'image/webp')
 
-    def test_cyrillic_name_does_not_turn_into_jpg_webp(self):
-        """secure_filename сделал бы из «фото.jpg» имя «jpg», а из него «jpg.webp»."""
+    def test_cyrillic_name_survives_the_conversion(self):
+        """Владелец 27.11.2026: имена файлов в задачах терялись — «фото.png»
+        становился «photo.webp». Имя остаётся, меняется только расширение."""
         result = task_photos.prepare(_image_bytes('PNG'), filename='фото.png',
                                      content_type='image/png')
-        self.assertEqual(result['file_name'], 'photo.webp')
-        self.assertEqual(task_photos.webp_file_name('C:\\Users\\a\\скрин 1.png'), '1.webp')
+        self.assertEqual(result['file_name'], 'фото.webp')
+        self.assertEqual(task_photos.webp_file_name('C:\\Users\\a\\скрин 1.png'), 'скрин 1.webp')
+        self.assertEqual(task_photos.webp_file_name('Скриншот 27.11.2026.png'),
+                         'Скриншот 27.11.2026.webp')
         self.assertEqual(task_photos.webp_file_name('...'), 'photo.webp')
 
     def test_old_name_already_eaten_by_secure_filename(self):
@@ -261,7 +265,7 @@ class UploadTest(unittest.TestCase):
             'TASK_MAX_FILES': 10, 'TASK_MAX_FILE_SIZE_BYTES': 10 * 1024 * 1024,
             'TASK_ATTACHMENTS_UPLOAD_FOLDER': 'TaskAttachments/',
             'get_gcs_client': lambda: _Client(self.bucket),
-            'secure_filename': lambda name: re.sub(r'[^A-Za-z0-9._-]+', '', name).strip('.'),
+            'file_names': file_names,
         })
 
     def test_photo_goes_as_webp_with_a_thumbnail(self):
@@ -269,8 +273,9 @@ class UploadTest(unittest.TestCase):
             [_Upload('фото.jpg', _image_bytes('JPEG', size=(1600, 1200)), 'image/jpeg')])
         [item] = attachments
         self.assertEqual(item['content_type'], 'image/webp')
-        self.assertEqual(item['file_name'], 'photo.webp')
-        self.assertTrue(item['gcs_blob_path'].endswith('_photo.webp'))
+        self.assertEqual(item['file_name'], 'фото.webp')
+        self.assertTrue(item['gcs_blob_path'].endswith('.webp'))
+        self.assertTrue(item['gcs_blob_path'].isascii(), item['gcs_blob_path'])
         self.assertEqual(item['thumb_blob_path'], task_photos.thumb_blob_path(item['gcs_blob_path']))
         data, content_type = self.bucket.uploaded[item['gcs_blob_path']]
         self.assertEqual(content_type, 'image/webp')
@@ -287,6 +292,29 @@ class UploadTest(unittest.TestCase):
         self.assertIsNone(item['thumb_blob_path'])
         self.assertEqual(self.bucket.uploaded[item['gcs_blob_path']][0], b'PK\x03\x04 docx')
         self.assertEqual(len(paths), 1)
+
+    def test_file_name_is_kept_as_the_person_named_it(self):
+        """Владелец 27.11.2026: «названия файлов, которые загружаются в задачах,
+        теряются» — secure_filename оставлял от «Отчёт за ноябрь.xlsx» одно «xlsx»."""
+        cases = [
+            ('Отчёт за ноябрь.xlsx', 'Отчёт за ноябрь.xlsx', '.xlsx'),
+            ('C:\\fakepath\\Акт сверки №3.pdf', 'Акт сверки №3.pdf', '.pdf'),
+            ('Есеп қазан.docx', 'Есеп қазан.docx', '.docx'),
+            ('report.csv', 'report.csv', '_report.csv'),
+            ('акт\u202efdp.doc', 'актfdp.doc', '.doc'),
+        ]
+        attachments, _paths, _bucket = self.upload(
+            [_Upload(name, b'data', 'application/octet-stream') for name, _, _ in cases])
+        for (sent, expected, path_tail), item in zip(cases, attachments):
+            self.assertEqual(item['file_name'], expected, sent)
+            # Путь в бакете — латиницей и с расширением: человек его не видит.
+            self.assertTrue(item['gcs_blob_path'].isascii(), item['gcs_blob_path'])
+            self.assertTrue(item['gcs_blob_path'].endswith(path_tail), item['gcs_blob_path'])
+
+    def test_name_without_letters_falls_back_to_a_numbered_one(self):
+        attachments, _paths, _bucket = self.upload(
+            [_Upload('a.txt', b'1', 'text/plain'), _Upload('...', b'2', 'text/plain')])
+        self.assertEqual([item['file_name'] for item in attachments], ['a.txt', 'attachment_2'])
 
     def test_thumbnail_failure_does_not_cancel_the_upload(self):
         self.bucket.fail_on = '_thumb.webp'

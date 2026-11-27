@@ -52,11 +52,11 @@ Flask на карточку. Подпись — один запрос на ка�
 import io
 import logging
 import os
-import re
 import time
 import uuid
 from datetime import datetime, timedelta
 
+from common import file_names
 from wiki import images as wiki_images
 
 # Что показываем плиткой. Список намеренно узкий и совпадает с фронтом
@@ -154,18 +154,18 @@ def _is_editable_diagram(data, filename, kind):
 
 
 def webp_file_name(original_name):
-    """Имя вложения после перевода: «IMG_1234.jpg» → «IMG_1234.webp».
+    """Имя вложения после перевода: «IMG_1234.jpg» → «IMG_1234.webp»,
+    «Скриншот 27.11.png» → «Скриншот 27.11.webp».
 
-    Берём ИСХОДНОЕ имя, а не то, что уже прошло secure_filename: тот выбрасывает
-    кириллицу, и «фото.jpg» доезжает до базы как «jpg» — после перевода вышло бы
-    «jpg.webp». Нелатинское имя становится «photo.webp». У старых вложений
-    исходного имени уже нет, в базе лежит «jpg» — он тоже становится «photo.webp».
+    Кириллица остаётся (владелец 27.11.2026: имена файлов в задачах терялись —
+    до того нелатинское имя становилось «photo.webp»). У старых вложений
+    исходного имени уже нет: secure_filename оставил в базе от «фото.jpg» одно
+    «jpg» — такое имя становится «photo.webp», а не «jpg.webp».
     """
-    base = os.path.splitext(os.path.basename(str(original_name or '').replace('\\', '/')))[0]
-    safe = re.sub(r'[^A-Za-z0-9._-]+', '_', base).strip('._')[:120]
-    if safe.lower() in _BARE_NAMES:
-        safe = ''
-    return (safe or 'photo') + '.webp'
+    stem = os.path.splitext(file_names.display_name(original_name, fallback=''))[0].rstrip('. ')
+    if stem.lower() in _BARE_NAMES:
+        stem = ''
+    return file_names.display_name((stem or 'photo') + '.webp')
 
 
 def thumb_blob_path(blob_path):
@@ -253,7 +253,7 @@ def legacy_blob_path(old_path, file_name):
     совпади пути, стёрся бы как раз новый.
     """
     folder = os.path.dirname(str(old_path or ''))
-    name = f'{uuid.uuid4().hex}_{file_name}'
+    name = f'{uuid.uuid4().hex}_{file_names.storage_name(file_name, fallback="photo")}'
     return f'{folder}/{name}' if folder else name
 
 

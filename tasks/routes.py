@@ -4,6 +4,7 @@
 Зависимости от процесса монолита приходят аргументами build_tasks_blueprint,
 как у остальных пакетов репозитория."""
 from flask import Blueprint, g, jsonify, request, send_file
+from common import file_names
 from common import log_secrets
 from database import db
 from datetime import datetime
@@ -15,7 +16,6 @@ from openpyxl.styles import Alignment
 from openpyxl.styles import Font
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
-from werkzeug.utils import secure_filename
 import collections
 import concurrent.futures
 import html
@@ -915,7 +915,10 @@ def build_tasks_blueprint(
             if len(file_data) > TASK_MAX_FILE_SIZE_BYTES:
                 raise ValueError(f"File '{file_storage.filename}' exceeds 10 MB limit")
 
-            safe_name = secure_filename(file_storage.filename) or f'attachment_{idx + 1}'
+            # Имя — как у человека на диске. secure_filename выбрасывал кириллицу:
+            # «Отчёт за ноябрь.xlsx» ложился в базу как «xlsx» (владелец 27.11.2026:
+            # «названия файлов, которые загружаются в задачах, теряются»).
+            safe_name = file_names.display_name(file_storage.filename, fallback=f'attachment_{idx + 1}')
             content_type = (file_storage.mimetype or '').strip() or 'application/octet-stream'
 
             # Картинка уходит в бакет WebP'ом, рядом — миниатюра для плитки в
@@ -933,10 +936,11 @@ def build_tasks_blueprint(
                 content_type = photo['content_type']
                 safe_name = photo['file_name']
 
+            # Путь в бакете — латиницей (человек его не видит), имя — в базе.
             blob_path = (
                 f"{upload_prefix}tasks/{stage}/"
                 f"{datetime.utcnow().strftime('%Y/%m/%d')}/"
-                f"{uuid.uuid4().hex}_{safe_name}"
+                f"{uuid.uuid4().hex}_{file_names.storage_name(safe_name, fallback=f'attachment_{idx + 1}')}"
             )
 
             blob = gcs_bucket.blob(blob_path)
