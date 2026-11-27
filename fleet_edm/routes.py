@@ -447,17 +447,28 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                          job_id)
         except FleetSessionExpired as error:
             in_flight = selection is not None and selection.main is not None
-            if selection is None or (in_flight and selection.name == accounts.OWN):
-                # Не настроена ни одна учётка, или своя умерла посреди обхода.
-                # Протухшую на выборе уже отметили выше, а чужую строку
-                # («Рассылок») раздел не трогает — её ведут «Рассылки».
-                _mark_own_session_error([(accounts.OWN, error)])
-            if in_flight and selection.spare:
-                # Основная умерла посреди обхода, а запасная есть: контрольная
-                # точка на месте — подхват начнёт с выбора учётки и продолжит ею.
+            if in_flight and _session_alive(selection.main) is not False:
+                # «Страница вместо данных» посреди обхода, а список диспетчерских
+                # той же учётке отвечает (или кабинет сейчас не ответил вовсе) —
+                # значит вход жив, и это не повод закрывать выгрузку ошибкой «нужен
+                # новый вход»: отдаём на подхват, он начнёт с выбора учётки и сам
+                # узнает правду. Протухший вход подхват закроет честно.
+                logging.warning("Провайдер ЭДО: задание %s — кабинет ответил «%s», "
+                                "но учётка жива — оставляем на подхват",
+                                job_id, str(error)[:160])
                 _pause(job_id, error)
             else:
-                _fail(job_id, error, 'session_expired', requests_count)
+                if selection is None or (in_flight and selection.name == accounts.OWN):
+                    # Не настроена ни одна учётка, или своя умерла посреди обхода.
+                    # Протухшую на выборе уже отметили выше, а чужую строку
+                    # («Рассылок») раздел не трогает — её ведут «Рассылки».
+                    _mark_own_session_error([(accounts.OWN, error)])
+                if in_flight and selection.spare:
+                    # Основная умерла посреди обхода, а запасная есть: контрольная
+                    # точка на месте — подхват начнёт с выбора учётки и продолжит ею.
+                    _pause(job_id, error)
+                else:
+                    _fail(job_id, error, 'session_expired', requests_count)
         except engine.InputError as error:
             _fail(job_id, error, 'bad_file', requests_count)
         except FleetAccessDenied as error:
@@ -481,6 +492,21 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
             life.close()
             with _local_lock:
                 _local_jobs.discard(job_id)
+
+    def _session_alive(client):
+        """Жив ли вход учётки: True — список диспетчерских отвечает, False —
+        кабинет сказал «нужен новый вход», None — не знаем (сеть, 5xx, 429).
+
+        Одна ручка без парка и без лимита карточек — тот же вопрос, с которого
+        начинается выбор учётки (accounts.choose)."""
+        try:
+            return bool(client.parks())
+        except FleetSessionExpired:
+            return False
+        except Exception:  # noqa: BLE001 — любой другой ответ значит «не знаем»
+            logging.warning("Провайдер ЭДО: не удалось перепроверить вход учётки",
+                            exc_info=True)
+            return None
 
     def _fail(job_id, error, code, requests_count):
         try:

@@ -1418,25 +1418,48 @@ def _run_parallel(client, tasks, worker, *, stop=None, on_result=None):
     (добор карточками — до тысячи запросов) обязаны отмечаться в базе по ходу
     дела и складывать найденное в контрольную точку. Порядок результатов при
     этом теряется — всем вызывающим он безразличен, они кладут ответы в словари.
+
+    УПАВШАЯ ЗАДАЧА ОСТАНАВЛИВАЕТ ПРОХОД СРАЗУ (27.11.2026, выгрузка №65, 244 616
+    строк). Задачи кладутся в пул все разом, и раньше выход из `with
+    ThreadPoolExecutor` после исключения ждал, пока выполнятся ВСЕ ещё не
+    начатые: 26.11 в 14:47 UTC одна карточка из 28 363 упала посреди шторма
+    отказов кабинета, и следующие 16 часов пул спрашивал оставшиеся 27 тысяч
+    карточек впустую — ответы никто не принимал, в кеш и контрольную точку не
+    легло ни одного, а пульс выгрузки шёл, и подхват её не трогал. Теперь
+    неначатые задачи отменяются, дожидаемся только уже летящих (их не больше
+    числа потоков), и ошибка уходит наружу — вызывающий решает, пауза это или
+    конец.
+
+    Один поток — задачи по очереди, ВСЕ. До 27.11.2026 здесь выполнялась только
+    первая, остальные молча терялись (латентный дефект, найденный 26.08.2026 в
+    автономной копии раздела: в портале не стрелял, потому что клиент держит пол
+    в два потока).
     """
     if not tasks:
         return []
     if stop:
         stop()
     workers = max(1, min(client.concurrency, len(tasks)))
-    if workers == 1:
-        outcome = worker(tasks[0])
-        if on_result:
-            on_result(outcome, 1, 1)
-        return [outcome]
     collected = []
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='fleet-edm-io') as pool:
+    if workers == 1:
+        for done, task in enumerate(tasks, start=1):
+            outcome = worker(task)
+            collected.append(outcome)
+            if on_result:
+                on_result(outcome, done, len(tasks))
+        return collected
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='fleet-edm-io')
+    try:
         futures = [pool.submit(worker, task) for task in tasks]
         for done, future in enumerate(as_completed(futures), start=1):
             outcome = future.result()
             collected.append(outcome)
             if on_result:
                 on_result(outcome, done, len(tasks))
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
     return collected
 
 

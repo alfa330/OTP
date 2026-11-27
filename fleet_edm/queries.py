@@ -222,8 +222,24 @@ def has_running_job(cursor):
     return int(row[0]) if row else None
 
 
+# Залипаний подряд с учётом только что умершей попытки: прожила она дольше
+# long_attempt_seconds (от attempt_started_at до последнего удара пульса) — счёт с
+# нуля, умерла быстро — плюс одно. Один и тот же текст в orphan_jobs и claim_job:
+# решение «закрыть» и «подхватить» обязано считать одинаково.
+_STALLS_AFTER_SQL = """
+    (CASE WHEN COALESCE(progress_at, started_at, created_at)
+               - COALESCE(attempt_started_at, started_at, created_at)
+               >= make_interval(secs => %(long_attempt)s)
+          THEN 0 ELSE stalls + 1 END)"""
+
+# Попытка, прожившая столько, сделала настоящую работу: её убила выкладка, а не
+# клинч в одном месте (клинч падает за минуты — №44: 35 подхватов за полтора часа).
+LONG_ATTEMPT_SECONDS = 600
+
+
 def orphan_jobs(cursor, instance_id, silence_seconds=90, own_silence_seconds=600,
-                max_attempts=40):
+                max_attempts=40, max_attempts_total=150,
+                long_attempt_seconds=LONG_ATTEMPT_SECONDS):
     """Выгрузки, за которыми больше никого нет, — их нужно подхватить.
 
     Поток выгрузки живёт в памяти процесса, а процесс на Render перезапускается
@@ -253,8 +269,18 @@ def orphan_jobs(cursor, instance_id, silence_seconds=90, own_silence_seconds=600
     Порог всё равно нужен: он ловит выгрузку, которая падает всегда в одном и том
     же месте (такой клинч случился в тот же день — см. card_task в engine.py).
     Но ловить он должен настоящее залипание, а не обычный рабочий день с деплоями.
-    Сорок — это примерно шесть часов при нынешнем темпе перезапусков.
+
+    27.11.2026 порог считает ЗАЛИПАНИЯ, а не подхваты: max_attempts — попыток
+    подряд, умерших быстрее long_attempt_seconds (stalls). Выгрузка №65 на 244 616
+    строк — ~37 тысяч карточек, сутки работы одной учёткой; 26.11 её подхватили 12
+    раз за 7,5 часа выкладками прода, и каждая попытка до выкладки честно работала
+    (10–111 минут). Сорок подхватов всего — это «шесть часов при нынешнем темпе
+    перезапусков», а ей нужны сутки. Общий предел max_attempts_total остаётся
+    страховкой от клинча, где попытка живёт долго и падает всегда в одном месте.
     """
+    params = {'instance': instance_id, 'silence': int(silence_seconds),
+              'own_silence': int(own_silence_seconds), 'max_attempts': int(max_attempts),
+              'max_total': int(max_attempts_total), 'long_attempt': int(long_attempt_seconds)}
     cursor.execute(
         """
         UPDATE fleet_edm_jobs
@@ -263,12 +289,12 @@ def orphan_jobs(cursor, instance_id, silence_seconds=90, own_silence_seconds=600
                error_code = 'too_many_restarts',
                finished_at = NOW()
          WHERE status = 'running'
-           AND attempts >= %s
+           AND ({stalls} >= %(max_attempts)s OR attempts >= %(max_total)s)
            AND COALESCE(progress_at, started_at, created_at)
-               < NOW() - make_interval(secs => %s)
+               < NOW() - make_interval(secs => %(silence)s)
         RETURNING id
-        """,
-        (int(max_attempts), int(silence_seconds)),
+        """.format(stalls=_STALLS_AFTER_SQL),
+        params,
     )
     exhausted = [int(row[0]) for row in cursor.fetchall()]
 
@@ -277,8 +303,9 @@ def orphan_jobs(cursor, instance_id, silence_seconds=90, own_silence_seconds=600
         SELECT id
           FROM fleet_edm_jobs
          WHERE status = 'running'
-           AND attempts < %(max_attempts)s
-           AND (
+           AND {stalls} < %(max_attempts)s
+           AND attempts < %(max_total)s
+           AND (""".format(stalls=_STALLS_AFTER_SQL) + """
                  (owner_instance IS DISTINCT FROM %(instance)s
                   AND COALESCE(progress_at, started_at, created_at)
                       < NOW() - make_interval(secs => %(silence)s))
@@ -289,29 +316,36 @@ def orphan_jobs(cursor, instance_id, silence_seconds=90, own_silence_seconds=600
                )
          ORDER BY id
         """,
-        {'instance': instance_id, 'silence': int(silence_seconds),
-         'own_silence': int(own_silence_seconds), 'max_attempts': int(max_attempts)},
+        params,
     )
     return {'resume': [int(row[0]) for row in cursor.fetchall()], 'exhausted': exhausted}
 
 
-def claim_job(cursor, job_id, instance_id, note=None):
+def claim_job(cursor, job_id, instance_id, note=None,
+              long_attempt_seconds=LONG_ATTEMPT_SECONDS):
     """Забрать выгрузку себе. Возвращает номер попытки либо None, если её уже
     забрал кто-то другой (на одном инстансе такого не бывает, но условие в
-    UPDATE стоит дешевле, чем разбор гонки, если инстансов станет два)."""
+    UPDATE стоит дешевле, чем разбор гонки, если инстансов станет два).
+
+    Заодно закрывается счёт прошлой попытки (stalls, см. orphan_jobs): выражение
+    в SET видит строку ДО обновления, то есть её attempt_started_at и последний
+    удар пульса."""
     cursor.execute(
         """
         UPDATE fleet_edm_jobs
-           SET owner_instance = %s,
+           SET owner_instance = %(instance)s,
                attempts = attempts + 1,
+               stalls = {stalls},
+               attempt_started_at = NOW(),
                progress_at = NOW(),
-               progress_note = COALESCE(%s, progress_note)
-         WHERE id = %s
+               progress_note = COALESCE(%(note)s, progress_note)
+         WHERE id = %(job_id)s
            AND status = 'running'
-           AND owner_instance IS DISTINCT FROM %s
+           AND owner_instance IS DISTINCT FROM %(instance)s
         RETURNING attempts
-        """,
-        (instance_id, (str(note)[:500] if note else None), int(job_id), instance_id),
+        """.format(stalls=_STALLS_AFTER_SQL),
+        {'instance': instance_id, 'note': (str(note)[:500] if note else None),
+         'job_id': int(job_id), 'long_attempt': int(long_attempt_seconds)},
     )
     row = cursor.fetchone()
     return int(row[0]) if row else None

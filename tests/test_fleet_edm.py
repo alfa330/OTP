@@ -486,6 +486,28 @@ class VerifyByCardTest(unittest.TestCase):
             self.assertEqual(entry['provider_name'], 'Бумажный документооборот')
             self.assertNotIn('card_checked', entry)
 
+    def test_refused_card_stops_the_pass_instead_of_asking_everyone(self):
+        """27.11.2026, выгрузка №65: одна карточка из 28 363 упала посреди шторма
+        отказов, и пул ещё 16 часов спрашивал оставшиеся 27 тысяч впустую —
+        ответы никто не принимал, а пульс выгрузки шёл. Ошибка обязана уйти
+        наружу сразу: спрошено не больше, чем летело в потоках."""
+        import time
+        drivers = self._drivers(count=400)
+
+        class RefusesOnce(FakeClient):
+            def driver_card(self, park_id, driver_id):
+                card = super().driver_card(park_id, driver_id)
+                time.sleep(0.002)      # как запрос: потоки не обгоняют главный на сотни карточек
+                if len(self.card_calls) == 5:
+                    raise FleetThrottled('кабинет отказывает 15 мин подряд')
+                return card
+
+        client = RefusesOnce(drivers)
+        with self.assertRaises(FleetThrottled):
+            engine.resolve(_park_rows(drivers), client, control_sample=0)
+        # До правки — все 400: пул дожимал очередь, выбрасывая ответы.
+        self.assertLess(len(client.card_calls), 40)
+
     def test_resume_does_not_re_ask_confirmed_rows(self):
         # Проход длинный, а деплой разрешения не спрашивает: подтверждённые
         # строки приезжают из контрольной точки с отметкой и второй раз не
@@ -1172,6 +1194,45 @@ class NeedsClassificationTest(unittest.TestCase):
         self.assertFalse(engine._needs_classification(no_park))
 
 
+class RunParallelTest(unittest.TestCase):
+    """engine._run_parallel — общий для раундов и карточек способ раскладки."""
+
+    class _Threads:
+        def __init__(self, concurrency):
+            self.concurrency = concurrency
+
+    def test_failed_task_cancels_the_rest(self):
+        import time
+        calls, seen = [], []
+        lock = threading.Lock()
+
+        def worker(task):
+            with lock:
+                calls.append(task)
+            time.sleep(0.002)          # как запрос: потоки не обгоняют главный на сотни задач
+            if task == 50:
+                raise RuntimeError('одна задача упала')
+            return task
+
+        with self.assertRaises(RuntimeError):
+            engine._run_parallel(self._Threads(4), list(range(2000)), worker,
+                                 on_result=lambda outcome, done, total: seen.append(outcome))
+        # Раньше выход из пула ждал все 2000 — ответы при этом выбрасывались.
+        self.assertLess(len(calls), 200)
+        self.assertNotIn(50, seen)
+
+    def test_single_thread_runs_every_task(self):
+        """Один поток — все задачи по очереди. До 27.11.2026 выполнялась только
+        первая, а остальные молча терялись — вызывающий читал это как «в этих
+        диспетчерских никого нет»."""
+        seen = []
+        result = engine._run_parallel(self._Threads(1), [1, 2, 3], lambda task: task * 10,
+                                      on_result=lambda outcome, done, total:
+                                      seen.append((outcome, done, total)))
+        self.assertEqual(result, [10, 20, 30])
+        self.assertEqual(seen, [(10, 1, 3), (20, 2, 3), (30, 3, 3)])
+
+
 class ParallelismTest(unittest.TestCase):
     def test_one_park_is_sliced_so_threads_are_not_idle(self):
         """Файл из одной диспетчерской: без нарезки шесть потоков ждали бы один."""
@@ -1300,6 +1361,74 @@ class RefusalPatienceTest(unittest.TestCase):
         with self.assertRaises(FleetThrottled):
             client.driver_card(PARK_A, _driver_id(2))
         self.assertEqual(session.calls, before + 1)
+
+    class _Page(_Response):
+        """Страница вместо JSON: адрес после переадресаций и тело HTML."""
+
+        def __init__(self, url, status=200):
+            super().__init__(status)
+            self.url = url
+            self.content = b'<html>...</html>'
+            self.headers = {'content-type': 'text/html; charset=utf-8'}
+
+        def json(self):
+            raise ValueError('not json')
+
+    class _Scripted:
+        """Транспорт по сценарию: ответы готовыми объектами, по порядку."""
+
+        def __init__(self, responses):
+            self.responses = list(responses)
+            self.calls = 0
+            self.cookies = type('J', (), {'update': lambda self, value: None})()
+
+        def request(self, method, url, headers=None, data=None, timeout=None):
+            self.calls += 1
+            return self.responses.pop(0)
+
+    def test_antirobot_page_is_a_pause_not_an_expired_login(self):
+        """Проверка «я не робот» Яндекса (антиробот уводит на /showcaptcha) — это
+        «подожди», как 429. Раньше она читалась «сессия протухла»: выгрузку на
+        запасной учётке закрывали ошибкой «нужен новый вход» при живом входе."""
+        session = self._Scripted([
+            self._Page('https://fleet.yandex.kz/showcaptcha?cc=1&retpath=x'),
+            self._Response(200),
+        ])
+        client = FleetClient({'Session_id': 'x'}, 'UA', session=session)
+        profile = client.driver_card(PARK_A, _driver_id(1))
+        self.assertEqual(profile['edm_provider'], 'Sapar')
+        self.assertEqual(session.calls, 2)
+
+    def test_login_page_is_still_an_expired_login_and_says_where(self):
+        session = self._Scripted([self._Page('https://passport.yandex.kz/auth?retpath=secret')])
+        client = FleetClient({'Session_id': 'x'}, 'UA', session=session)
+        with self.assertRaises(FleetSessionExpired) as caught:
+            client.driver_card(PARK_A, _driver_id(1))
+        self.assertIn('passport.yandex.kz/auth', str(caught.exception))
+        self.assertNotIn('secret', str(caught.exception))   # строка запроса — не в текст
+
+    def test_card_of_unknown_shape_is_a_card_error_not_a_crash(self):
+        """Не-объект в ответе — FleetError («эту карточку не спросили»): исключение
+        не из FleetError проходы карточек не ловят, и оно роняло весь проход."""
+
+        class Shaped(RefusalPatienceTest._Response):
+            def __init__(self, payload):
+                super().__init__(200)
+                self.payload = payload
+
+            def json(self):
+                return self.payload
+
+        for payload in ([], {'driver': []}, {'driver': {'driver_profile': 'x'}}):
+            session = self._Scripted([Shaped(payload)])
+            client = FleetClient({'Session_id': 'x'}, 'UA', session=session)
+            with self.assertRaises(FleetError) as caught:
+                client.driver_card(PARK_A, _driver_id(1))
+            self.assertNotIsInstance(caught.exception, FleetSessionExpired)
+        # Нет водителя в ответе — по-прежнему «в этом парке его нет».
+        session = self._Scripted([Shaped({'driver': {}})])
+        client = FleetClient({'Session_id': 'x'}, 'UA', session=session)
+        self.assertIsNone(client.driver_card(PARK_A, _driver_id(1)))
 
     def test_cards_keep_the_measured_pace(self):
         session = self._Session([])
@@ -1789,10 +1918,27 @@ class _Expired(FakeClient):
 
 
 class _DiesMidRun(FakeClient):
-    """Вход жив на старте и умирает посреди обхода."""
+    """Вход жив на старте и умирает посреди обхода — с этого момента любой запрос,
+    и список диспетчерских тоже, отвечает «нужен новый вход»."""
+
+    dead = False
+
+    def parks(self, park_id=None):
+        if self.dead:
+            raise FleetSessionExpired(EXPIRED_401)
+        return super().parks(park_id)
 
     def contractors_all(self, *args, **kwargs):
+        self.dead = True
         raise FleetSessionExpired(EXPIRED_401)
+
+
+class _PageMidRun(FakeClient):
+    """Посреди обхода кабинет один раз отдаёт страницу вместо данных, а вход жив:
+    список диспетчерских отвечает как прежде (26.11.2026, шторм отказов)."""
+
+    def contractors_all(self, *args, **kwargs):
+        raise FleetSessionExpired('Кабинет Fleet ответил страницей входа вместо данных.')
 
 
 class RunJobAccountTest(unittest.TestCase):
@@ -1937,6 +2083,25 @@ class RunJobAccountTest(unittest.TestCase):
         self.assertEqual(self.calls['finish'], [])
         self.assertEqual(len(self.calls['release']), 1)
         self.assertEqual(self.calls['session_error'], [EXPIRED_401])
+
+    def test_page_mid_run_with_live_login_goes_back_to_the_queue(self):
+        """Запасная учётка — единственная, и посреди обхода кабинет отдал страницу
+        вместо данных. Список диспетчерских ей отвечает, значит вход жив: не
+        «Ошибка · нужен новый вход», а подхват."""
+        self.clients = {'own': _Expired(self.drivers), 'mailings': _PageMidRun(self.drivers)}
+        self._overview_and_run()
+        self.assertEqual(self.calls['finish'], [])
+        self.assertEqual(len(self.calls['release']), 1)
+        # Свою отметили протухшей ещё на выборе учётки — это правда; запасную
+        # раздел протухшей не объявляет.
+        self.assertEqual(self.calls['session_error'], [EXPIRED_401])
+
+    def test_only_account_really_dying_mid_run_is_an_honest_error(self):
+        self.clients = {'own': _Expired(self.drivers), 'mailings': _DiesMidRun(self.drivers)}
+        self._overview_and_run()
+        self.assertEqual([call.get('error_code') for call in self.calls['finish']],
+                         ['session_expired'])
+        self.assertEqual(self.calls['release'], [])
 
     def test_both_accounts_dead_is_still_an_honest_error(self):
         self.clients = {'own': _Expired(self.drivers), 'mailings': _Expired(self.drivers)}

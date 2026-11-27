@@ -34,6 +34,7 @@ import json
 import logging
 import threading
 import time
+from urllib.parse import urlsplit
 
 import requests
 
@@ -406,7 +407,7 @@ class FleetClient:
                 time.sleep(min(self._max_delay, 3.0 * attempt))
                 continue
 
-            if response.status_code == 429:
+            if response.status_code == 429 or self._antirobot(response):
                 backoff = self._note_throttled()
                 if pacer is not None:
                     pacer.slower()
@@ -421,8 +422,11 @@ class FleetClient:
                     raise FleetThrottled(
                         'Кабинет отказывает (429) уже {:.0f} мин подряд — продолжим '
                         'позже'.format(max(now - throttled_since, 0) / 60))
-                logging.warning('%s: кабинет просит помедленнее, пауза %.1f с',
-                                self.LOG_LABEL, backoff)
+                logging.warning('%s: кабинет просит помедленнее%s, пауза %.1f с',
+                                self.LOG_LABEL,
+                                '' if response.status_code == 429
+                                else ' (проверка «я не робот», {})'.format(response.status_code),
+                                backoff)
                 last_error = FleetError('429 Too Many Requests')
                 continue
 
@@ -461,8 +465,8 @@ class FleetClient:
                 # нашей же ошибки в теле запроса.
                 if response.status_code == 200:
                     raise FleetSessionExpired(
-                        'Кабинет Fleet ответил страницей входа вместо данных. '
-                        'Сессия протухла, нужен новый вход.'
+                        'Кабинет Fleet ответил страницей входа вместо данных{}. '
+                        'Сессия протухла, нужен новый вход.'.format(self._where(response))
                     )
                 raise FleetError(
                     'Fleet вернул {} без JSON (тело {} байт, content-type {}) — '
@@ -486,6 +490,28 @@ class FleetClient:
             return payload
 
         raise FleetError('Fleet не ответил после {} попыток: {}'.format(attempts, last_error))
+
+    # Пути проверки «я не робот» Яндекса: на них антиробот уводит запрос, когда
+    # считает его автоматическим. Это «подожди», а не «вход протух», — то же, что
+    # 429. Сверяем по адресу после переадресаций (requests идёт по 302 сам), а не
+    # по тексту страницы: в странице входа слово captcha тоже бывает, и протухшую
+    # сессию тогда ждали бы пятнадцать минут вместо честного «нужен новый вход».
+    ANTIROBOT_PATHS = ('/showcaptcha', '/checkcaptcha')
+
+    @classmethod
+    def _antirobot(cls, response):
+        path = urlsplit(str(getattr(response, 'url', '') or '')).path.lower()
+        return any(marker in path for marker in cls.ANTIROBOT_PATHS)
+
+    @staticmethod
+    def _where(response):
+        """« (passport.yandex.kz/auth)» — куда кабинет увёл запрос, без строки
+        запроса (в ней бывают ключи). Пусто, если адрес не менялся: тогда это
+        ровно ручка кабинета, и в тексте ошибки он ничего не добавит."""
+        parts = urlsplit(str(getattr(response, 'url', '') or ''))
+        if not parts.netloc or parts.netloc == urlsplit(BASE).netloc:
+            return ''
+        return ' ({}{})'.format(parts.netloc, parts.path[:60])
 
     # ── методы кабинета ──────────────────────────────────────────────────────
 
@@ -578,6 +604,11 @@ class FleetClient:
 
         Возвращает None, если водителя в этом парке нет (кабинет отвечает 404):
         для перебора парков это нормальный ответ, а не сбой.
+
+        Ответ не того вида (не объект, «driver» не объект) — FleetError, то есть
+        «эту карточку не спросили», а не AttributeError: исключение не из
+        FleetError проходы карточек не ловят, и одна такая строка роняла весь
+        проход (см. engine._run_parallel, 27.11.2026).
         """
         try:
             payload = self._request('POST', PATH_CARD, park_id=park_id,
@@ -586,7 +617,15 @@ class FleetClient:
             if '404' in str(error):
                 return None
             raise
-        return ((payload.get('driver') or {}).get('driver_profile')) or None
+        driver = payload.get('driver') if isinstance(payload, dict) else None
+        if not isinstance(payload, dict) or (driver is not None and not isinstance(driver, dict)):
+            raise FleetError('Карточка водителя: незнакомый ответ кабинета ({})'.format(
+                type(driver if isinstance(payload, dict) else payload).__name__))
+        profile = (driver or {}).get('driver_profile')
+        if profile is not None and not isinstance(profile, dict):
+            raise FleetError('Карточка водителя: незнакомый ответ кабинета ({})'.format(
+                type(profile).__name__))
+        return profile or None
 
     @staticmethod
     def card_provider(profile):

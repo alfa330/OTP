@@ -89,6 +89,16 @@ ALTER TABLE fleet_edm_jobs ADD COLUMN IF NOT EXISTS owner_instance TEXT;
 -- значит дело не в деплоях, и карточку надо честно закрыть ошибкой.
 ALTER TABLE fleet_edm_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 1;
 
+-- Залипание — это попытки, умершие БЫСТРО, подряд (stalls), а не все подхваты
+-- (attempts). 27.11.2026: выгрузка №65 на 244 616 строк — это ~37 тысяч карточек,
+-- сутки с лишним работы одной учёткой, а 26.11 её подхватили 12 раз за 7,5 часа
+-- выкладками прода, и каждая попытка честно работала до своей выкладки. Порог в
+-- сорок подхватов закрыл бы такую выгрузку «слишком много перезапусков» посреди
+-- работы. Попытка, прожившая дольше orphan_jobs(long_attempt_seconds), счёт
+-- залипания обнуляет; attempt_started_at — начало текущей попытки.
+ALTER TABLE fleet_edm_jobs ADD COLUMN IF NOT EXISTS stalls INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fleet_edm_jobs ADD COLUMN IF NOT EXISTS attempt_started_at TIMESTAMPTZ;
+
 -- Докуда дошёл обход: пройденные раунды и признак «перебор парков закончен».
 -- Строки результата лежат отдельной таблицей, а здесь — только этапы.
 ALTER TABLE fleet_edm_jobs ADD COLUMN IF NOT EXISTS checkpoint JSONB;
