@@ -339,7 +339,7 @@ def test_run_finds_goal_and_sapar_switch_and_credits_the_last_talk(env):
     assert env.crm.asked[0][0] == 'orders' and env.crm.asked[0][1] == sorted([D1, D2, D3])
     by_name = {i["lead_id"]: i for i in items}
     l1, l2, l3 = env.lead(D1), env.lead(D2), env.lead(D3)
-    assert by_name[l1]["driver"]["label"] == '34 из 50 поездок · ЭДО: Бумажный'
+    assert by_name[l1]["driver"]["label"] == '34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)'
     # Разговоры с первым и третьим (перед звонком — свежие поездки из карточки CRM).
     # Провайдер из файла карточкой ещё не проверяли — перед звонком его спрашивают заодно.
     env.crm.cards = {D1: {'park_id': PARK, 'total': 34, 'created_date': None},
@@ -403,7 +403,8 @@ def test_phone_gets_tez_mode_driver_line_and_no_number(env):
     assert (state["profile"], state["goal"], state["direct_dial"], state["auto"]["enabled"]) == (
         'tez', 'activation', False, True)
     item = state["portion"]["items"][0]
-    assert (item["driver"]["label"], item["driver"]["city"]) == ('34 из 50 поездок · ЭДО: Бумажный', 'Алматы')
+    assert (item["driver"]["label"], item["driver"]["city"]) == (
+        '34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)', 'Алматы')
     assert '77001110001' not in json.dumps(state, ensure_ascii=False)
     # Звонок — через АТС, номер телефону не уходит. Поездки, проверенные при выдаче, свежее 15 минут — не
     # переспрашиваются; час назад — перед звонком освежаются карточкой CRM.
@@ -412,7 +413,7 @@ def test_phone_gets_tez_mode_driver_line_and_no_number(env):
     call = env.svc.start_call(OPERATOR, item["assignment_id"], operator_status='outbound', phone_version='3.22.66')
     assert 'dial' not in call and env.binotel.originated == [('911', '77001110001')]
     active = env.svc.get_state(OPERATOR, phone_version='3.22.66')["active_attempt"]
-    assert active["driver"]["label"] == '35 из 50 поездок · ЭДО: Бумажный'
+    assert active["driver"]["label"] == '35 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)'
     # Блок dial_list для /api/operator/sip_settings: телефон в режиме автообзвона, номера спрятаны.
     env.svc.dial_operator = lambda uid, *a, **k: {"department_id": ACT, "department_provider": 'binotel'}
     block = env.svc.phone_settings(OPERATOR, member=None)
@@ -781,7 +782,7 @@ def test_switching_a_line_moves_the_operator_between_bases_without_touching_the_
     state = svc.issue_next_portion(RCC_OWN, phone_version=GUARDED)
     assert (state["profile"], state["goal"]) == ('tez', 'activation')
     assert sorted(i["driver"]["label"] for i in state["portion"]["items"]) == [
-        '12 из 50 поездок · ЭДО: Payda', '34 из 50 поездок · ЭДО: Бумажный']
+        '12 из 50 поездок · ЭДО: Payda · Парк: Jana (Алматы)', '34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)']
     block = svc.phone_settings(RCC_OWN, member=None)
     assert (block["enabled"], block["profile"], block["goal"], block["auto"], block["no_active"]) == (
         True, 'tez', 'activation', True, False)

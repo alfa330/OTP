@@ -149,6 +149,10 @@ class LabelTests(unittest.TestCase):
         block = activation.driver_block(34, 50, None, 'Бумажный документооборот', 'file', city='Алматы')
         self.assertEqual(block['label'], '34 из 50 поездок · ЭДО: Бумажный')
         self.assertEqual(block['city'], 'Алматы')
+        # Парк водителя (владелец 27.11.2026) — в конце строки, пробелы схлопнуты.
+        block = activation.driver_block(34, 50, None, 'Бумажный документооборот', 'file', city='Алматы',
+                                        park='  Jana   (Алматы) ')
+        self.assertEqual(block['label'], '34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)')
         self.assertEqual(block['profile_url'], '')
         self.assertNotIn('phone', block)
 

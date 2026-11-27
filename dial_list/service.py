@@ -6263,12 +6263,13 @@ class DialListService:
                 **({"phone": phone_display(r[34])} if with_phone else {}),
             })
             if tez and goal is not None:
-                # «Активация водителей»: строка водителя — «34 из 50 поездок · ЭДО: Бумажный».
-                items[-1]["driver"] = activation.driver_block(r[34], goal, r[35], r[36], r[37], city=r[31] or "")
+                # «Активация водителей»: строка водителя — «34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)».
+                items[-1]["driver"] = activation.driver_block(r[34], goal, r[35], r[36], r[37], city=r[31] or "",
+                                                              park=(r[38] if len(r) > 38 else "") or "")
         return items
 
     # «Активация водителей» (26.11.2026): поездки, добрал ли и провайдер ЭДО — для строки водителя телефону.
-    _PORTION_ACTIVATION_COLUMNS = ", l.trips_total, l.signed_at, l.edm_provider, l.edm_source"
+    _PORTION_ACTIVATION_COLUMNS = ", l.trips_total, l.signed_at, l.edm_provider, l.edm_source, l.park_name"
 
     # Номер водителя в строке пачки — только автообзвону Тез с прямым звонком (with_phone). Отдельно от
     # _PORTION_TEZ_COLUMNS: старому телефону и удалённому КЦ номер не уходит.
@@ -6304,7 +6305,7 @@ class DialListService:
             SELECT (owner_operator_id = %s), due_kind, owner_call_at, promised_online_at,
                    month_first_order_at, last_order_before_at, trip_checked_at, driver_id,
                    city, account_registered_at, account_checked_at,
-                   trips_total, signed_at, edm_provider, edm_source
+                   trips_total, signed_at, edm_provider, edm_source, park_name
             FROM dial_list_leads WHERE id = %s
         """, (int(operator_id), str(lead_id)))
         r = cur.fetchone()
@@ -6312,7 +6313,8 @@ class DialListService:
             return {}
         block = self._tez_lead_block(bool(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10])
         if goal is not None:
-            block["driver"] = activation.driver_block(r[11], goal, r[12], r[13], r[14], city=r[8] or "")
+            block["driver"] = activation.driver_block(r[11], goal, r[12], r[13], r[14], city=r[8] or "",
+                                                      park=(r[15] if len(r) > 15 else "") or "")
         return block
 
     def _active_attempt(self, cur, user_id, include_ended=False):

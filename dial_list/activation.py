@@ -312,15 +312,19 @@ def provider_label(provider, source):
     return f"ЭДО: {name}" if name else "ЭДО: не знаем"
 
 
-def driver_label(trips_total, goal, reached_at, provider, source):
-    """Строка водителя в телефоне (driver.label): «34 из 50 поездок · ЭДО: Бумажный»."""
-    return f"{trips_label(trips_total, goal, reached_at)} · {provider_label(provider, source)}"
+def driver_label(trips_total, goal, reached_at, provider, source, park=""):
+    """Строка водителя в телефоне (driver.label): «34 из 50 поездок · ЭДО: Бумажный · Парк: Jana (Алматы)».
+    Парк — «Диспетчерская» из файла (владелец 27.11.2026: «срочно надо добавить парк водителя в отображаемой
+    информации у операторов»); в конце строки: телефон показывает label как есть, длинную строку режет с хвоста."""
+    label = f"{trips_label(trips_total, goal, reached_at)} · {provider_label(provider, source)}"
+    park = " ".join(str(park or "").split())
+    return f"{label} · Парк: {park}" if park else label
 
 
-def driver_block(trips_total, goal, reached_at, provider, source, city=""):
+def driver_block(trips_total, goal, reached_at, provider, source, city="", park=""):
     """Блок driver для телефона (тот же, что у Тез: label, profile_url, city, registered, registration_label).
     Ссылки в админку нет: кабинета Fleet у операторов нет. Номера нет."""
-    return {"label": driver_label(trips_total, goal, reached_at, provider, source),
+    return {"label": driver_label(trips_total, goal, reached_at, provider, source, park=park),
             "profile_url": "",
             "city": (city or "").strip(),
             "registered": None,
