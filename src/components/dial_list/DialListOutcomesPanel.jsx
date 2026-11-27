@@ -544,7 +544,8 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                     maxLength={OUTCOME_GROUP_NAME_MAX}
                                     placeholder="Название вкладки"
                                     aria-label="Название вкладки"
-                                    className={`${iosInput} w-52 py-1.5 text-[13px]`}
+                                    // Не iosInput: его w-full и text-[14px] перебивают ширину и размер.
+                                    className="w-52 rounded-xl border-0 bg-white px-3 py-1.5 text-[13px] text-slate-900 placeholder-slate-400 ring-1 ring-slate-200 transition focus:outline-none focus:ring-2 focus:ring-blue-500/70 disabled:opacity-60"
                                 />
                                 {openTab.key === mainKey ? (
                                     <span className="text-[12px] text-slate-500">Главная: её итог ведёт обзвон — дата и «перезвонить» только здесь</span>
@@ -633,7 +634,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                                     onChange={(e) => patch(idx, { group: e.target.value })}
                                                     title="Перенести итог на другую вкладку"
                                                     aria-label={`Вкладка итога «${o.name || 'новый'}»`}
-                                                    className={`${iosInput} w-auto max-w-[150px] shrink-0 py-1.5 text-[12px]`}
+                                                    className="w-[150px] shrink-0 rounded-lg border-0 bg-slate-100 px-2.5 py-1.5 text-[12px] text-slate-700 transition focus:outline-none focus:ring-2 focus:ring-blue-500/70"
                                                 >
                                                     {groups.map((g) => (
                                                         <option key={g.key} value={g.key}>{String(g.name).trim() || 'Без названия'}</option>
