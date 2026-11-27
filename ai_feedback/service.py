@@ -636,8 +636,13 @@ GEMINI_THINKING_OFF_MODELS = ("gemini-2.5-flash",)
 #   openai/gpt-oss-120b     — 4,7с (модель «рассуждает»), лимит 8000 — не берём.
 # Лимит токенов у каждой модели свой, поэтому вторая модель — это запас на пик,
 # а не дубль: упёрлись в лимит первой → сразу пробуем вторую, и только потом Gemini.
+# 27.11.2026: llama-3.3-70b-versatile Groq снял — на каждую заявку она отвечала 404
+# (в /v1/models её нет; вики убрала её из своей цепочки ещё 01.09, wiki/ai/providers.py).
+# Из живых у Groq остались gpt-oss-20b, gpt-oss-120b (медленная, см. выше) и
+# qwen3.8-27b — её на промпте заявки не мерили, поэтому вторым звеном не ставим:
+# после gpt-oss-20b заявка идёт в Gemini через Vertex.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-DEFAULT_GROQ_MODEL_CHAIN = ["llama-3.3-70b-versatile", "openai/gpt-oss-20b"]
+DEFAULT_GROQ_MODEL_CHAIN = ["openai/gpt-oss-20b"]
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # Таймаут одной попытки. Держим коротким: лучше быстро уйти на следующую модель,

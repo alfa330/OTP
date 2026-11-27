@@ -609,15 +609,18 @@ class ItTicketsMixin:
 
     def record_it_ticket(self, *, profile, category, subcategory, priority, title, body,
                          fields, channel_id, channel_chat_id, channel_title,
-                         telegram_message_id, status, created_by, created_by_name):
+                         telegram_message_id, status, created_by, created_by_name, task_id=None):
+        """Строка журнала заявок. task_id — задача на доске IT Helpdesk, которой
+        заявка стала (с 27.11.2026 заявки ставят в «Задачах», status='task');
+        у старых заявок, ушедших в Telegram-канал, его нет."""
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
                 INSERT INTO it_tickets
                     (profile, category, subcategory, priority, title, body, fields,
                      channel_id, channel_chat_id, channel_title, telegram_message_id,
-                     status, created_by, created_by_name)
-                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)
+                     status, created_by, created_by_name, task_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, created_at
                 """,
                 (
@@ -625,6 +628,7 @@ class ItTicketsMixin:
                     json.dumps(fields or {}, ensure_ascii=False),
                     channel_id, channel_chat_id, channel_title, telegram_message_id,
                     status, created_by, created_by_name,
+                    int(task_id) if task_id is not None else None,
                 ),
             )
             row = cursor.fetchone()
@@ -638,7 +642,8 @@ class ItTicketsMixin:
             cursor.execute(
                 """
                 SELECT id, profile, category, subcategory, priority, title, body,
-                       channel_title, telegram_message_id, status, created_by_name, created_at
+                       channel_title, telegram_message_id, status, created_by_name, created_at,
+                       task_id
                 FROM it_tickets
                 ORDER BY created_at DESC
                 LIMIT %s OFFSET %s
@@ -660,6 +665,7 @@ class ItTicketsMixin:
                     'status': row[9],
                     'created_by_name': row[10],
                     'created_at': row[11].strftime('%Y-%m-%d %H:%M:%S') if row[11] else None,
+                    'task_id': int(row[12]) if row[12] is not None else None,
                 })
             return items
 

@@ -596,6 +596,26 @@ class TasksMixin:
             """, (int(task_id), added_by, ordered))
         return ordered
 
+    def is_task_helpdesk_member(self, user_id):
+        """Человек — в составе доски заявок в IT (task_projects.HELPDESK_PROJECT_CODE).
+
+        Заявки в IT с 27.11.2026 ставят на этой доске (владелец: «перенести в
+        раздел задачи при отметке it helpdesk»), и её люди пользуются ИИ заявок
+        (/api/it_tickets/*) — даже если сами не СВ и не админы: на доску ставят
+        поимённо, а форма заявки на ней — та же, что у всех.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT 1
+                  FROM task_project_members pm
+                  JOIN task_projects p ON p.id = pm.project_id
+                 WHERE pm.user_id = %s
+                   AND UPPER(BTRIM(p.code)) = %s
+                   AND NOT p.is_archived
+                 LIMIT 1
+            """, (int(user_id), task_projects.HELPDESK_PROJECT_CODE))
+            return cursor.fetchone() is not None
+
     def get_task_projects(self, requester_id, requester_role):
         """Проекты для переключателя раздела, формы задачи и окна настройки.
 

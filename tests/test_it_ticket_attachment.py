@@ -15,7 +15,6 @@ from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = source_cache.monolith_flat_path()
-MODAL_PATH = ROOT / "src" / "components" / "technical" / "ITTicketModal.jsx"
 
 
 def _read(path):
@@ -139,53 +138,6 @@ class SendEndpointContractTests(unittest.TestCase):
 
     def test_limit_matches_telegram_bot_upload_cap(self):
         self.assertIn("IT_TICKET_ATTACH_MAX_BYTES = 20 * 1024 * 1024", _read(BOT_PATH))
-
-
-class ModalContractTests(unittest.TestCase):
-    def setUp(self):
-        self.source = _read(MODAL_PATH)
-
-    def test_form_is_reset_on_open(self):
-        # Модалка не размонтируется при закрытии: без сброса повторное открытие
-        # показывало бы прошлый отправленный тикет.
-        self.assertIn("Каждое открытие — чистая форма", self.source)
-        for setter in ("setPreviewText('')", "setAiFields([])", "setFieldValues({})",
-                       "setAttachment(null)", "setTriedSend(false)"):
-            with self.subTest(setter=setter):
-                self.assertIn(setter, self.source)
-
-    def test_required_fields_block_send_and_are_highlighted(self):
-        self.assertIn("missingRequired", self.source)
-        self.assertIn("if (missingRequired.length > 0)", self.source)
-        self.assertIn("ring-rose-400", self.source)
-        self.assertIn("invalid={triedSend && missingKeys.has(f.key)}", self.source)
-
-    def test_attachment_sent_as_multipart(self):
-        self.assertIn("new FormData()", self.source)
-        self.assertIn("form.append('attachment', attachment, attachment.name)", self.source)
-        self.assertIn("attachment_error", self.source)
-
-    def test_workplace_picker_has_select_all_and_clear(self):
-        self.assertIn("Все РМ", self.source)
-        self.assertIn("Очистить", self.source)
-        self.assertIn("toggleAllActive", self.source)
-
-    def test_checks_become_the_answer_about_what_was_tried(self):
-        # Отмеченные проверки должны сами заполнять «что уже пробовали» — иначе
-        # супервайзеру пришлось бы пересказывать это руками.
-        self.assertIn("triedFieldKey", self.source)
-        self.assertIn("Пробовали, не помогло:", self.source)
-        self.assertIn("toggleCheck", self.source)
-        self.assertIn("Попробуйте сначала", self.source)
-
-    def test_checks_hidden_when_ai_returned_none(self):
-        self.assertIn("aiChecks.length > 0 && (", self.source)
-
-    def test_workplace_picker_picks_up_ai_preselection(self):
-        # Значение от ИИ («РМ 16») может прийти после первого рендера, а раскладка
-        # кабинетов — подгрузиться позже; и то и другое должно отметиться на схеме.
-        self.assertIn("initSelectedFromValue(incoming, list)", self.source)
-        self.assertIn("syncRef", self.source)
 
 
 if __name__ == "__main__":

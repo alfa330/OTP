@@ -98,6 +98,16 @@ def build_it_tickets_blueprint(
         if require_admin and not is_admin:
             return None, None, None, (jsonify({"error": "Only admin can manage IT-ticket channels"}), 403)
         if not allowed:
+            # Заявки в IT с 27.11.2026 ставят в «Задачах» на доске IT Helpdesk: её
+            # люди пользуются ИИ заявок, даже не будучи СВ или админами. Права на
+            # настройки (темы, инструкции, каналы) это не даёт — они проверяются
+            # отдельно, по роли и отделу.
+            try:
+                allowed = db.is_task_helpdesk_member(requester_id)
+            except Exception:
+                logging.warning("IT-ticket helpdesk membership check failed", exc_info=True)
+                allowed = False
+        if not allowed:
             return None, None, None, (jsonify({"error": "Forbidden"}), 403)
         return requester_id, requester, role, None
 

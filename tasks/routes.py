@@ -16,6 +16,7 @@ from openpyxl.styles import Alignment
 from openpyxl.styles import Font
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
+from it_tickets import helpdesk as it_ticket_helpdesk
 import collections
 import concurrent.futures
 import html
@@ -2013,6 +2014,21 @@ def build_tasks_blueprint(
             except Exception as notify_error:
                 telegram_warning = f"Task created, but Telegram notification failed: {str(notify_error)}"
                 logging.error(f"Task Telegram notification error: {_telegram_exception_text(notify_error)}")
+
+            # Заявка в IT (владелец 27.11.2026): задача с доски IT Helpdesk из формы
+            # заявки — ещё и строкой журнала it_tickets (тема, отдел, срочность ИИ,
+            # поля). Сбой журнала задачу не трогает: она уже поставлена.
+            it_ticket_raw = request.form.get('it_ticket')
+            if it_ticket_raw:
+                it_ticket_helpdesk.record_task_ticket(
+                    db,
+                    raw_meta=it_ticket_raw,
+                    created=created,
+                    subject=subject,
+                    description=description,
+                    requester_id=requester_id,
+                    requester_name=requester[2] if requester else None,
+                )
 
             response_payload = {
                 "status": "success",

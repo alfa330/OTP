@@ -44,8 +44,11 @@ class DeadlineSubmitGuardTests(unittest.TestCase):
         )
 
     def test_issue_lists_on_screen_include_the_deadline(self):
-        # Красным у поля и стрелки ⌃ ⌄ берут ключи из этих списков.
-        self.assertIn('const createIssues = [...createBaseIssues, ...deadlineIssues(form)];', VIEW)
+        # Красным у поля и стрелки ⌃ ⌄ берут ключи из этих списков. У заявки в IT
+        # (доска IT Helpdesk, 27.11.2026) срока нет вовсе: срок, заданный до выбора
+        # доски, — скрытое поле, и упираться в него отправка заявки не должна.
+        self.assertIn(
+            'const createIssues = [...createBaseIssues, ...(createIsHelpdesk ? [] : deadlineIssues(form))];', VIEW)
         self.assertIn('const editIssues = [...editBaseIssues, ...deadlineIssues(editForm)];', VIEW)
 
 

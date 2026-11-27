@@ -2169,6 +2169,13 @@ class SchemaMixin:
                 CREATE INDEX IF NOT EXISTS idx_it_tickets_created_at
                 ON it_tickets(created_at);
             """)
+            # Заявки в IT с 27.11.2026 ставят в «Задачах» — задачей на доске IT
+            # Helpdesk (it_tickets/helpdesk.py); строка журнала помнит, какой.
+            # Без внешнего ключа: журнал — данные заявок, удалённая задача строку
+            # не трогает, а tasks в этой миграции создаётся позже it_tickets.
+            cursor.execute("""
+                ALTER TABLE it_tickets ADD COLUMN IF NOT EXISTS task_id INTEGER;
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS it_ticket_instructions (
                     profile VARCHAR(16) PRIMARY KEY,

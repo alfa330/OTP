@@ -89,13 +89,14 @@ class ProviderChainTests(unittest.TestCase):
         self.assertEqual(chain[0][0], "groq")
         self.assertIn("gemini", [provider for provider, _ in chain])
 
-    def test_two_groq_models_for_burst_headroom(self):
-        # Лимит токенов в минуту у каждой модели свой, поэтому вторая модель Groq —
-        # это запас на пик перед уходом на Gemini, а не дубль первой.
+    def test_groq_chain_has_no_decommissioned_models(self):
+        # llama-3.3-70b-versatile Groq снял (404 на каждую заявку, 27.11.2026): в
+        # цепочке по умолчанию её быть не должно. Вторым звеном после Groq — Gemini.
         models = service.DEFAULT_GROQ_MODEL_CHAIN
-        self.assertGreaterEqual(len(models), 2)
+        self.assertTrue(models)
         self.assertEqual(len(set(models)), len(models))
-        self.assertEqual(models[0], "llama-3.3-70b-versatile")
+        self.assertNotIn("llama-3.3-70b-versatile", models)
+        self.assertEqual(models[0], "openai/gpt-oss-20b")
 
     def test_gemini_only_when_groq_key_absent(self):
         with mock.patch.object(service, "GROQ_API_KEY", None), \

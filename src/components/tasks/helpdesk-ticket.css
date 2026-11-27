@@ -1,0 +1,295 @@
+/*
+ * Заявка в IT в форме задачи (доска IT Helpdesk) и её настройки.
+ *
+ * Язык — формы задачи: капсулы, серая панель раскрытого, сегменты, поля
+ * раздела (tv-composer-*, tv-input). Цвета — только переменными .tv-root
+ * (--ink, --surface, --select-*…): в тёмной теме их подменяет theme-dark.css,
+ * и блок не требует своих тёмных правил. Цвет несёт смысл: синий — выбор и
+ * действие ИИ, зелёный — сделанная проверка, красный — чего не хватает.
+ */
+
+/* ── Описание — на месте «Что нужно сделать?» ── */
+.tv-root .tv-hd-describe { display: flex; flex-direction: column; gap: 8px; border-radius: 12px; }
+.tv-root .tv-hd-description {
+  width: 100%; min-height: 104px; resize: vertical;
+  border: 0; outline: none; background: none;
+  padding: 0 2px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+  font-size: 17px; font-weight: 500; line-height: 1.45; color: var(--ink);
+}
+.tv-root .tv-hd-description::placeholder { color: var(--ink-3); font-weight: 500; }
+.tv-root .tv-hd-description[readonly] { color: var(--ink-2); }
+.tv-root .tv-hd-describe.is-invalid .tv-hd-description { box-shadow: inset 0 -2px 0 var(--rose); }
+.tv-root .tv-hd-describe-bar { display: flex; align-items: center; gap: 6px; }
+
+/* Действие ИИ — мягкий голубой: заметно, но не спорит с главной кнопкой окна. */
+.tv-root .tv-hd-ai-btn,
+.tv-root .tv-hd-compose-btn {
+  padding: 7px 13px; border-radius: 99px;
+  background: var(--select-bg); border-color: var(--select-border); color: var(--select-ink);
+  font-size: 12.5px; font-weight: 600;
+}
+.tv-root .tv-hd-ai-btn:hover:not(:disabled),
+.tv-root .tv-hd-compose-btn:hover:not(:disabled) { filter: brightness(.97); }
+.tv-root .tv-hd-spin { animation: tvHdSpin .9s linear infinite; }
+@keyframes tvHdSpin { to { transform: rotate(360deg); } }
+
+/* Настройки — у края ряда капсул, видны только тем, кто их правит. */
+.tv-root .tv-hd-settings-btn {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 9px; border: 0; border-radius: 8px;
+  background: none; cursor: pointer;
+  font-size: 12px; font-weight: 500; color: var(--ink-3);
+  transition: background .15s, color .15s;
+}
+.tv-root .tv-hd-settings-btn:hover:not(:disabled) { background: var(--fill); color: var(--ink); }
+.tv-root .tv-hd-settings-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ── Тема: категория и тип рядом ── */
+.tv-root .tv-hd-topic-row { align-items: flex-start; }
+.tv-root .tv-hd-topic-row > .tv-composer-row-label { min-height: 37px; display: inline-flex; align-items: center; }
+.tv-root .tv-hd-topic { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }
+.tv-root .tv-composer-details .tv-person-select > button { background: var(--surface); }
+.tv-root .tv-hd-note {
+  display: flex; align-items: flex-start; gap: 6px; margin: 0;
+  font-size: 12px; line-height: 1.45; color: var(--ink-2);
+}
+.tv-root .tv-hd-note svg { flex: none; margin-top: 2px; color: var(--select-ink); }
+
+/* ── Блоки ответа ИИ: советы, поля, текст ── */
+.tv-root .tv-hd-group {
+  margin-top: 12px; padding: 13px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  animation: tvHdIn .2s cubic-bezier(.22, 1, .36, 1);
+}
+@keyframes tvHdIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.tv-root .tv-hd-group-head { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.tv-root .tv-hd-group-title { font-size: 13px; font-weight: 600; color: var(--ink); }
+.tv-root .tv-hd-group .tv-input,
+.tv-root .tv-hd-group .tv-textarea,
+.tv-root .tv-hd-group .tv-person-select > button { background: var(--surface); }
+.tv-root .tv-hd-group-foot { display: flex; justify-content: flex-end; margin-top: 12px; }
+.tv-root .tv-hd-link {
+  margin-left: auto; padding: 3px 8px; border: 0; border-radius: 7px;
+  background: none; cursor: pointer;
+  font-size: 12.5px; font-weight: 600; color: var(--select-ink);
+}
+.tv-root .tv-hd-link:hover:not(:disabled) { background: var(--select-bg); }
+.tv-root .tv-hd-link:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Попробуйте сначала — строки с кружком-отметкой, как пункты чек-листа iOS. */
+.tv-root .tv-hd-checks { display: flex; flex-direction: column; gap: 2px; margin: -4px -6px; }
+.tv-root .tv-hd-check {
+  display: flex; align-items: flex-start; gap: 10px;
+  width: 100%; padding: 7px 6px; border: 0; border-radius: 9px;
+  background: none; cursor: pointer; text-align: left;
+  transition: background .13s;
+}
+.tv-root .tv-hd-check:hover:not(:disabled) { background: var(--fill); }
+.tv-root .tv-hd-check:active:not(:disabled) { transform: scale(.995); }
+.tv-root .tv-hd-check:disabled { cursor: not-allowed; opacity: .6; }
+.tv-root .tv-hd-check-box {
+  flex: none; display: grid; place-items: center;
+  width: 18px; height: 18px; margin-top: 1px;
+  border: 1.5px solid var(--border-strong); border-radius: 50%;
+  background: var(--surface); color: var(--accent-fg);
+  transition: background .15s, border-color .15s;
+}
+.tv-root .tv-hd-check.is-done .tv-hd-check-box { background: var(--emerald); border-color: var(--emerald); }
+.tv-root .tv-hd-check-text { font-size: 13px; line-height: 1.45; color: var(--ink); }
+.tv-root .tv-hd-check.is-done .tv-hd-check-text { color: var(--ink-3); text-decoration: line-through; }
+
+/* Детали — короткие поля по два в ряд, схема и длинный текст — во всю ширину. */
+.tv-root .tv-hd-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.tv-root .tv-hd-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.tv-root .tv-hd-field.is-wide { grid-column: 1 / -1; }
+.tv-root .tv-hd-field-label {
+  display: flex; align-items: center; gap: 4px; min-height: 18px;
+  font-size: 12px; font-weight: 500; color: var(--ink-2);
+}
+.tv-root .tv-hd-required { color: var(--rose); font-weight: 600; }
+.tv-root .tv-hd-field.is-invalid .tv-input,
+.tv-root .tv-hd-field.is-invalid .tv-textarea,
+.tv-root .tv-hd-field.is-invalid .tv-person-select > button:not([aria-expanded="true"]) {
+  border-color: var(--rose);
+}
+
+/* Текст заявки — так, как его прочтёт IT. */
+.tv-root .tv-hd-preview { background: var(--surface); }
+.tv-root .tv-hd-preview-title {
+  display: block; width: calc(100% + 12px); margin: -2px -6px 6px;
+  padding: 4px 6px; border: 1px solid transparent; border-radius: 8px;
+  background: none; outline: none;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+  font-size: 15px; font-weight: 600; color: var(--ink);
+  transition: border-color .15s, background .15s;
+}
+.tv-root .tv-hd-preview-title:hover:not(:disabled) { border-color: var(--border); }
+.tv-root .tv-hd-preview-title:focus { border-color: var(--select-border); background: var(--surface-2); }
+.tv-root .tv-hd-preview-title::placeholder { color: var(--ink-3); }
+.tv-root .tv-hd-preview-body {
+  white-space: pre-wrap; word-break: break-word;
+  font-size: 13.5px; line-height: 1.6; color: var(--ink);
+}
+.tv-root .tv-hd-preview-body b { font-weight: 600; }
+.tv-root .tv-hd-code {
+  padding: 1px 5px; border-radius: 5px; background: var(--fill);
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+}
+.tv-root .tv-hd-preview-edit { min-height: 168px; line-height: 1.55; }
+.tv-root .tv-hd-preview-extra {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--border);
+  font-size: 13px; line-height: 1.5; color: var(--ink-2); word-break: break-word;
+}
+.tv-root .tv-hd-preview-extra-title { font-size: 11.5px; font-weight: 600; color: var(--ink-3); }
+
+/* ── Схема кабинета ── */
+.tv-root .tv-hd-map {
+  padding: 10px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface);
+  transition: border-color .15s, box-shadow .15s;
+}
+.tv-root .tv-hd-map.is-invalid { border-color: var(--rose); }
+.tv-root .tv-hd-map-tabs { flex-wrap: wrap; margin-bottom: 8px; }
+.tv-root .tv-hd-map-frame {
+  overflow-x: auto; overflow-y: hidden;
+  padding: 12px; border-radius: 10px;
+  background: var(--surface-2);
+}
+.tv-root .tv-hd-map-canvas { position: relative; }
+.tv-root .tv-hd-map-plan { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.tv-root .tv-hd-map-block {
+  position: absolute; display: inline-flex; flex-direction: column;
+  padding: 3px; border: 1.5px solid var(--border-strong); border-radius: 8px;
+}
+.tv-root .tv-hd-map-row { display: flex; }
+.tv-root .tv-hd-map-free { position: absolute; }
+.tv-root .tv-hd-seat {
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--surface); color: var(--ink-2);
+  font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s, transform .1s;
+}
+.tv-root .tv-hd-seat:hover:not(:disabled) { border-color: var(--select-border); background: var(--select-bg); color: var(--select-ink); }
+.tv-root .tv-hd-seat:active:not(:disabled) { transform: scale(.95); }
+.tv-root .tv-hd-seat.is-selected { border-color: var(--accent); background: var(--accent); color: var(--accent-fg); }
+.tv-root .tv-hd-seat:disabled { cursor: not-allowed; }
+.tv-root .tv-hd-seat:focus-visible { outline: 3px solid var(--select-border); outline-offset: 1px; }
+.tv-root .tv-hd-map-foot {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 6px 10px; margin-top: 8px;
+}
+.tv-root .tv-hd-map-summary { font-size: 12.5px; color: var(--ink); min-width: 0; }
+.tv-root .tv-hd-map-summary.is-empty { color: var(--ink-3); }
+.tv-root .tv-hd-map-actions { display: inline-flex; gap: 4px; }
+.tv-root .tv-hd-map-actions button {
+  padding: 4px 9px; border: 1px solid transparent; border-radius: 99px;
+  background: var(--fill); cursor: pointer;
+  font-size: 12px; font-weight: 500; color: var(--ink-2);
+  transition: background .15s, color .15s;
+}
+.tv-root .tv-hd-map-actions button:hover:not(:disabled) { background: var(--fill-strong); color: var(--ink); }
+.tv-root .tv-hd-map-actions button.is-active {
+  background: var(--select-bg); border-color: var(--select-border); color: var(--select-ink);
+}
+.tv-root .tv-hd-map-actions button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ── Шапка окна: «назад» со второго экрана (настройки) ── */
+.tv-root .tv-hd-back {
+  display: inline-flex; align-items: center; gap: 2px;
+  margin: -4px 6px -4px -8px; padding: 4px 8px 4px 4px;
+  border: 0; border-radius: 8px; background: none; cursor: pointer;
+  font-size: 13px; font-weight: 500; color: var(--select-ink);
+}
+.tv-root .tv-hd-back:hover { background: var(--select-bg); }
+.tv-root .tv-modal-header .tv-hd-head-lead { display: flex; align-items: center; min-width: 0; }
+
+/* ── Настройки заявок ── */
+.tv-root .tv-hd-settings-tabs { margin-bottom: 16px; }
+.tv-root .tv-hd-settings-row { margin-bottom: 12px; }
+.tv-root .tv-hd-settings-value { font-size: 13px; color: var(--ink); }
+.tv-root .tv-hd-empty { margin: 0; padding: 14px 2px; font-size: 13px; color: var(--ink-3); }
+.tv-root .tv-hd-topics { display: flex; flex-direction: column; gap: 8px; }
+.tv-root .tv-hd-topic-card {
+  overflow: hidden;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+  transition: border-color .15s;
+}
+.tv-root .tv-hd-topic-card.is-open { border-color: var(--select-border); }
+.tv-root .tv-hd-topic-head { display: flex; align-items: center; padding-right: 6px; }
+.tv-root .tv-hd-topic-toggle {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border: 0; background: none; cursor: pointer; text-align: left;
+}
+.tv-root .tv-hd-topic-chevron { flex: none; color: var(--ink-3); transform: rotate(-90deg); transition: transform .2s; }
+.tv-root .tv-hd-topic-card.is-open .tv-hd-topic-chevron { transform: none; }
+.tv-root .tv-hd-topic-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13.5px; font-weight: 600; color: var(--ink);
+}
+.tv-root .tv-hd-topic-name.is-empty { color: var(--ink-3); font-weight: 500; }
+.tv-root .tv-hd-topic-count {
+  flex: none; padding: 1px 7px; border-radius: 99px; background: var(--fill);
+  font-size: 11.5px; font-weight: 500; color: var(--ink-3); font-variant-numeric: tabular-nums;
+}
+.tv-root .tv-hd-icon-btn {
+  flex: none; display: grid; place-items: center;
+  width: 30px; height: 30px; border: 0; border-radius: 8px;
+  background: none; cursor: pointer; color: var(--ink-3);
+  transition: background .15s, color .15s;
+}
+.tv-root .tv-hd-icon-btn:hover:not(:disabled) { background: var(--fill); color: var(--ink); }
+.tv-root .tv-hd-icon-btn.is-danger:hover:not(:disabled) { color: var(--rose); }
+.tv-root .tv-hd-icon-btn:disabled { opacity: .5; cursor: not-allowed; }
+.tv-root .tv-hd-topic-body {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px 12px; border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.tv-root .tv-hd-topic-body .tv-input { background: var(--surface); }
+.tv-root .tv-hd-topic-items { display: flex; flex-direction: column; gap: 6px; }
+.tv-root .tv-hd-topic-item { display: flex; align-items: center; gap: 4px; }
+.tv-root .tv-hd-add {
+  align-self: flex-start;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 4px; border: 0; background: none; cursor: pointer;
+  font-size: 12.5px; font-weight: 600; color: var(--select-ink);
+}
+.tv-root .tv-hd-add:disabled { opacity: .5; cursor: not-allowed; }
+.tv-root .tv-hd-add.is-block {
+  align-self: stretch; justify-content: center;
+  padding: 10px; border: 1px dashed var(--border-strong); border-radius: 12px;
+}
+.tv-root .tv-hd-add.is-block:hover:not(:disabled) { background: var(--select-bg); border-color: var(--select-border); }
+.tv-root .tv-hd-instructions { min-height: 210px; font-size: 13px; line-height: 1.55; background: var(--surface); }
+.tv-root .tv-hd-settings-meta {
+  display: flex; justify-content: space-between; gap: 10px;
+  margin: 6px 2px 0; font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tv-root .tv-hd-group, .tv-root .tv-hd-spin { animation: none; }
+}
+
+/* ── Узкое окно и телефон ── */
+@media (max-width: 640px) {
+  .tv-root .tv-hd-topic,
+  .tv-root .tv-hd-fields { grid-template-columns: minmax(0, 1fr); }
+}
+body.mobile-shell .tv-root .tv-modal-overlay .tv-hd-description { min-height: 120px; font-size: 18px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-hd-topic,
+body.mobile-shell .tv-root .tv-modal-overlay .tv-hd-fields { grid-template-columns: minmax(0, 1fr); }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-hd-ai-btn,
+body.mobile-shell .tv-root .tv-modal-overlay .tv-hd-compose-btn { min-height: 36px; font-size: 14px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-hd-check-text { font-size: 15px; }
+body.mobile-shell .tv-root .tv-modal-overlay .tv-hd-map-tabs button { flex: 1 1 auto; }

@@ -35,7 +35,7 @@ import {
   Trash2,
   Undo2,
 } from 'lucide-react';
-import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
+import { normalizeRole, isAdminLikeRole, isSupervisorRole, isDepartmentHead } from '../../utils/roles';
 import { rankAndFileTasksAllowed } from '../../utils/departmentViews';
 import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
@@ -112,6 +112,17 @@ import {
 } from './taskProjects';
 import TaskProjectsSheet from './TaskProjectsSheet';
 import TaskWatchersSheet from './TaskWatchersSheet';
+import HelpdeskTicketForm from './HelpdeskTicketForm';
+import HelpdeskSettingsPanel from './HelpdeskSettingsPanel';
+import {
+  emptyHelpdeskTicket,
+  isHelpdeskProject,
+  seedTicketDescription,
+  ticketIssues,
+  ticketLogPayload,
+  ticketTaskDescription,
+  ticketTaskSubject,
+} from './helpdeskTicket';
 import {
   ACTION_NEED_META,
   actionNeedSeenKey,
@@ -4733,6 +4744,10 @@ const EMPTY_TASK_FORM = {
   watcherIds: [],
   // Раздел доски («регулируемый набор разделов»): '' — без раздела.
   sectionId: '',
+  /* Заявка в IT (владелец 27.11.2026): на доске IT Helpdesk форма задачи —
+     заявка, её поля живут здесь (helpdeskTicket.js). Объект общий у пустой
+     формы, поэтому buildEmptyTaskForm кладёт свой. */
+  ticket: null,
 };
 
 export { TASK_MAX_ASSIGNEES, isTaskAssignee, taskAssignees } from './taskAssignees';
@@ -4751,6 +4766,7 @@ const buildEmptyTaskForm = (overrides = {}) => ({
   // Бриф продакшна держим и у задач других типов: передумали тип и вернулись —
   // заполненное на месте. Уходит он только у продакшна (buildTaskJsonPayload).
   productionBrief: emptyProductionBrief(),
+  ticket: emptyHelpdeskTicket(),
   ...overrides,
 });
 
@@ -6215,6 +6231,11 @@ const TaskComposerForm = ({
   issueFor = NO_COMPOSER_ISSUE,
   // Проекты-доски (задача #401): куда человек вправе ставить задачи.
   projects = [],
+  /* Заявка в IT (владелец 27.11.2026). Передаёт только окно «Новая задача»:
+     выбрали доску IT Helpdesk — форма становится заявкой (HelpdeskTicketForm).
+     { apiBaseUrl, buildHeaders, notify, onTicketChange, onOpenSettings,
+       settingsVersion }; null — форма задачи как есть (правка задачи). */
+  helpdesk = null,
 }) => {
   const assigneeIds = Array.isArray(values.assigneeIds) ? values.assigneeIds : [];
   const watcherIds = Array.isArray(values.watcherIds) ? values.watcherIds : [];
@@ -6285,6 +6306,9 @@ const TaskComposerForm = ({
     const projectId = String(next ?? '');
     const nextProject = findProject(projects, projectId);
     const sameProject = projectId === String(values.projectId || '');
+    /* Заявку в IT берёт любой исполнитель доски — сразу «Все»: заявителю не
+       нужно знать, кто в IT чем занят. Выбрать конкретного можно и здесь. */
+    const toHelpdesk = Boolean(helpdesk) && isHelpdeskProject(nextProject);
     // Сменили доску — остаются наблюдатели, у кого есть доступ к новой, а раздел
     // сбрасывается: разделы у каждой доски свои. Исполнители — те, кто исполнитель
     // и новой доски; «Все» — все исполнители уже новой доски. Выбор человека форма
@@ -6294,7 +6318,7 @@ const TaskComposerForm = ({
       projectAuto: false,
       sectionId: sameProject ? values.sectionId : '',
       watcherIds: keepWatchersForProject(watcherIds, nextProject),
-      ...(sameProject ? {} : assigneesAfterProjectChange(values, nextProject, {
+      ...(sameProject ? {} : assigneesAfterProjectChange(toHelpdesk ? { ...values, assignAll: true } : values, nextProject, {
         currentUserId,
         allowedIds: isProduction ? productionPersonIds([...recipients, ...boardAssignees(nextProject)]) : null,
         recipientIds,
@@ -6451,29 +6475,22 @@ const TaskComposerForm = ({
   const deadlineIssue = issueFor('deadline');
   const repeatFrom = repeatAnchorOf(values);
 
-  return (
-    <div className="tv-composer">
-      <input
-        className="tv-composer-title"
-        value={values.subject}
-        maxLength={255}
-        disabled={disabled}
-        placeholder="Что нужно сделать?"
-        autoFocus
-        onChange={(event) => onChange({ subject: event.target.value })}
-      />
-      {/* У продакшна описание — поле брифа «Описание задания» (то же значение),
-          второй раз то же поле наверху было бы дублем. */}
-      {!isProduction && (
-        <textarea
-          className="tv-composer-description"
-          value={values.description}
-          disabled={disabled}
-          placeholder="Описание, контекст, ссылки — необязательно"
-          onChange={(event) => onChange({ description: event.target.value })}
-        />
-      )}
+  /* Заявка в IT: выбрана доска IT Helpdesk — вместо заголовка, описания и
+     капсул задачи стоит форма заявки, а проект, раздел и исполнители — те же
+     строки, на том же месте. Написанное до выбора доски — уже описание проблемы. */
+  const helpdeskMode = Boolean(helpdesk) && isHelpdeskProject(selectedProject);
+  const onTicketChange = helpdesk?.onTicketChange;
+  useEffect(() => {
+    if (!helpdeskMode || typeof onTicketChange !== 'function') return;
+    if (String(values.ticket?.description || '').trim()) return;
+    const seed = seedTicketDescription(values);
+    if (seed) onTicketChange({ description: seed });
+    // Только при входе в заявку: дальше описание ведёт сам человек.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [helpdeskMode]);
 
+  const boardRows = (
+    <>
       {/* Проект — доска, на которую попадёт задача (задача #401). Строка есть,
           только когда выбирать есть из чего: без доступа к доскам задача
           ставится как раньше, без проекта. */}
@@ -6611,6 +6628,69 @@ const TaskComposerForm = ({
           </div>
         </div>
       </div>
+    </>
+  );
+
+  if (helpdeskMode && values.ticket) {
+    return (
+      <div className="tv-composer is-helpdesk">
+        <HelpdeskTicketForm
+          ticket={values.ticket}
+          onChange={onTicketChange}
+          disabled={disabled}
+          apiBaseUrl={helpdesk.apiBaseUrl}
+          buildHeaders={helpdesk.buildHeaders}
+          notify={helpdesk.notify}
+          boardRows={boardRows}
+          priorityOptions={PRIORITY_OPTIONS}
+          files={filesFromList(files)}
+          onAddFiles={supportsFiles ? (incoming) => onFilesChange(mergeSelectedFiles(files, incoming)) : undefined}
+          onClearFiles={supportsFiles ? () => onFilesChange([]) : undefined}
+          renderFiles={supportsFiles ? () => (
+            <div className="tv-composer-details">
+              <div className="tv-composer-row is-stacked">
+                <TaskFileDropzone
+                  files={files}
+                  disabled={disabled}
+                  onChange={onFilesChange}
+                  title="Вложения"
+                  prompt="Перетащите скриншот или файл"
+                />
+              </div>
+            </div>
+          ) : undefined}
+          issueFor={issueFor}
+          onOpenSettings={helpdesk.onOpenSettings}
+          settingsVersion={helpdesk.settingsVersion}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="tv-composer">
+      <input
+        className="tv-composer-title"
+        value={values.subject}
+        maxLength={255}
+        disabled={disabled}
+        placeholder="Что нужно сделать?"
+        autoFocus
+        onChange={(event) => onChange({ subject: event.target.value })}
+      />
+      {/* У продакшна описание — поле брифа «Описание задания» (то же значение),
+          второй раз то же поле наверху было бы дублем. */}
+      {!isProduction && (
+        <textarea
+          className="tv-composer-description"
+          value={values.description}
+          disabled={disabled}
+          placeholder="Описание, контекст, ссылки — необязательно"
+          onChange={(event) => onChange({ description: event.target.value })}
+        />
+      )}
+
+      {boardRows}
 
       <div className="tv-composer-chips">
         {sections.map((section) => {
@@ -9728,6 +9808,10 @@ const TasksView = ({
   const [isPersonTasksLoading, setIsPersonTasksLoading] = useState(false);
 
   const [createOpen,        setCreateOpen]        = useState(false);
+  /* Настройки заявок в IT — второй экран окна «Новая задача» (темы и инструкции
+     для ИИ); версия растёт после сохранения — форма заявки перечитывает темы. */
+  const [helpdeskSettingsOpen, setHelpdeskSettingsOpen] = useState(false);
+  const [helpdeskSettingsVersion, setHelpdeskSettingsVersion] = useState(0);
   const [editModal,         setEditModal]         = useState({ open: false, taskId: null, taskSubject: '' });
   const [deleteModal,       setDeleteModal]       = useState({ open: false, taskId: null, taskSubject: '' });
   const [editForm,          setEditForm]          = useState(() => buildEmptyTaskForm());
@@ -10455,17 +10539,21 @@ const TasksView = ({
   /* Проект обязателен, когда выбирать есть из чего: задача без доски у
      человека с досками — это задача, которую никто из отдела не увидит. */
   const composerProjects = useMemo(() => creatableProjects(projects), [projects]);
-  const createBaseIssues = useMemo(() => [
+  /* Заявка в IT (владелец 27.11.2026): доска IT Helpdesk в форме — это заявка.
+     Своих пунктов «чего не хватает» у неё два: описание и обязательные поля,
+     подобранные ИИ; срок, тип и бриф у заявки не задаются. */
+  const createIsHelpdesk = isHelpdeskProject(findProject(projects, form.projectId));
+  const createBaseIssues = useMemo(() => (createIsHelpdesk ? ticketIssues(form.ticket) : [
     ...(composerProjects.length && !form.projectId
       ? [{ key: 'project', text: 'Выберите проект — задача попадёт на его доску' }]
       : []),
     ...formIssues(form),
-  ], [composerProjects, formIssues, form]);
+  ]), [createIsHelpdesk, composerProjects, formIssues, form]);
   const editBaseIssues = useMemo(() => formIssues(editForm, editModal), [formIssues, editForm, editModal]);
   /* Срок в прошлом сверяется с часами на каждой отрисовке и ещё раз при
      сохранении, а не запоминается вместе с формой: форму со сроком «сегодня,
      18:00», открытую в 17:50, могут сохранить и в 18:10. */
-  const createIssues = [...createBaseIssues, ...deadlineIssues(form)];
+  const createIssues = [...createBaseIssues, ...(createIsHelpdesk ? [] : deadlineIssues(form))];
   const editIssues = [...editBaseIssues, ...deadlineIssues(editForm)];
   const createIssueNav = useBriefIssueNav(createBodyRef, createIssues.map((issue) => issue.key));
   const editIssueNav = useBriefIssueNav(editBodyRef, editIssues.map((issue) => issue.key));
@@ -10494,8 +10582,10 @@ const TasksView = ({
         sectionId: composerDefaultSection,
         watcherIds: keepWatchersForProject(prev.watcherIds, nextProject),
         // Исполнители — как при выборе доски руками: только люди этой доски
-        // (24.11.2026). Та же доска — состав не трогаем.
-        ...(prev.projectId === composerDefaultProject ? {} : assigneesAfterProjectChange(prev, nextProject, {
+        // (24.11.2026). Та же доска — состав не трогаем. Заявку в IT (доска
+        // IT Helpdesk) — сразу всем исполнителям доски, как и при выборе руками.
+        ...(prev.projectId === composerDefaultProject ? {} : assigneesAfterProjectChange(
+          isHelpdeskProject(nextProject) ? { ...prev, assignAll: true } : prev, nextProject, {
           currentUserId,
           allowedIds: prev.tag === PRODUCTION_TAG
             ? productionPersonIds([...recipients, ...boardAssignees(nextProject)])
@@ -10508,9 +10598,56 @@ const TasksView = ({
   }, [createOpen, composerDefaultProject, composerDefaultSection, projects, currentUserId, recipients]);
   useEffect(() => { if (!editModal.open) setEditIssuesShown(false); }, [editModal.open]);
 
+  /* ── Заявка в IT ──
+     Уходит обычной задачей на доску IT Helpdesk: заголовок — заголовок заявки,
+     описание — тема и текст (то, что прочтёт сисадмин), срочность — срочность.
+     Скрытые поля формы задачи (срок, тип, чек-лист, бэклог…) заявка не несёт,
+     даже если их заполнили до выбора доски. it_ticket — тема, отдел и поля для
+     журнала заявок; старый сервер это поле просто не читает. */
+  const submitTicket = async () => {
+    const ticket = form.ticket || emptyHelpdeskTicket();
+    if (ticketIssues(ticket).length) {
+      setCreateIssuesShown(true);
+      createIssueNav.first();
+      return;
+    }
+    if (!(form.assigneeIds || []).length) { notify('Выберите, кому в IT поручить заявку', 'error'); return; }
+    const body = new FormData();
+    appendTaskFormData(body, buildEmptyTaskForm({
+      subject: ticketTaskSubject(ticket),
+      description: ticketTaskDescription(ticket),
+      priority: ticket.priority || 'normal',
+      assigneeIds: form.assigneeIds,
+      projectId: form.projectId,
+      sectionId: form.sectionId,
+    }));
+    body.append('it_ticket', JSON.stringify(ticketLogPayload(ticket)));
+    selectedFiles.forEach((file) => body.append('files', file));
+
+    setIsCreateLoading(true);
+    try {
+      const res = await axios.post(`${apiBaseUrl}/api/tasks`, body, { headers: buildHeaders() });
+      const createdKey = res?.data?.key;
+      notify(createdKey ? `Заявка ${createdKey} отправлена в IT` : 'Заявка отправлена в IT');
+      if (res?.data?.warning) notify(res.data.warning, 'error');
+      /* Доску заявок «последней» не запоминаем: заявка — случай, а следующая
+         «Новая задача» должна открыться обычной задачей. */
+      setForm(buildEmptyTaskForm());
+      setSelectedFiles([]);
+      setCreateOpen(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      await refreshTasksData();
+    } catch (error) {
+      notify(error?.response?.data?.error || 'Не удалось отправить заявку', 'error');
+    } finally {
+      setIsCreateLoading(false);
+    }
+  };
+
   /* ── Create ── */
   const handleCreate = async (e) => {
     e.preventDefault();
+    if (createIsHelpdesk) { await submitTicket(); return; }
     if (!form.subject.trim()) { notify('Укажите тему задачи', 'error'); return; }
     if (!(form.assigneeIds || []).length) { notify('Выберите сотрудника', 'error'); return; }
     if (createBaseIssues.length || deadlineIssues(form).length) {
@@ -11061,6 +11198,29 @@ const TasksView = ({
   // выделение с выходом за край окна закрывало его вместе с набранным.
   const closeCreate = useCallback(() => setCreateOpen(false), []);
   const createOverlayProps = useOverlayDismiss(closeCreate);
+  const closeHelpdeskSettings = useCallback(() => setHelpdeskSettingsOpen(false), []);
+  useEffect(() => { if (!createOpen) setHelpdeskSettingsOpen(false); }, [createOpen]);
+  // Поля заявки в IT — функциональным обновлением: ответ ИИ приходит позже набора.
+  const updateHelpdeskTicket = useCallback((patch) => {
+    setForm((prev) => ({ ...prev, ticket: { ...(prev.ticket || emptyHelpdeskTicket()), ...patch } }));
+  }, []);
+  /* Настройки заявок (темы, инструкции для ИИ) — как в «Тех причинах»: админам
+     и главам отделов; какой отдел править, решает сервер (catalog_editable_profiles). */
+  const canConfigureHelpdesk = isAdminLikeRole(currentUserRole) || isDepartmentHead(user);
+  const helpdeskComposer = useMemo(() => ({
+    apiBaseUrl,
+    buildHeaders,
+    notify,
+    onTicketChange: updateHelpdeskTicket,
+    onOpenSettings: canConfigureHelpdesk ? () => setHelpdeskSettingsOpen(true) : null,
+    settingsVersion: helpdeskSettingsVersion,
+  }), [apiBaseUrl, buildHeaders, notify, updateHelpdeskTicket, helpdeskSettingsVersion, canConfigureHelpdesk]);
+  const createModalTitle = helpdeskSettingsOpen
+    ? 'Настройки заявок'
+    : (createIsHelpdesk ? 'Заявка в IT' : (form.isBacklog ? 'Новая задача в бэклог' : 'Новая задача'));
+  /* Шеврон телефона на экране настроек — «назад к заявке», а не «закрыть окно».
+     Форму на время настроек не снимаем, а прячем: набранное и раскрытое остаются. */
+  const closeCreateWindow = helpdeskSettingsOpen && isMobileShell ? closeHelpdeskSettings : closeCreate;
   const editOverlayProps = useOverlayDismiss(closeEditModal);
   const deleteOverlayProps = useOverlayDismiss(closeDeleteModal);
   const completeOverlayProps = useOverlayDismiss(closeCompleteModal);
@@ -11071,6 +11231,8 @@ const TasksView = ({
   между разделами: человек свайпает, чтобы закрыть окно, а получает чужой
   раздел (владелец 11.09.2026: «перекидывает в другой раздел»). */
   useScreenBackGesture(isMobileShell && createOpen, closeCreate);
+  // Настройки заявок — экран поверх формы заявки: «назад» возвращает к заявке, а не закрывает окно.
+  useScreenBackGesture(isMobileShell && createOpen && helpdeskSettingsOpen, closeHelpdeskSettings);
   useScreenBackGesture(isMobileShell && editModal.open, closeEditModal);
   useScreenBackGesture(isMobileShell && deleteModal.open, closeDeleteModal);
   useScreenBackGesture(isMobileShell && completeModal.open, closeCompleteModal);
@@ -11745,10 +11907,22 @@ const TasksView = ({
         <div className="tv-modal-overlay otp-modal-root otp-modal-dim" {...createOverlayProps}>
           <div className="tv-modal tv-modal-composer otp-modal-panel" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header otp-modal-head">
-              <h3 className="tv-modal-title">{form.isBacklog ? 'Новая задача в бэклог' : 'Новая задача'}</h3>
-              <ModalCloseButton isMobileShell={isMobileShell} onClick={() => setCreateOpen(false)} />
+              {/* Со второго экрана (настройки заявок) — «назад» к заявке. На телефоне
+                  это делает шеврон шапки, на компьютере — кнопка у заголовка. */}
+              {helpdeskSettingsOpen && !isMobileShell ? (
+                <div className="tv-hd-head-lead">
+                  <button type="button" className="tv-hd-back" onClick={closeHelpdeskSettings}>
+                    <LucideChevronLeft size={16} aria-hidden="true" />
+                    Заявка
+                  </button>
+                  <h3 className="tv-modal-title">{createModalTitle}</h3>
+                </div>
+              ) : (
+                <h3 className="tv-modal-title">{createModalTitle}</h3>
+              )}
+              <ModalCloseButton isMobileShell={isMobileShell} onClick={closeCreateWindow} />
             </div>
-            <form onSubmit={handleCreate}>
+            <form onSubmit={handleCreate} style={helpdeskSettingsOpen ? { display: 'none' } : undefined}>
               <div className="tv-modal-body" ref={createBodyRef}>
                 <TaskComposerForm
                   values={form}
@@ -11762,6 +11936,7 @@ const TasksView = ({
                   currentUserId={currentUserId}
                   issueFor={createIssueFor}
                   projects={projects}
+                  helpdesk={helpdeskComposer}
                 />
               </div>
               <div className="tv-modal-footer">
@@ -11770,10 +11945,21 @@ const TasksView = ({
                   onClick={() => setCreateOpen(false)}>Отмена</button>
                 <button type="submit" className="tv-btn tv-btn-primary"
                   disabled={isCreateLoading || isRecipientsLoading}>
-                  {isCreateLoading ? 'Создаю...' : (form.isBacklog ? 'Добавить в бэклог' : 'Поставить задачу')}
+                  {createIsHelpdesk
+                    ? (isCreateLoading ? 'Отправляю…' : 'Отправить заявку')
+                    : (isCreateLoading ? 'Создаю...' : (form.isBacklog ? 'Добавить в бэклог' : 'Поставить задачу'))}
                 </button>
               </div>
             </form>
+            {helpdeskSettingsOpen && (
+              <HelpdeskSettingsPanel
+                apiBaseUrl={apiBaseUrl}
+                buildHeaders={buildHeaders}
+                notify={notify}
+                onBack={closeHelpdeskSettings}
+                onSaved={() => setHelpdeskSettingsVersion((value) => value + 1)}
+              />
+            )}
           </div>
         </div>
       )}
