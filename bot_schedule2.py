@@ -37572,8 +37572,8 @@ def _op_chat_broadcast_notes(data):
     waiting = _szov_wallboard_int(now.get('chats_waiting'))
     line = f"{in_work} {_szov_plural(in_work, 'чат', 'чата', 'чатов')} в работе"
     if waiting:
-        line += (f", {waiting} {_szov_plural(waiting, 'ждёт', 'ждут', 'ждут')} ответа — дольше всех "
-                 f"{_op_chat_broadcast_duration(now.get('longest_wait_seconds'))}")
+        # «Ждёт дольше всех» владелец убрал с табло и из отбивки (27.11.2026): только число.
+        line += f", {waiting} {_szov_plural(waiting, 'ждёт', 'ждут', 'ждут')} ответа"
     notes.append(line + '.')
     if _szov_wallboard_int(today.get('chats')):
         chats = _szov_wallboard_int(today.get('chats'))
@@ -37625,9 +37625,9 @@ def _op_render_chat_wallboard_png(data):
         ('Ответ внутри чата', _op_chat_broadcast_duration(inner), inner_colors[0], inner_colors[1]),
     ]
     label = data.get('period_label')
+    # Без «Ждёт дольше всех» — как на табло (владелец 27.11.2026); две плитки делят ряд пополам.
     stat_tiles = [
         (f"Чатов за {label}" if label else 'Чатов за сутки', str(_szov_wallboard_int(today.get('chats')))),
-        ('Ждёт дольше всех', _op_chat_broadcast_duration(now.get('longest_wait_seconds'))),
         ('Верификаторов в работе', str(_szov_wallboard_int(now.get('verifiers_in_work')))),
     ]
     subtitle = (f"Итог {label} · {data['generated_at']}" if label

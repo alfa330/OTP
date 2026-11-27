@@ -765,6 +765,29 @@ class BroadcastTests(unittest.TestCase):
         self.assertIn('Wazzup не присылает сообщения', notes[-1])
         self.assertIn('4 чата в работе, 2 ждут ответа', notes[0])
 
+    def test_line_says_how_many_wait_but_not_the_longest(self):
+        """Владелец 27.11.2026: «Ждёт дольше всех» не нужен — ни на табло, ни в отбивке."""
+        notes = self.ns['_op_chat_broadcast_notes'](self.data(waiting=2))
+        self.assertIn('4 чата в работе, 2 ждут ответа.', notes)
+        self.assertEqual([note for note in notes if 'дольше всех' in note or '1:30' in note], [])
+
+    def test_picture_has_no_longest_wait_cell(self):
+        ns = _load_names(BOT_SOURCE, {'_op_render_chat_wallboard_png'}, dict(self.ns))
+        drawn = []
+
+        def render(title, subtitle, key_tiles, stat_tiles):
+            drawn.append(([tile[0] for tile in key_tiles], stat_tiles))
+            return b'png'
+
+        ns['_szov_render_tiles_png'] = render
+        data = dict(self.data(waiting=2), generated_at='10:45')
+        data['now']['verifiers_in_work'] = 3
+        self.assertEqual(ns['_op_render_chat_wallboard_png'](data), b'png')
+        keys, stats = drawn[0]
+        self.assertEqual(keys, ['Чатов в работе', 'Ждут ответа', 'Первый ответ', 'Ответ внутри чата'])
+        # Две мелкие плитки делят ряд пополам — по краям четырёх крупных.
+        self.assertEqual(stats, [('Чатов за сутки', '20'), ('Верификаторов в работе', '3')])
+
     def test_direction_is_registered_everywhere(self):
         """Список направлений лежит в трёх местах плюс CHECK — 16.09.2026 его уже забывали."""
         self.assertIn("SZOV_BROADCAST_DIRECTION_OP_CHAT = 'op_chat'", BOT_SOURCE)

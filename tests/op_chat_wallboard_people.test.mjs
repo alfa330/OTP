@@ -19,8 +19,9 @@ await build({
     stdin: {
         contents: `import React from 'react';
             import { renderToStaticMarkup } from 'react-dom/server';
-            import { VerifiersTable } from './src/components/monitoring/OpChatWallboard.jsx';
-            export const renderTable = (props) => renderToStaticMarkup(React.createElement(VerifiersTable, props));`,
+            import OpChatWallboardBody, { VerifiersTable } from './src/components/monitoring/OpChatWallboard.jsx';
+            export const renderTable = (props) => renderToStaticMarkup(React.createElement(VerifiersTable, props));
+            export const renderBody = (props) => renderToStaticMarkup(React.createElement(OpChatWallboardBody, props));`,
         resolveDir: process.cwd(), loader: 'jsx', sourcefile: 'people-entry.jsx',
     },
     outfile: output, bundle: true, format: 'esm', platform: 'node', jsx: 'automatic',
@@ -35,7 +36,7 @@ await build({
             : 'export default ({ className }) => `[icon ${className}]`;' }));
     } }],
 });
-const { renderTable } = await import(pathToFileURL(output));
+const { renderTable, renderBody } = await import(pathToFileURL(output));
 
 const person = (patch) => ({
     user_id: 1, id: 1, name: 'Иванова Айгерим', in_roster: true, in_work: 0, chats: 0,
@@ -126,4 +127,17 @@ test('Syntony: статус по ответам — без журнала, св�
     const nobody = renderTable({ snapshot: { day: '2026-11-26', statuses_source: 'replies', journal: false,
         now: { operators: [person({})] } }, firstTarget: 60, innerTarget: 240 });
     assert.match(nobody, /Никто из верификаторов не отвечал клиентам\./);
+});
+
+test('«Чаты · сейчас» — три плитки, «Ждёт дольше всех» убран (владелец 27.11.2026)', () => {
+    const html = renderBody({ snapshot: { day: '2026-11-27', now: {
+        chats_in_work: 19, chats_waiting: 12, longest_wait_seconds: 3570, verifiers_in_work: 2, operators: [],
+    }, today: { chats: 211 } } });
+    const now = html.slice(0, html.indexOf('Показатели за день'));
+    const labels = [...now.matchAll(/<div class="text-\[15px\] font-semibold[^"]*">([^<]+)<\/div>/g)]
+        .map((match) => match[1]);
+    assert.deepEqual(labels, ['Чатов в работе', 'Ждут ответа', 'Верификаторов в работе']);
+    assert.match(now, /lg:grid-cols-3/);                     // ряд по колонкам «Показателей за день»
+    assert.ok(!html.includes('Ждёт дольше всех'));
+    assert.ok(!html.includes('59:30'));                      // 3570 с нигде не всплыли
 });

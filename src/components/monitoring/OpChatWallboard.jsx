@@ -339,11 +339,12 @@ export default function OpChatWallboardBody({ snapshot, scale = 1, selectedId = 
 
     return (
         <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
+            {/* «Ждёт дольше всех» владелец убрал 27.11.2026 («он не нужен») — и здесь, и в отбивке:
+                три плитки — по колонкам «Показателей за день» ниже. В выборе показателей виджета остался. */}
             <Section icon="fa-bolt" title="Чаты · сейчас">
-                <Grid>
+                <Grid cols={3}>
                     <NowTile metricKey="op_chat_in_work" snapshot={snapshot} scale={scale} />
                     <NowTile metricKey="op_chat_waiting" snapshot={snapshot} scale={scale} />
-                    <NowTile metricKey="op_chat_longest_wait" snapshot={snapshot} scale={scale} />
                     <NowTile metricKey="op_chat_verifiers" snapshot={snapshot} scale={scale} />
                 </Grid>
             </Section>
