@@ -193,14 +193,15 @@ class _Env:
                             "is_active) VALUES (%s, %s, %s, %s, %s) RETURNING id",
                             (outcome_id, TEZ, name, position, active))[0])
 
-    def autodial_outcome(self, phone, when, outcome, reason=None):
-        """Итог попытки автообзвона отдела по водителю с этим номером (карточка iCORE Phone)."""
-        lead = self.one("SELECT id FROM dial_list_leads WHERE department_id = %s AND phone_norm = %s", (TEZ, phone))
+    def autodial_outcome(self, phone, when, outcome, reason=None, period=PERIOD):
+        """Итог попытки автообзвона отдела по водителю с этим номером (карточка iCORE Phone). period — месяц
+        базы автообзвона: у одного номера в отделе строка на каждый месяц (uq_dial_list_leads_period_phone)."""
+        find = "SELECT id FROM dial_list_leads WHERE department_id = %s AND phone_norm = %s AND period = %s"
+        lead = self.one(find, (TEZ, phone, period))
         if lead is None:
             self.svc.import_leads(TEZ, 1, 'обзвон.xlsx', [(2, 'Водитель', '8' + phone[1:], phone, '', '')],
-                                  period=PERIOD, require_iin=False)
-            lead = self.one("SELECT id FROM dial_list_leads WHERE department_id = %s AND phone_norm = %s",
-                            (TEZ, phone))
+                                  period=period, require_iin=False)
+            lead = self.one(find, (TEZ, phone, period))
         if self.portion is None:
             self.portion = str(self.one("INSERT INTO dial_list_portions (operator_id, department_id, size) "
                                         "VALUES (%s, %s, 50) RETURNING id", (OPERATOR, TEZ))[0])
@@ -508,6 +509,142 @@ def test_refusal_outcome_is_found_by_name_whatever_the_case(env):
     data = env.funnel()
     assert (data["refusals"]["total"], data["refusals"]["outcomes"]) == (1, [])
     assert dial_analytics.is_refusal_outcome('ОТКАЗ') and not dial_analytics.is_refusal_outcome('Перезвонить')
+
+
+def _tez_outcomes_of_27_11(env):
+    """Итоги Тез КЦ в настройках на 27.11.2026 (прислал владелец): стартовый набор переименован и дополнен."""
+    for old, new in (('Согласен выйти на линию', 'Согласен'), ('Перезвонить', 'Перезвон'),
+                     ('Неверный номер', 'Недоступен')):
+        env.q("UPDATE dial_list_outcomes SET name = %s WHERE department_id = %s AND name = %s", (new, TEZ, old))
+    for position, name, color in ((6, 'Сброс', '#AF52DE'), (7, 'Подумает', 'не цвет')):
+        env.q("INSERT INTO dial_list_outcomes (department_id, name, color, position) VALUES (%s, %s, %s, %s)",
+              (TEZ, name, color, position))
+    return {name: env.outcome(name) for name in
+            ('Согласен', 'Перезвон', 'Отказ', 'Недоступен', 'Уже работает', 'Сброс', 'Подумает')}
+
+
+def test_outcomes_are_every_outcome_of_the_settings_with_the_last_one_of_each_driver(env):
+    phones = ['7701000000%d' % i for i in range(1, 9)]
+    env.base([(p, 'Алматы') for p in phones])
+    o = _tez_outcomes_of_27_11(env)
+    no_car = env.reason(o['Отказ'], 'Нет авто', 1)
+    # 1: сначала «Подумает», потом «Согласен» — один водитель, последний итог.
+    env.autodial_outcome(phones[0], _at(5), o['Подумает'])
+    env.autodial_outcome(phones[0], _at(7), o['Согласен'])
+    # 2: отказ с причиной; следующий звонок без итога (недозвон) итог не стирает.
+    env.autodial_outcome(phones[1], _at(6), o['Отказ'], no_car)
+    env.autodial_outcome(phones[1], _at(9), None)
+    # 3: отказ, потом «Подумает» — уже не отказ и не в причинах отказа.
+    env.autodial_outcome(phones[2], _at(5), o['Отказ'], no_car)
+    env.autodial_outcome(phones[2], _at(8), o['Подумает'])
+    env.autodial_outcome(phones[3], _at(6), o['Перезвон'])
+    env.autodial_outcome(phones[4], _at(6), o['Недоступен'])
+    env.autodial_outcome(phones[5], _at(6), o['Сброс'])
+    # 7: только звонок Binotel мимо обзвона — итога нет; 8: итог за выбранными днями.
+    env.call(phones[6], _at(6))
+    env.autodial_outcome(phones[7], _at(20), o['Согласен'])
+    data = env.funnel(date_to=date(2026, 10, 15))
+    outcomes = data["outcomes"]
+    # Все итоги настроек — в их порядке и с нулём («Уже работает»); доля — от водителей с итогом.
+    assert [(i["name"], i["count"], i["share"]) for i in outcomes["items"]] == [
+        ('Согласен', 1, 16.7), ('Перезвон', 1, 16.7), ('Отказ', 1, 16.7), ('Недоступен', 1, 16.7),
+        ('Уже работает', 0, 0.0), ('Сброс', 1, 16.7), ('Подумает', 1, 16.7)]
+    assert (outcomes["total"], outcomes["agreements"], outcomes["refusals"]) == (6, 1, 1)
+    assert [i["kind"] for i in outcomes["items"]] == ['agreement', '', 'refusal', '', '', '', '']
+    # Цвет — из настроек; негодный — серый, как у телефона.
+    assert [i["color"] for i in outcomes["items"]][-2:] == ['#AF52DE', '#8E8E93']
+    assert [i["outcome_id"] for i in outcomes["items"]] == list(o.values())
+    # Причины отказа — из тех же последних итогов: сумма = «Отказ» в итогах.
+    assert data["refusals"]["total"] == outcomes["refusals"] == 1
+    assert [(r["name"], r["count"], r["share"]) for r in data["refusals"]["reasons"]] == [('Нет авто', 1, 100.0)]
+    # Без дней — окно месяца базы: восьмой (20.10) — тоже «Согласен».
+    full = env.funnel()["outcomes"]
+    assert (full["total"], full["agreements"], full["refusals"], full["items"][0]["count"]) == (7, 2, 1, 2)
+    # Город и файл фильтруют и итоги.
+    assert env.funnel(city=dial_analytics.FUNNEL_CITY_NONE)["outcomes"]["total"] == 0
+
+
+def test_outcome_switched_off_is_shown_only_with_drivers_and_types_count_inside(env):
+    phones = ['7701000000%d' % i for i in range(1, 5)]
+    env.base([(p, '') for p in phones])
+    o = _tez_outcomes_of_27_11(env)
+    busy = env.reason(o['Перезвон'], 'Занят, просил позже', 1)
+    env.autodial_outcome(phones[0], _at(5), o['Перезвон'], busy)
+    env.autodial_outcome(phones[1], _at(5), o['Перезвон'])
+    env.autodial_outcome(phones[2], _at(5), o['Уже работает'])
+    # «Сброс» выключили без истории — строки нет; «Уже работает» выключили с историей — строка есть.
+    env.q("UPDATE dial_list_outcomes SET is_active = FALSE WHERE id IN (%s, %s)", (o['Сброс'], o['Уже работает']))
+    items = env.funnel()["outcomes"]["items"]
+    assert [(i["name"], i["count"], i["is_active"]) for i in items] == [
+        ('Согласен', 0, True), ('Перезвон', 2, True), ('Отказ', 0, True), ('Недоступен', 0, True),
+        ('Уже работает', 1, False), ('Подумает', 0, True)]
+    # Типы итога — внутри него: по убыванию, «без типа» последним; доля — от всех водителей с итогом.
+    assert [(s["name"], s["count"], s["share"]) for s in items[1]["subtypes"]] == [
+        ('Занят, просил позже', 1, 33.3), ('', 1, 33.3)]
+    assert items[1]["subtypes"][1]["id"] is None
+    # Тип не уходит в причины отказа: это не отказ.
+    assert env.funnel()["refusals"]["total"] == 0
+
+
+def test_driver_in_two_months_of_the_autodial_base_is_one_driver_with_the_last_outcome(env):
+    # Разбор 27.11.2026: у номера строка базы автообзвона на каждый месяц — водитель базы успешек всё равно один.
+    env.base([('77010000001', 'Алматы')])
+    o = _tez_outcomes_of_27_11(env)
+    env.autodial_outcome('77010000001', _at(25, month=9), o['Отказ'], period=date(2026, 9, 1))
+    env.autodial_outcome('77010000001', _at(5), o['Согласен'])
+    outcomes = env.funnel()["outcomes"]
+    assert (outcomes["total"], outcomes["agreements"], outcomes["refusals"]) == (1, 1, 0)
+    # Последним был сентябрьский отказ (окно октябрьской базы — с 24.09) — значит, отказ.
+    env.autodial_outcome('77010000001', _at(6), o['Отказ'], period=date(2026, 9, 1))
+    data = env.funnel()
+    assert (data["outcomes"]["total"], data["outcomes"]["refusals"], data["refusals"]["total"]) == (1, 1, 1)
+
+
+def test_several_refusal_outcomes_share_one_row_without_reason(env):
+    phones = ['7701000000%d' % i for i in range(1, 4)]
+    env.base([(p, 'Алматы') for p in phones])
+    o = _tez_outcomes_of_27_11(env)
+    env.q("INSERT INTO dial_list_outcomes (department_id, name, color, position) VALUES (%s, 'Отказ водителя', "
+          "'#FF3B30', 8)", (TEZ,))
+    refused = env.outcome('Отказ водителя')
+    no_car = env.reason(refused, 'Нет авто', 1)
+    env.autodial_outcome(phones[0], _at(5), o['Отказ'])
+    env.autodial_outcome(phones[1], _at(5), refused)
+    env.autodial_outcome(phones[2], _at(5), refused, no_car)
+    data = env.funnel()
+    assert [(i["name"], i["count"], i["kind"]) for i in data["outcomes"]["items"] if i["kind"] == 'refusal'] == [
+        ('Отказ', 1, 'refusal'), ('Отказ водителя', 2, 'refusal')]
+    # Отказы без причины обоих итогов — одной строкой; сумма причин = отказы в итогах.
+    assert [(r["name"], r["subtype_id"], r["count"]) for r in data["refusals"]["reasons"]] == [
+        ('', None, 2), ('Нет авто', data["refusals"]["reasons"][1]["subtype_id"], 1)]
+    assert data["refusals"]["total"] == data["outcomes"]["refusals"] == 3
+
+
+def test_agreement_by_the_date_of_going_online_whatever_the_name(env):
+    env.base([('77010000001', 'Алматы'), ('77010000002', 'Алматы')])
+    o = _tez_outcomes_of_27_11(env)
+    # Итог с датой выхода на линию, названный не «Согласен…», — тоже согласие (из настроек, через ответ сервера).
+    env.q("INSERT INTO dial_list_outcomes (department_id, name, color, position, due_kind) "
+          "VALUES (%s, 'Выйдет в пятницу', '#34C759', 8, 'online')", (TEZ,))
+    env.autodial_outcome('77010000001', _at(5), env.outcome('Выйдет в пятницу'))
+    env.autodial_outcome('77010000002', _at(5), o['Согласен'])
+    outcomes = env.funnel()["outcomes"]
+    assert [(i["name"], i["kind"]) for i in outcomes["items"] if i["count"]] == [
+        ('Согласен', 'agreement'), ('Выйдет в пятницу', 'agreement')]
+    assert outcomes["agreements"] == 2
+    # Сняли дату у «Согласен» — по имени он всё ещё согласие.
+    env.q("UPDATE dial_list_outcomes SET due_kind = '' WHERE id = %s", (o['Согласен'],))
+    assert env.funnel()["outcomes"]["agreements"] == 2
+
+
+def test_agreement_is_the_date_of_going_online_or_the_name_and_a_refusal_never(env):
+    assert dial_analytics.is_agreement_outcome('Согласен выйти на линию', 'online')
+    assert dial_analytics.is_agreement_outcome(' согласна ', '')
+    assert dial_analytics.is_agreement_outcome('Выйдет в пятницу', 'online')
+    assert not dial_analytics.is_agreement_outcome('Подумает', 'callback')
+    assert not dial_analytics.is_agreement_outcome('Отказ', 'online')
+    assert [dial_analytics.outcome_kind(n, d) for n, d in (('Отказ', ''), ('Согласен', ''), ('Перезвон', 'callback'))] \
+        == ['refusal', 'agreement', '']
 
 
 def test_test_numbers_are_not_drivers(env):

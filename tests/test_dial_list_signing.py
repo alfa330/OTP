@@ -1167,9 +1167,10 @@ class SchemaAndWiringTests(unittest.TestCase):
         src = inspect.getsource(dial_analytics)
         # Дашборд о номерах не знает вовсе. «Воронка ОП» Тез (06.11.2026) сводит базу успешек со звонками
         # Binotel по номеру: номер — только в соединениях, во внешний SELECT не попадает (что в ответе
-        # воронки нет номеров, сверяет test_dial_list_tez_funnel_postgres).
+        # воронки нет номеров, сверяет test_dial_list_tez_funnel_postgres). Итоги звонков и причины отказа
+        # (27.11.2026) — один запрос последних итогов, тоже без номера наружу.
         self.assertNotIn('phone_norm', src[:src.index('# ── Воронка ОП Тез')])
-        for sql in (dial_analytics._FUNNEL_SQL, dial_analytics._REFUSALS_SQL):
+        for sql in (dial_analytics._FUNNEL_SQL, dial_analytics._LAST_OUTCOMES_SQL):
             self.assertNotIn('phone_norm', sql[sql.rindex('SELECT'):])
         self.assertNotIn("'iin'", src)
         self.assertNotIn('full_name', src)

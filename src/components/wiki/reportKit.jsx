@@ -21,7 +21,16 @@ import { iosCard, iosGroupLabel, IosHint, IosPager } from '../ui/ios';
  * ОБЪЯСНЕНИЕ ЖИВЁТ РЯДОМ С ЧИСЛОМ. Определение показателя («что такое
  * прочтение») даётся через `help` — подсказку «i» (IosHint): нужна она один
  * раз, а место занимала бы всегда.
+ *
+ * КРУПНЫЙ ВИД — `size="lg"` (27.11.2026, «Воронка ОП» Тез: отчёт снимают
+ * скриншотом для руководства, «муравьиный шрифт не отправлять»). Крупнее
+ * подписи, числа и строки — только от ширины xl: жалоба про большой экран,
+ * телефон и узкое окно остаются как были. Без `size` разметка прежняя, класс
+ * в класс: остальные отчёты правка не задевает. В невысоком окне (до 920 px — ноутбук 1440×900) плитка
+ * тоньше на 8 px: отчёт «Воронки ОП» тогда тоже влезает в один экран.
  */
+
+const lgOnly = (size, classes) => (size === 'lg' ? ` ${classes}` : '');
 
 /** Плитка-показатель: подпись, число, необязательная оговорка под ним.
  *
@@ -34,34 +43,47 @@ import { iosCard, iosGroupLabel, IosHint, IosPager } from '../ui/ios';
  *  («медиана», «в среднем»), а не пояснение.
  */
 export const Metric = ({ label, value, hint = null, help = null,
-                         helpAlign = 'left', tone = null }) => (
-    <div className="rounded-xl bg-slate-50 px-3 py-2.5">
-        <div className="flex items-center gap-1.5">
-            <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                {label}
-            </div>
-            {help && <IosHint text={help} align={helpAlign} label={`Как считается «${label}»`} />}
-        </div>
+                         helpAlign = 'left', tone = null, size = 'md' }) => {
+    const number = (
         <div className={`mt-0.5 text-[19px] font-semibold leading-none ${
             tone === 'bad' ? 'text-rose-600'
                 : tone === 'warn' ? 'text-amber-600'
-                    : tone === 'good' ? 'text-emerald-600' : 'text-slate-900'}`}>
+                    : tone === 'good' ? 'text-emerald-600' : 'text-slate-900'}${lgOnly(size, 'xl:mt-0 xl:text-[26px]')}`}>
             {value}
         </div>
-        {hint && <div className="mt-1 text-[11.5px] leading-snug text-slate-500">{hint}</div>}
-    </div>
-);
+    );
+    const note = hint && <div className={`mt-1 text-[11.5px] leading-snug text-slate-500${lgOnly(size, 'xl:mt-0 xl:text-[13px]')}`}>{hint}</div>;
+    return (
+        <div className={`rounded-xl bg-slate-50 px-3 py-2.5${lgOnly(size, 'xl:px-4 xl:py-2.5 xl:[@media(max-height:920px)]:py-1.5')}`}>
+            {/* Крупный вид: подписи под две строки — числа соседних плиток ряда на одной линии, даже если
+                длинная подпись («Зарегистрировались после контакта») перенеслась. */}
+            <div className={`flex items-center gap-1.5${lgOnly(size, 'xl:min-h-[32px] xl:items-start')}`}>
+                <div className={`text-[11px] font-medium uppercase tracking-wide text-slate-500${lgOnly(size, 'xl:text-[12.5px] xl:leading-4')}`}>
+                    {label}
+                </div>
+                {help && <IosHint text={help} align={helpAlign} label={`Как считается «${label}»`} />}
+            </div>
+            {/* Крупный вид: оговорка — в строку с числом («489 до первого звонка»), а не под ним: плитка ниже на
+                строку, и отчёт влезает в один экран; не помещается рядом — переносится под число. */}
+            {size === 'lg' ? (
+                <div className="xl:mt-1.5 xl:flex xl:flex-wrap xl:items-baseline xl:gap-x-2.5">{number}{note}</div>
+            ) : (
+                <>{number}{note}</>
+            )}
+        </div>
+    );
+};
 
-export const Th = ({ children, right = false }) => (
+export const Th = ({ children, right = false, size = 'md' }) => (
     <th className={`whitespace-nowrap px-3 py-2 text-[11.5px] font-medium uppercase
-                    tracking-wide text-slate-500 ${right ? 'text-right' : 'text-left'}`}>
+                    tracking-wide text-slate-500 ${right ? 'text-right' : 'text-left'}${lgOnly(size, 'xl:px-4 xl:py-2 xl:text-[12px]')}`}>
         {children}
     </th>
 );
 
-export const Td = ({ children, right = false, muted = false }) => (
+export const Td = ({ children, right = false, muted = false, size = 'md' }) => (
     <td className={`px-3 py-2 text-[12.5px] ${right ? 'text-right tabular-nums' : ''}
-                    ${muted ? 'text-slate-500' : 'text-slate-700'}`}>
+                    ${muted ? 'text-slate-500' : 'text-slate-700'}${lgOnly(size, 'xl:px-4 xl:py-[7px] xl:text-[15px]')}`}>
         {children}
     </td>
 );
@@ -78,10 +100,10 @@ export const Td = ({ children, right = false, muted = false }) => (
  */
 export const Table = ({ title, icon: Icon, count, total = null, empty, head,
                         children, help = null, badge = null,
-                        footer = null }) => (
+                        footer = null, size = 'md' }) => (
     <section className="space-y-1.5">
         <div className="flex items-center gap-1.5 pr-1">
-            <div className={iosGroupLabel}>
+            <div className={`${iosGroupLabel}${lgOnly(size, 'xl:text-[13px]')}`}>
                 {Icon && <Icon size={12} className="mr-1 inline align-[-1px]" />}
                 {title}
                 {count !== undefined ? ` · ${count}` : ''}
@@ -92,7 +114,7 @@ export const Table = ({ title, icon: Icon, count, total = null, empty, head,
         </div>
         <div className={`${iosCard} overflow-hidden`}>
             {count === 0 ? (
-                <p className="px-4 py-3 text-[12.5px] text-slate-500">{empty}</p>
+                <p className={`px-4 py-3 text-[12.5px] text-slate-500${lgOnly(size, 'xl:text-[15px]')}`}>{empty}</p>
             ) : (
                 <div className="overflow-x-auto">
                     <table className="w-full border-collapse">

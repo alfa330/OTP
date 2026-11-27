@@ -14,6 +14,7 @@
 
 Номеров, ИИН и ФИО здесь нет — только числа и имена операторов.
 """
+import re
 from datetime import date, datetime, time, timedelta
 
 from crm import sapar
@@ -597,15 +598,31 @@ def activation_sapar(cur, department_id, period):
 # ответил (account_checked_at), не учтён ни в регистрации, ни в поездках после диалога; сколько
 # таких — tez_unchecked: сайт предупреждает, а не показывает молча ноль.
 #
-# Отказ — итог, название которого начинается с «Отказ»; причина — его тип. Итог ставят в карточке
-# водителя iCORE Phone при обзвоне через раздел, у звонков Binotel мимо обзвона итога нет: отказ
-# водителя базы — его последний итог-отказ в выбранные дни среди попыток автообзвона отдела (по
-# номеру), водитель считается один раз. Город — колонка «город» файла базы; без неё — «не указан».
+# Итоги звонков (27.11.2026: Анель — «в воронке не хватает показателей по итогам диалога: согласен,
+# подумает, отказ…», «согласия и отказы как основные показатели отдельно»; владелец — «всё, что в
+# настройках итогов звонка добавлено, всё должно быть выведено»). Итог ставят в карточке водителя
+# iCORE Phone при обзвоне через раздел, у звонков Binotel мимо обзвона итога нет. Итог водителя базы —
+# его ПОСЛЕДНИЙ итог в выбранные дни среди попыток автообзвона отдела (по номеру), водитель считается
+# один раз. Выводятся ВСЕ включённые итоги из «Настройки» → «Итоги», в их порядке, и с нулём;
+# выключенный — только если по нему есть водители (история). Доля — от всех водителей с итогом.
+#
+# Отказ — итог, название которого начинается с «Отказ»; причина — его тип. Согласие — итог с датой
+# выхода на линию (тот же признак, что у «Согласились» дашборда автообзвона; но там водитель — согласившийся
+# хоть раз за месяц, а здесь — по последнему итогу, и числа расходятся) или названный «Согласен…». Отказы и их
+# причины считаются из тех же последних итогов: «Отказ» в итогах и сумма причин отказа на экране
+# совпадают (до 27.11.2026 причины брались по последнему ОТКАЗУ водителя — отказавший, а потом
+# согласившийся оставался и в отказах). Город — колонка «город» файла базы; без неё — «не указан».
 
 FUNNEL_CITY_NONE = "__none__"  # город фильтра «не указан»
-# Итог-отказ узнаём в Python, а не LIKE в SQL: lower() и ILIKE по кириллице зависят от локали
-# кластера (в C-локали «Отказ» не опускается) — правило не должно от неё зависеть.
+# Итог-отказ и итог-согласие узнаём в Python, а не LIKE в SQL: lower() и ILIKE по кириллице зависят
+# от локали кластера (в C-локали «Отказ» не опускается) — правило не должно от неё зависеть.
 REFUSAL_NAME_PREFIX = "отказ"
+AGREEMENT_NAME_PREFIX = "соглас"
+# Итог с датой «когда выйдет на линию» (service.DUE_ONLINE): «Согласен выйти на линию» стартового набора Тез.
+AGREEMENT_DUE_KIND = "online"
+OUTCOME_KIND_REFUSAL = "refusal"
+OUTCOME_KIND_AGREEMENT = "agreement"
+OUTCOME_COLOR_DEFAULT = "#8E8E93"
 # Выбор месяца базы: столько последних месяцев.
 FUNNEL_MONTHS_LIMIT = 24
 
@@ -613,6 +630,23 @@ FUNNEL_MONTHS_LIMIT = 24
 def is_refusal_outcome(name):
     """Итог — отказ: название начинается с «Отказ» (без учёта регистра и пробелов по краям)."""
     return str(name or "").strip().lower().startswith(REFUSAL_NAME_PREFIX)
+
+
+def is_agreement_outcome(name, due_kind=""):
+    """Итог — согласие: с датой выхода на линию или назван «Согласен…» (без учёта регистра). Отказ —
+    никогда не согласие, как бы его ни настроили."""
+    if is_refusal_outcome(name):
+        return False
+    return str(due_kind or "") == AGREEMENT_DUE_KIND or str(name or "").strip().lower().startswith(AGREEMENT_NAME_PREFIX)
+
+
+def outcome_kind(name, due_kind=""):
+    """'refusal' | 'agreement' | '' — чем итог считается в главных показателях воронки."""
+    if is_refusal_outcome(name):
+        return OUTCOME_KIND_REFUSAL
+    if is_agreement_outcome(name, due_kind):
+        return OUTCOME_KIND_AGREEMENT
+    return ""
 
 
 _TEZ_LEAD_NOT_TEST_SQL = test_keys.sql_not_test("l.phone_norm", digits=True)
@@ -661,32 +695,34 @@ _FUNNEL_SQL = "WITH " + _FUNNEL_LEADS_CTE + """,
     GROUP BY l.city_key
 """
 
-_REFUSALS_SQL = "WITH " + _FUNNEL_LEADS_CTE + """,
-    refusals AS (
-        SELECT DISTINCT ON (l.id) l.id AS lead_id, t.outcome_subtype_id
+# Последний итог каждого водителя базы в выбранные дни (попытки автообзвона отдела по номеру) — и по
+# нему число водителей на итог и его тип. Одним запросом: из этих же строк — итоги, отказы и причины.
+_LAST_OUTCOMES_SQL = "WITH " + _FUNNEL_LEADS_CTE + """,
+    last_outcome AS (
+        SELECT DISTINCT ON (l.id) l.id AS lead_id, t.outcome_id, t.outcome_subtype_id
         FROM leads l
         JOIN dial_list_leads dl ON dl.department_id = %(department_id)s AND dl.phone_norm = l.phone_norm
         JOIN dial_list_assignments a ON a.lead_id = dl.id
         JOIN dial_list_attempts t ON t.assignment_id = a.id
-        WHERE t.outcome_id = ANY(%(refusal_ids)s::uuid[])
+        WHERE t.outcome_id IS NOT NULL
           AND t.requested_at >= %(dialog_from)s AND t.requested_at < %(dialog_to)s
         ORDER BY l.id, t.requested_at DESC, t.id DESC
     )
-    SELECT r.outcome_subtype_id, s.name, COUNT(*)
-    FROM refusals r
-    LEFT JOIN dial_list_outcome_subtypes s ON s.id = r.outcome_subtype_id
-    GROUP BY r.outcome_subtype_id, s.name
+    SELECT lo.outcome_id, lo.outcome_subtype_id, s.name, COUNT(*)
+    FROM last_outcome lo
+    LEFT JOIN dial_list_outcome_subtypes s ON s.id = lo.outcome_subtype_id
+    GROUP BY lo.outcome_id, lo.outcome_subtype_id, s.name
 """
 
-# Итоги отдела (и выключенные: история на них ссылается) и сколько у каждого включённых причин —
-# без причин телефон их не спросит.
+# Итоги отдела в порядке настроек (и выключенные: история на них ссылается) и сколько у каждого
+# включённых причин — без причин телефон их не спросит.
 _OUTCOMES_REASONS_SQL = """
-    SELECT o.id, o.name, o.is_active, COUNT(s.id) FILTER (WHERE s.is_active)
+    SELECT o.id, o.name, o.is_active, COUNT(s.id) FILTER (WHERE s.is_active), o.color, o.due_kind
     FROM dial_list_outcomes o
     LEFT JOIN dial_list_outcome_subtypes s ON s.outcome_id = o.id
     WHERE o.department_id = %(department_id)s
-    GROUP BY o.id, o.name, o.is_active, o.position
-    ORDER BY o.position
+    GROUP BY o.id, o.name, o.is_active, o.position, o.color, o.due_kind
+    ORDER BY o.position, o.created_at
 """
 
 # Выбор фильтров: города базы (с учётом файла, но не города), живые загрузки месяца, месяцы базы.
@@ -733,6 +769,69 @@ def _city_order(row):
     return (row["city"] == "", -row["base"], row["city"].lower())
 
 
+def _subtype_order(entry):
+    # По убыванию количества; «без причины» при равенстве — последней.
+    return (-entry["count"], entry["id"] is None, entry["name"].lower())
+
+
+def _funnel_outcomes(catalog, rows):
+    """Итоги звонков воронки. catalog — итоги отдела в порядке настроек (_OUTCOMES_REASONS_SQL), rows —
+    (итог, тип, имя типа, водителей) последних итогов (_LAST_OUTCOMES_SQL). Каждый включённый итог — и с
+    нулём, выключенный — только если по нему есть водители. Итог, которого нет в списке отдела (чужой),
+    не считается вовсе: сумма строк = total, доли сходятся в 100 %."""
+    used = {}
+    for outcome_id, subtype_id, subtype_name, count in rows:
+        if outcome_id is None:
+            continue
+        entry = used.setdefault(str(outcome_id), {"count": 0, "subtypes": []})
+        count = int(count or 0)
+        entry["count"] += count
+        entry["subtypes"].append({"id": str(subtype_id) if subtype_id else None,
+                                  "name": (subtype_name or "") if subtype_id else "", "count": count})
+    items = []
+    for outcome_id, name, active, _reasons, color, due_kind in catalog:
+        entry = used.get(str(outcome_id), {"count": 0, "subtypes": []})
+        if not active and not entry["count"]:
+            continue
+        color = str(color or "")
+        items.append({
+            "outcome_id": str(outcome_id), "name": name or "",
+            "color": color if re.fullmatch(r"#[0-9A-Fa-f]{6}", color) else OUTCOME_COLOR_DEFAULT,
+            "kind": outcome_kind(name, due_kind), "is_active": bool(active), "count": entry["count"],
+            "subtypes": sorted(entry["subtypes"], key=_subtype_order),
+        })
+    total = sum(item["count"] for item in items)
+    for item in items:
+        item["share"] = _pct0(item["count"], total)
+        for subtype in item["subtypes"]:
+            subtype["share"] = _pct0(subtype["count"], total)
+    return {
+        "total": total,
+        "agreements": sum(i["count"] for i in items if i["kind"] == OUTCOME_KIND_AGREEMENT),
+        "refusals": sum(i["count"] for i in items if i["kind"] == OUTCOME_KIND_REFUSAL),
+        "items": items,
+    }
+
+
+def _refusal_reasons(items):
+    """Причины отказа — типы итогов-отказов из тех же последних итогов: сумма причин = «Отказ» в итогах.
+    Отказ без причины (телефон до причин) — строка «без причины»; у нескольких итогов-отказов одна такая.
+    Доля — от всех отказов."""
+    merged = {}
+    for item in items:
+        if item["kind"] != OUTCOME_KIND_REFUSAL:
+            continue
+        for subtype in item["subtypes"]:
+            reason = merged.setdefault(subtype["id"], {"subtype_id": subtype["id"], "name": subtype["name"], "count": 0})
+            reason["count"] += subtype["count"]
+    reasons = list(merged.values())
+    total = sum(r["count"] for r in reasons)
+    for reason in reasons:
+        reason["share"] = _pct0(reason["count"], total)
+    reasons.sort(key=lambda r: (-r["count"], r["subtype_id"] is None, r["name"].lower()))
+    return reasons
+
+
 def tez_funnel(cur, department_id, period, batch_id=None, date_from=None, date_to=None, city=None):
     """Воронка ОП базы успешек месяца `period` (date первого дня). department_id — отдел раздела
     (по нему — итоги-отказы автообзвона), batch_id — файл загрузки базы (uuid строкой),
@@ -776,20 +875,13 @@ def tez_funnel(cur, department_id, period, batch_id=None, date_from=None, date_t
               for step in ("base", "already_registered", "dialog", "registered_after", "orders_after")}
 
     cur.execute(_OUTCOMES_REASONS_SQL, params)
-    refusal_rows = [row for row in cur.fetchall() if is_refusal_outcome(row[1])]
+    catalog = cur.fetchall()
     refusal_outcomes = [{"name": name or "", "reasons": int(count or 0)}
-                        for _oid, name, active, count in refusal_rows if active]
-    reasons = []
-    if refusal_rows:
-        params["refusal_ids"] = [str(row[0]) for row in refusal_rows]
-        cur.execute(_REFUSALS_SQL.format(**fmt), params)
-        reasons = [{"subtype_id": str(sid) if sid else None, "name": name or "", "count": int(count or 0)}
-                   for sid, name, count in cur.fetchall()]
+                        for _oid, name, active, count, _color, _due in catalog if active and is_refusal_outcome(name)]
+    cur.execute(_LAST_OUTCOMES_SQL.format(**fmt), params)
+    outcomes = _funnel_outcomes(catalog, cur.fetchall())
+    reasons = _refusal_reasons(outcomes["items"])
     refusals_total = sum(r["count"] for r in reasons)
-    for reason in reasons:
-        reason["share"] = _pct0(reason["count"], refusals_total)
-    # По убыванию количества; «без причины» при равенстве — последней.
-    reasons.sort(key=lambda r: (-r["count"], r["subtype_id"] is None, r["name"].lower()))
 
     cur.execute(_FUNNEL_CITIES_SQL.format(batch_filter=batch_filter), params)
     cities = [{"key": key or FUNNEL_CITY_NONE, "name": (name or "").strip() if key else "", "base": int(count or 0)}
@@ -813,6 +905,7 @@ def tez_funnel(cur, department_id, period, batch_id=None, date_from=None, date_t
                   "dialog_to_orders": _pct0(totals["orders_after"], totals["dialog"])},
         "tez_unchecked": unchecked,
         "by_city": by_city,
+        "outcomes": outcomes,
         "refusals": {"total": refusals_total, "reasons": reasons, "outcomes": refusal_outcomes},
         "options": {"months": months, "cities": cities, "batches": batches},
         "filters": {"batch_id": str(batch_id) if batch_id else "", "city": city or "",

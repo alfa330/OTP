@@ -9,8 +9,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    CITY_NONE, batchOptions, callWindowText, cityLabel, cityOptions, funnelConversions, funnelQuery, funnelSteps,
-    monthOptions, periodHint, reasonLabel, refusalSetupNotice, uncheckedNotice,
+    CITY_NONE, OUTCOME_COLOR_DEFAULT, OUTCOMES_PENDING_TEXT, agreementSetupNotice, batchOptions, callWindowText,
+    REPORT_SPLIT_MIN_PX, REPORT_THREE_MIN_PX, cityLabel, cityOptions, funnelConversions, funnelQuery, funnelSteps,
+    monthOptions, outcomeRows, outcomeTiles, outcomesReady, outcomesTotal, periodHint, reasonLabel, refusalSetupNotice,
+    BARS_MIN_COLUMN_PX, FILTERS_INLINE_MIN_PX, filtersInline, listColumnWidth, reportLayout, reportShowsBars, splitInTwo,
+    stepTileClass, uncheckedNotice,
 } from '../src/components/dial_list/tezFunnel.js';
 
 const NF = new Intl.NumberFormat('ru-RU');
@@ -119,4 +122,137 @@ test('причины: без типа — «Без причины»; подск�
     assert.equal(refusalSetupNotice({ refusals: { outcomes: [{ name: 'Отказ', reasons: 3 }] } }), '');
     // Сервер без отчёта об отказах — молчим, а не пугаем.
     assert.equal(refusalSetupNotice({}), '');
+});
+
+// Итоги звонков (27.11.2026): все итоги настроек Тез КЦ — «Согласен, Перезвон, Отказ, Недоступен, Уже работает,
+// Сброс, Подумает» (прислал владелец), согласия и отказы — главными плитками.
+const OUTCOMES = { outcomes: { total: 60, agreements: 30, refusals: 24, items: [
+    { outcome_id: 'o1', name: 'Согласен', color: '#34C759', kind: 'agreement', is_active: true, count: 30, subtypes: [] },
+    { outcome_id: 'o2', name: 'Перезвон', color: '#FF9F0A', kind: '', is_active: true, count: 0,
+        subtypes: [{ id: null, name: '', count: 0 }] },
+    { outcome_id: 'o3', name: 'Отказ', color: '#FF3B30', kind: 'refusal', is_active: true, count: 24,
+        subtypes: [{ id: 's1', name: 'Нет авто', count: 20 }, { id: null, name: '', count: 4 }] },
+    { outcome_id: 'o4', name: 'Недоступен', color: 'серый', kind: '', is_active: true, count: 0, subtypes: [] },
+    { outcome_id: 'o5', name: 'Уже работает', color: '#5856D6', kind: '', is_active: false, count: 1,
+        subtypes: [{ id: 's2', name: 'В другом парке', count: 1 }] },
+    { outcome_id: 'o7', name: 'Подумает', color: '#8E8E93', kind: '', is_active: true, count: 5,
+        subtypes: [{ id: null, name: ' ', count: 5 }] },
+] } };
+
+test('итоги звонков: все итоги настроек по порядку и с нулём; типы отказа — не здесь, а в причинах', () => {
+    const rows = outcomeRows(OUTCOMES);
+    assert.deepEqual(rows.map((r) => [r.name, r.count, r.inactive]), [
+        ['Согласен', 30, false], ['Перезвон', 0, false], ['Отказ', 24, false], ['Недоступен', 0, false],
+        ['Уже работает', 1, true], ['Подумает', 5, false]]);
+    // Цвет — из настроек; негодный — серый.
+    assert.equal(rows[3].color, OUTCOME_COLOR_DEFAULT);
+    assert.equal(rows[0].color, '#34C759');
+    // Типы: у отказа — пусто (отдельный отчёт рядом), нулевые — не строки, без имени — «Без типа».
+    assert.deepEqual(rows[2].subtypes, []);
+    assert.deepEqual(rows[1].subtypes, []);
+    assert.deepEqual(rows[4].subtypes, [{ key: 's2', name: 'В другом парке', count: 1 }]);
+    // Итог без типов: одна запись «без типа» на всё число — не строка, иначе «Подумает 5 → Без типа 5» (стенд 27.11).
+    assert.deepEqual(rows[5].subtypes, []);
+    // Типы выбирали не всегда — остаток «Без типа» строкой, чтобы типы сходились с итогом.
+    const mixed = outcomeRows({ outcomes: { items: [{ outcome_id: 'm', name: 'Перезвон', kind: '', count: 3,
+        subtypes: [{ id: 't1', name: 'Занят', count: 2 }, { id: null, name: '', count: 1 }] }] } });
+    assert.deepEqual(mixed[0].subtypes, [{ key: 't1', name: 'Занят', count: 2 }, { key: 'none', name: 'Без типа', count: 1 }]);
+    assert.equal(outcomesTotal(OUTCOMES), 60);
+    // Сервер без итогов (старый) — пусто и ноль, а не «undefined».
+    assert.deepEqual(outcomeRows({}), []);
+    assert.equal(outcomesTotal(null), 0);
+});
+
+test('согласия и отказы — главные плитки: число и доля от всех итогов', () => {
+    const tiles = outcomeTiles(OUTCOMES);
+    assert.deepEqual(tiles.map((t) => [t.label, t.value, t.hint]), [
+        ['Согласились', '30', '50% от всех итогов'], ['Отказались', '24', '40% от всех итогов']]);
+    assert.ok(tiles.every((t) => t.help.length > 40), 'у каждой плитки — пояснение под «i»');
+    assert.match(tiles[1].help, /их сумма равна этому числу/);
+    // Разбор 27.11: в «Автообзвоне» «Согласились» — кто хоть раз согласился; разница названа под «i».
+    assert.match(tiles[0].help, /В разрезе «Автообзвон» «Согласились» считают иначе/);
+    // Итогов за дни нет — нули без деления на ноль.
+    assert.deepEqual(outcomeTiles({ outcomes: { total: 0, items: [] } }).map((t) => [t.value, t.hint]),
+        [['0', '0% от всех итогов'], ['0', '0% от всех итогов']]);
+    const odd = outcomeTiles({ outcomes: { total: 3, agreements: 1, refusals: 0, items: [] } });
+    // Целыми процентами — как полоса доли в «Итогах звонков».
+    assert.equal(odd[0].hint, '33% от всех итогов');
+});
+
+test('нет согласия среди итогов — предупреждение; есть или итогов нет — молчим', () => {
+    assert.equal(agreementSetupNotice(OUTCOMES), '');
+    assert.equal(agreementSetupNotice({}), '');
+    assert.equal(agreementSetupNotice({ outcomes: { items: [] } }), '');
+    const noAgreement = { outcomes: { items: OUTCOMES.outcomes.items.filter((i) => i.kind !== 'agreement') } };
+    assert.match(agreementSetupNotice(noAgreement), /нет согласия/);
+    assert.match(agreementSetupNotice(noAgreement), /«Настройки» → «Итоги»/);
+});
+
+test('сервер ещё без итогов (сайт выехал раньше) — не «ноль согласий», а «ещё не считает»', () => {
+    assert.equal(outcomesReady({}), false);
+    assert.equal(outcomesReady({ outcomes: {} }), false);
+    assert.equal(outcomesReady(OUTCOMES), true);
+    assert.deepEqual(outcomeTiles({ totals: {} }), []);
+    assert.match(OUTCOMES_PENDING_TEXT, /после обновления сервера/);
+});
+
+// Раскладка (27.11.2026, владелец: «всё симметрично», «в один экран», «адаптив под любой экран»).
+test('раскладка — от ширины блока: три колонки, друг под другом, телефон', () => {
+    assert.equal(reportLayout(1536), 'three');            // окно 1680, сайдбар свёрнут
+    assert.equal(reportLayout(1316), 'three');            // окно 1680, сайдбар открыт
+    assert.equal(reportLayout(REPORT_THREE_MIN_PX), 'three');
+    assert.equal(reportLayout(REPORT_THREE_MIN_PX - 1), 'stack');
+    assert.equal(reportLayout(916), 'stack');             // окно 1280, сайдбар открыт
+    assert.equal(reportLayout(REPORT_SPLIT_MIN_PX), 'stack');
+    assert.equal(reportLayout(366), 'single');            // телефон
+    assert.equal(reportLayout(0), 'single');              // до замера и без данных
+    assert.equal(reportLayout(undefined), 'single');
+});
+
+test('причины — две колонки по порядку: 14 → 7+7 (вровень с семью итогами), 13 → 7+6', () => {
+    const list = (n) => Array.from({ length: n }, (_, i) => i + 1);
+    assert.deepEqual(splitInTwo(list(14)).map((c) => c.length), [7, 7]);
+    assert.deepEqual(splitInTwo(list(13)), [[1, 2, 3, 4, 5, 6, 7], [8, 9, 10, 11, 12, 13]]);
+    assert.deepEqual(splitInTwo(list(1)), [[1], []]);
+    assert.deepEqual(splitInTwo(null), [[], []]);
+});
+
+test('плитки шагов — ровные ряды: телефон 2+2+1, планшет 3+2, компьютер в ряд', () => {
+    const five = [0, 1, 2, 3, 4].map((i) => stepTileClass(i, 5).split(' '));
+    // Телефон (2 колонки): последняя нечётная — во всю ширину.
+    assert.deepEqual(five.map((c) => c.includes('col-span-2')), [false, false, false, false, true]);
+    // Планшет (сетка на 6): три по 2 и две по 3 — оба ряда во всю ширину.
+    assert.deepEqual(five.map((c) => c.find((x) => x.startsWith('sm:'))),
+        ['sm:col-span-2', 'sm:col-span-2', 'sm:col-span-2', 'sm:col-span-3', 'sm:col-span-3']);
+    assert.ok(five.every((c) => c.includes('lg:col-span-1')));
+    // Четыре плитки — по две на планшете, на телефоне без растяжки.
+    const four = [0, 1, 2, 3].map((i) => stepTileClass(i, 4));
+    assert.ok(four.every((c) => c.includes('sm:col-span-3') && !c.split(' ').includes('col-span-2')));
+});
+
+test('полосы долей — только когда в узкой колонке имя, число и полоса встают в строку', () => {
+    // Окно 1680 (сайдбар свёрнут / открыт), 1440 со свёрнутым — три колонки шире 400 px: полосы есть.
+    assert.equal(reportShowsBars(1536, true), true);
+    assert.equal(reportShowsBars(1316, true), true);
+    assert.equal(reportShowsBars(1296, true), true);
+    // 1440 с открытым сайдбаром (1076) и 1280 со свёрнутым (1136) — три узкие колонки: процент без полосы.
+    assert.equal(reportShowsBars(1076, true), false);
+    assert.equal(reportShowsBars(1136, true), false);
+    // Друг под другом: причины в две колонки по половине ширины.
+    assert.equal(listColumnWidth(900), 450);
+    assert.equal(reportShowsBars(900, true), true);
+    assert.equal(reportShowsBars(600, false), false);
+    // Телефон: строка во всю ширину, шрифт мельче — полосы есть.
+    assert.equal(listColumnWidth(366), 366);
+    assert.equal(reportShowsBars(366, false), true);
+    assert.ok(BARS_MIN_COLUMN_PX.big > BARS_MIN_COLUMN_PX.base);
+});
+
+test('фильтры одной строкой — только на крупном шрифте и в широком разделе', () => {
+    assert.equal(filtersInline(1536, true), true);     // 1680, сайдбар свёрнут
+    assert.equal(filtersInline(1316, true), true);     // 1680, сайдбар открыт
+    assert.equal(filtersInline(1076, true), false);    // 1440 с открытым — «Ноябрь…» и «Ве…» обрезались бы
+    assert.equal(filtersInline(FILTERS_INLINE_MIN_PX, true), true);
+    assert.equal(filtersInline(1536, false), false);   // мелкий шрифт (окно уже 1280) — подписи над полями
+    assert.equal(filtersInline(undefined, true), false);
 });
