@@ -171,6 +171,22 @@ CREATE TABLE IF NOT EXISTS fleet_edm_session (
     last_ok_at   TIMESTAMPTZ,
     last_error   TEXT
 );
+
+-- Дополнительные учётки кабинета — только ради скорости карточек (27.11.2026).
+-- Лимит карточек водителя — у учётки, ~22 в минуту (28.10.2026), и выгрузка №65 на
+-- 244 616 строк — это ~37 тысяч карточек, сутки с лишним одной учёткой. Каждая
+-- учётка здесь — ещё свои ~22 в минуту (engine.CardPool). Ключ — логин учётки:
+-- повторный вход той же учёткой заменяет куки, а не плодит строки.
+CREATE TABLE IF NOT EXISTS fleet_edm_extra_sessions (
+    account      TEXT PRIMARY KEY,
+    cookies      TEXT NOT NULL,
+    user_agent   TEXT,
+    parks_count  INTEGER,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by   INTEGER,
+    last_ok_at   TIMESTAMPTZ,
+    last_error   TEXT
+);
 """
 
 

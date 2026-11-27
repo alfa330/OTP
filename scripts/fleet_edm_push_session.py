@@ -39,6 +39,9 @@ Playwright намеренно НЕ в requirements.txt: браузер нуже�
     python scripts/fleet_edm_push_session.py --profile "C:/pw/fleet" --wait-minutes 20
     python scripts/fleet_edm_push_session.py --base-url http://127.0.0.1:5000
     python scripts/fleet_edm_push_session.py --check          # только проверить, что лежит
+    python scripts/fleet_edm_push_session.py --target extra --slot 2
+        # ещё одна учётка «Провайдера ЭДО» ради скорости карточек (~22 в минуту на учётку);
+        # своя ячейка — свой профиль Chromium; --target extra --check — список учёток
 
 Куки в консоль не печатаются и на диск не сохраняются.
 """
@@ -71,6 +74,16 @@ TARGETS = {
         'session_path': '/api/driver_mailings/session',
         'profile': os.path.expanduser(r'~\.claude\pw-profiles\fleet-yandex-mailings'),
         'login_hint': 'под аккаунтом рассылок (с правом рассылать во всех диспетчерских)',
+    },
+    # Дополнительные учётки «Провайдера ЭДО» (27.11.2026) — ради скорости карточек:
+    # у кабинета лимит на учётку, ~22 карточки в минуту каждая. Учёток сколько
+    # угодно, поэтому профиль у каждой свой — по номеру ячейки (--slot): вход
+    # второй учёткой в том же профиле выбил бы первую.
+    'extra': {
+        'title': '«Провайдер ЭДО» · дополнительная учётка',
+        'session_path': '/api/fleet_edm/accounts',
+        'profile': os.path.expanduser(r'~\.claude\pw-profiles\fleet-yandex-extra-{slot}'),
+        'login_hint': 'под дополнительной учёткой (её должны добавить во все диспетчерские)',
     },
 }
 PARKS_PATH = '/api/fleet/ui/v1/user/parks'
@@ -258,12 +271,55 @@ def cookies_from_header_file(path):
     return cookies
 
 
+def print_accounts(rows):
+    if not rows:
+        print('Дополнительных учёток в OTP нет')
+        return
+    for row in rows:
+        state = ('вход не действует: {}'.format(row['last_error'])
+                 if row.get('last_error') else 'жива')
+        print('  {:<40} парков {:<4} {}  (обновлена {})'.format(
+            row.get('account') or '—', row.get('parks_count') or '—', state,
+            row.get('updated_at') or '—'))
+
+
+def push_extra(client, args, target):
+    """Дополнительная учётка: --check — список, иначе вход и передача кук.
+    Ответ сервера — {account, parks_count, accounts}, а не {session}."""
+    if args.check:
+        response = client.session.get('{}{}'.format(client.base_url, target['session_path']),
+                                      timeout=60)
+        if response.status_code >= 400:
+            raise SystemExit('GET {} → {}: {}'.format(
+                target['session_path'], response.status_code, response.text[:300]))
+        print_accounts((response.json() or {}).get('accounts') or [])
+        return 0
+    if args.cookie_file:
+        cookies = cookies_from_header_file(args.cookie_file)
+        user_agent = DEFAULT_USER_AGENT
+        print('Кук в заголовке: {}'.format(len(cookies)))
+    else:
+        cookies, user_agent, account, parks = grab_cookies(
+            args.profile or target['profile'], wait_minutes=args.wait_minutes,
+            headless=args.headless, login_hint=target['login_hint'])
+        print('Кабинет открыт: {} ({} парков)'.format(account or '—', parks))
+    result = client.push(cookies, user_agent)
+    print('Учётка {} подключена: {} парков. Все дополнительные учётки:'.format(
+        result.get('account') or '—', result.get('parks_count') or '—'))
+    print_accounts(result.get('accounts') or [])
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Передать порталу сессию кабинета Яндекс.Fleet')
     parser.add_argument('--target', choices=sorted(TARGETS), default='edm',
                         help='куда: edm — «Провайдер ЭДО» (по умолчанию), '
-                             'mailings — «Рассылки» (свой аккаунт)')
+                             'mailings — «Рассылки» (свой аккаунт), '
+                             'extra — ещё одна учётка «Провайдера ЭДО» для скорости карточек')
+    parser.add_argument('--slot', type=int, default=1,
+                        help='для --target extra: номер ячейки — у каждой дополнительной '
+                             'учётки свой профиль Chromium (1, 2, 3…)')
     parser.add_argument('--profile', default=None,
                         help='папка профиля Chromium (по умолчанию своя у каждой цели: {})'.format(
                             ', '.join('{}: {}'.format(k, v['profile'])
@@ -282,10 +338,14 @@ def main():
                              'основного браузера — вместо входа в окне Chromium')
     args = parser.parse_args()
 
-    target = TARGETS[args.target]
+    target = dict(TARGETS[args.target])
+    target['profile'] = target['profile'].format(slot=max(1, int(args.slot)))
     load_env()
     client = OtpClient(args.base_url, args.login, args.password,
                        session_path=target['session_path']).authenticate()
+
+    if args.target == 'extra':
+        return push_extra(client, args, target)
 
     if args.check:
         status = client.session_status()

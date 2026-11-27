@@ -495,12 +495,16 @@ class VerifyByCardTest(unittest.TestCase):
         drivers = self._drivers(count=400)
 
         class RefusesOnce(FakeClient):
+            asked = 0
+
             def driver_card(self, park_id, driver_id):
-                card = super().driver_card(park_id, driver_id)
+                with self._lock:               # номер вызова — сразу, а не после сна
+                    self.asked += 1
+                    number = self.asked
                 time.sleep(0.002)      # как запрос: потоки не обгоняют главный на сотни карточек
-                if len(self.card_calls) == 5:
+                if number == 5:
                     raise FleetThrottled('кабинет отказывает 15 мин подряд')
-                return card
+                return super().driver_card(park_id, driver_id)
 
         client = RefusesOnce(drivers)
         with self.assertRaises(FleetThrottled):
@@ -1194,6 +1198,69 @@ class NeedsClassificationTest(unittest.TestCase):
         self.assertFalse(engine._needs_classification(no_park))
 
 
+class CardPoolAccountsTest(unittest.TestCase):
+    """Пул учёток для карточек (27.11.2026: сколько угодно дополнительных)."""
+
+    class _Card:
+        """Учётка: отвечает на карточку, помнит, о чём спрашивали; парки из denied
+        отвечают 403 (учётку не добавили в эту диспетчерскую)."""
+
+        def __init__(self, denied=(), error=None):
+            self.denied = set(denied)
+            self.error = error
+            self.calls = []
+            self.concurrency = 2
+
+        def driver_card(self, park_id, driver_id):
+            self.calls.append((park_id, driver_id))
+            if self.error is not None:
+                raise self.error
+            if park_id in self.denied:
+                raise FleetAccessDenied('403')
+            return {'edm_provider': 'Sapar'}
+
+    def test_cards_spread_over_every_account(self):
+        clients = [self._Card() for _ in range(4)]
+        pool = engine.CardPool(clients)
+        for i in range(40):
+            pool.driver_card(PARK_A, _driver_id(i))
+        self.assertEqual([len(client.calls) for client in clients], [10, 10, 10, 10])
+
+    def test_helper_without_rights_in_a_park_is_asked_there_once(self):
+        main, helper = self._Card(), self._Card(denied={PARK_B})
+        pool = engine.CardPool([main, helper])
+        for i in range(10):
+            self.assertEqual(pool.driver_card(PARK_B, _driver_id(i))['edm_provider'], 'Sapar')
+        self.assertEqual(len([call for call in helper.calls if call[0] == PARK_B]), 1)
+        self.assertEqual(len(main.calls), 10)
+        # В другой диспетчерской помощница работает как прежде.
+        for i in range(10):
+            pool.driver_card(PARK_A, _driver_id(100 + i))
+        self.assertGreater(len([call for call in helper.calls if call[0] == PARK_A]), 0)
+
+    def test_expired_helper_is_retired_and_reported_once(self):
+        retired = []
+        main, helper = self._Card(), self._Card(error=FleetSessionExpired(EXPIRED_401))
+        pool = engine.CardPool([main, helper],
+                               on_retire=lambda client, error: retired.append((client, error)))
+        for i in range(6):
+            pool.driver_card(PARK_A, _driver_id(i))
+        self.assertEqual(len(helper.calls), 1)
+        self.assertEqual(len(retired), 1)
+        self.assertIs(retired[0][0], helper)
+        self.assertIsInstance(retired[0][1], FleetSessionExpired)
+
+    def test_candidate_names_of_accounts(self):
+        self.assertEqual(accounts.candidate_name({'kind': 'mailings', 'account': 'ooz@'}),
+                         accounts.MAILINGS)
+        self.assertEqual(accounts.candidate_name({}), accounts.MAILINGS)
+        name = accounts.candidate_name({'kind': 'extra', 'account': 'x@'})
+        self.assertTrue(accounts.is_extra(name))
+        self.assertEqual(accounts.extra_account(name), 'x@')
+        self.assertFalse(accounts.is_extra(accounts.OWN))
+        self.assertEqual(accounts.extra_account(accounts.MAILINGS), '')
+
+
 class RunParallelTest(unittest.TestCase):
     """engine._run_parallel — общий для раундов и карточек способ раскладки."""
 
@@ -1523,7 +1590,10 @@ class CardPoolTest(unittest.TestCase):
         for i in range(1, 5):
             self.assertIsNotNone(pool.driver_card(PARK_A, _driver_id(i)))
         self.assertEqual(len(main.card_calls), 4)
-        self.assertEqual(len(helper.card_calls), 2)        # не выбыла, просто не её парк
+        # Не выбыла, просто не её парк — и с 27.11.2026 в этом парке её больше не
+        # спрашивают: раньше каждая вторая карточка тратила её запрос на 403.
+        self.assertEqual(len(helper.card_calls), 1)
+        self.assertEqual(pool.concurrency, 4 + helper.concurrency)   # не выбыла
 
     def test_main_expiry_is_final(self):
         drivers = self._drivers()
@@ -1959,10 +2029,15 @@ class RunJobAccountTest(unittest.TestCase):
                         for i in range(1, 5)}
         self.source = _xlsx([('Парк', PARK_A, cid, 'ФИО', '+77000000000')
                              for cid in self.drivers])
-        self.calls = {'finish': [], 'release': [], 'session_error': [], 'session_ok': 0}
+        self.calls = {'finish': [], 'release': [], 'session_error': [], 'session_ok': 0,
+                      'extra_marks': [], 'extra_saved': [], 'extra_deleted': []}
         self.own_row = {**_cookie_row('own', 'edm@'), 'parks_count': 86,
                         'last_error': None}
         self.mailings_row = _cookie_row('mailings', 'ooz@')
+        # Помощницы по порядку (queries.load_helper_sessions) и строки
+        # дополнительных учёток для экрана (queries.extra_status).
+        self.helper_rows = [dict(self.mailings_row, kind='mailings')]
+        self.extra_rows = []
         self.clients = {}
 
         class FakeDb:
@@ -2010,7 +2085,16 @@ class RunJobAccountTest(unittest.TestCase):
                 'file_name': 'id per.xlsx', 'content': self.source},
             'load_checkpoint': lambda cursor, job_id: {},
             'load_session': lambda cursor: dict(own_row),
-            'load_helper_sessions': lambda cursor: [dict(self.mailings_row)],
+            'load_helper_sessions': lambda cursor: [dict(row) for row in self.helper_rows],
+            'extra_status': lambda cursor, with_cookies=False: [
+                {key: value for key, value in row.items()
+                 if with_cookies or key not in ('cookies', 'user_agent')}
+                for row in self.extra_rows],
+            'mark_extra_session': lambda cursor, account, error=None, parks_count=None:
+                calls['extra_marks'].append((account, error)),
+            'save_extra_session': lambda cursor, **kwargs: calls['extra_saved'].append(kwargs),
+            'delete_extra_session': lambda cursor, account:
+                calls['extra_deleted'].append(account) or account == 'extra1@',
             'update_progress': lambda cursor, job_id, **kwargs: None,
             'save_checkpoint': lambda cursor, job_id, **kwargs: None,
             'load_card_providers': lambda cursor, ids: {},
@@ -2109,6 +2193,149 @@ class RunJobAccountTest(unittest.TestCase):
         self.assertEqual([call.get('error_code') for call in self.calls['finish']],
                          ['session_expired'])
         self.assertEqual(self.calls['release'], [])
+
+    # ── дополнительные учётки (27.11.2026) ───────────────────────────────────
+
+    def _extra(self, name, account):
+        row = dict(_cookie_row(name, account), kind='extra')
+        self.helper_rows.append(row)
+        self.extra_rows.append({**row, 'parks_count': 89, 'last_error': None})
+        return row
+
+    def test_extra_accounts_share_the_cards(self):
+        """Карточки делят все живые учётки: у каждой свой лимит ~22 в минуту."""
+        self.drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'}
+                        for i in range(1, 13)}
+        self.source = _xlsx([('Парк', PARK_A, cid, 'ФИО', '+77000000000')
+                             for cid in self.drivers])
+        self._extra('extra1', 'extra1@')
+        self._extra('extra2', 'extra2@')
+        self.clients = {name: FakeClient(self.drivers)
+                        for name in ('own', 'mailings', 'extra1', 'extra2')}
+        self._overview_and_run()
+        self.assertNotIn('error_code', self.calls['finish'][0])
+        asked = {name: len(client.card_calls) for name, client in self.clients.items()}
+        self.assertTrue(all(count > 0 for count in asked.values()), asked)
+        self.assertEqual(sum(asked.values()), 12)        # каждая «бумажная» — один раз
+
+    def test_extra_account_carries_the_run_when_others_are_dead(self):
+        self.helper_rows = [dict(self.mailings_row, kind='mailings')]
+        self._extra('extra1', 'extra1@')
+        self.clients = {'own': _Expired(self.drivers), 'mailings': _Expired(self.drivers),
+                        'extra1': FakeClient(self.drivers)}
+        self._overview_and_run()
+        self.assertEqual(len(self.calls['finish']), 1)
+        self.assertNotIn('error_code', self.calls['finish'][0])
+        self.assertEqual(self.calls['finish'][0]['rows_resolved'], 4)
+
+    def test_dead_extra_account_is_marked_in_its_row(self):
+        """Мёртвая на выборе учётки дополнительная — в её строку: до нового входа
+        выгрузки ею не ходят, а админ видит, какую перезайти."""
+        self._extra('extra1', 'extra1@')
+        self.clients = {'own': _Expired(self.drivers), 'mailings': _Expired(self.drivers),
+                        'extra1': _Expired(self.drivers)}
+        self._overview_and_run()
+        self.assertEqual([account for account, _error in self.calls['extra_marks']],
+                         ['extra1@'])
+        self.assertEqual([call.get('error_code') for call in self.calls['finish']],
+                         ['session_expired'])
+
+    def test_helper_dying_mid_run_is_marked_and_the_run_goes_on(self):
+        self.drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'}
+                        for i in range(1, 13)}
+        self.source = _xlsx([('Парк', PARK_A, cid, 'ФИО', '+77000000000')
+                             for cid in self.drivers])
+        self._extra('extra1', 'extra1@')
+
+        class CardsExpire(FakeClient):
+            def driver_card(self, park_id, driver_id):
+                raise FleetSessionExpired(EXPIRED_401)
+
+        self.clients = {'own': FakeClient(self.drivers), 'mailings': FakeClient(self.drivers),
+                        'extra1': CardsExpire(self.drivers)}
+        self._overview_and_run()
+        self.assertNotIn('error_code', self.calls['finish'][0])
+        self.assertEqual([account for account, _error in self.calls['extra_marks']],
+                         ['extra1@'])
+
+    def _post_account(self, account, cookie='new'):
+        class Checkable(FakeClient):
+            def check(self):
+                return {'account': account, 'parks_count': 89}
+
+        self.clients = {cookie: Checkable(self.drivers)}
+        return self.http.post('/api/fleet_edm/accounts', json={
+            'cookies': [{'name': 'Session_id', 'value': cookie}], 'user_agent': 'ua'})
+
+    def test_account_is_added_by_its_login(self):
+        response = self._post_account('extra9@')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()['account'], 'extra9@')
+        self.assertEqual([call['account'] for call in self.calls['extra_saved']], ['extra9@'])
+
+    def test_same_account_twice_is_refused(self):
+        """Одна учётка дважды — два темпа на один лимит, то есть отказы кабинета
+        вместо ускорения."""
+        for account in ('EDM@', 'ooz@'):            # своя (регистр не важен) и «Рассылок»
+            response = self._post_account(account)
+            self.assertEqual(response.status_code, 409, account)
+            self.assertEqual(response.get_json()['code'], 'ACCOUNT_TAKEN')
+        self.assertEqual(self.calls['extra_saved'], [])
+
+    def test_account_removal(self):
+        self.assertEqual(self.http.delete('/api/fleet_edm/accounts/extra1@').status_code, 200)
+        self.assertEqual(self.http.delete('/api/fleet_edm/accounts/nobody@').status_code, 404)
+        self.assertEqual(self.calls['extra_deleted'], ['extra1@', 'nobody@'])
+
+    def test_link_check_checks_every_extra_account(self):
+        class Checkable(FakeClient):
+            def __init__(self, drivers, account, error=None):
+                super().__init__(drivers)
+                self.account, self.error = account, error
+
+            def check(self):
+                if self.error:
+                    raise self.error
+                return {'account': self.account, 'parks_count': 89}
+
+        self._extra('extra1', 'extra1@')
+        self._extra('extra2', 'extra2@')
+        self.clients = {'own': Checkable(self.drivers, 'edm@'),
+                        'extra1': Checkable(self.drivers, 'extra1@'),
+                        'extra2': Checkable(self.drivers, 'extra2@',
+                                            FleetSessionExpired(EXPIRED_401))}
+        data = self.http.post('/api/fleet_edm/session/check').get_json()
+        self.assertTrue(data['alive'])
+        self.assertEqual(self.calls['extra_marks'],
+                         [('extra1@', None), ('extra2@', EXPIRED_401)])
+
+    def test_section_head_gets_the_count_but_not_the_logins(self):
+        """Глава СЗоВ открывает раздел, но учётки кабинета — не его: логины и
+        управление — только глобальным админам (access.can_manage_session)."""
+        from unittest import mock
+
+        from fleet_edm import queries as queries_module
+        self._extra('extra1', 'extra1@')
+        head = {'id': 3, 'name': 'Глава', 'role': 'admin', 'is_department_head': True,
+                'headed_department_code': 'szov'}
+        with mock.patch.object(queries_module, 'access_context', lambda cursor, user_id: head):
+            data = self.http.get('/api/fleet_edm/overview').get_json()
+            self.assertEqual(data['extra_accounts'], {'total': 1, 'alive': 1})
+            self.assertIsNone(data['accounts'])
+            self.assertEqual(self._post_account('extra9@').status_code, 403)
+            self.assertEqual(self.http.delete('/api/fleet_edm/accounts/extra1@').status_code, 403)
+            self.assertEqual(self.http.get('/api/fleet_edm/accounts').status_code, 403)
+        self.assertEqual(self.calls['extra_saved'], [])
+        self.assertEqual(self.calls['extra_deleted'], [])
+
+    def test_overview_counts_extra_accounts_for_everyone(self):
+        self._extra('extra1', 'extra1@')
+        self.extra_rows.append({'account': 'dead@', 'parks_count': 89,
+                                'last_error': EXPIRED_401})
+        data = self.http.get('/api/fleet_edm/overview').get_json()
+        self.assertEqual(data['extra_accounts'], {'total': 2, 'alive': 1})
+        self.assertEqual([row['account'] for row in data['accounts']], ['extra1@', 'dead@'])
+        self.assertNotIn('cookies', data['accounts'][0])
 
     def test_overview_tells_the_screen_about_the_spare_account(self):
         self.clients = {'own': FakeClient(self.drivers), 'mailings': FakeClient(self.drivers)}

@@ -85,17 +85,17 @@ const formatSize = (bytes) => {
 
 /* «Сколько ждать» — измеренный темп, а не обещание.
  *
- * Замер 24.08.2026 на настоящем файле: кабинет придерживает нас на длинных
- * прогонах, и устойчивый темп выходит около 136 запросов в минуту — то есть
- * каждый запрос это почти полсекунды ожидания. Поэтому время определяется числом
- * ЗАПРОСОВ (диспетчерские × провайдеры), а не числом строк: 1 500 строк из 82
- * диспетчерских стоили 581 запрос и около пяти минут. */
-const etaHint = (rowsTotal) => {
-    if (!rowsTotal) return '';
-    if (rowsTotal <= 500) return 'обычно 1–3 минуты';
-    if (rowsTotal <= 3000) return 'обычно 4–7 минут';
-    if (rowsTotal <= 15000) return 'обычно 10–15 минут';
-    return 'на таком объёме — от четверти часа';
+ * До 28.10.2026 время определялось списком кабинета (~136 запросов в минуту, файл
+ * в 15 тысяч строк — минут десять), и подсказка обещала «от четверти часа» на
+ * любом большом файле. С тех пор «Бумажных» подтверждаем карточкой — ~22 в минуту
+ * на учётку, — и время решает их число: 2 429 строк шли 32 минуты, 244 616 — сутки
+ * (27.11.2026). Поэтому в фазе карточек сервер пишет в строку хода живой темп и
+ * остаток («~22/мин, осталось ~3 ч»), а подсказка лишь называет, от чего зависит
+ * время, и при живом темпе молчит. */
+const etaHint = (rowsTotal, note = '') => {
+    if (!rowsTotal || /осталось ~/.test(String(note || ''))) return '';
+    if (rowsTotal <= 300) return 'обычно несколько минут';
+    return 'время зависит от числа «Бумажных» — их сверяем карточкой, ~22 в минуту на учётку';
 };
 
 export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showToast }) {
@@ -131,8 +131,15 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
     const history = useMemo(() => jobs.filter((job) => job.status !== 'running'), [jobs]);
     const ownLinked = Boolean(session.configured) && !session.last_error;
     const viaFallback = !ownLinked && Boolean(fallback.configured) && !fallback.last_error;
-    const linked = ownLinked || viaFallback;
-    const activeAccount = viaFallback ? fallback : session;
+    // Дополнительные учётки (27.11.2026) — ради скорости карточек: всем приходит
+    // только число живых (по ним тоже идут выгрузки), список с логинами — админу.
+    const extraAccounts = overview?.extra_accounts || { total: 0, alive: 0 };
+    const accountsList = overview?.accounts || [];
+    const viaExtra = !ownLinked && !viaFallback && Number(extraAccounts.alive) > 0;
+    const linked = ownLinked || viaFallback || viaExtra;
+    const activeAccount = viaFallback ? fallback
+        : viaExtra ? (accountsList.find((row) => !row.last_error) || {}) : session;
+    const [removeAsked, setRemoveAsked] = useState(null);
 
     const load = useCallback(() => {
         setLoadError(null);
@@ -264,16 +271,35 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
             const data = response.data || {};
             let message = 'Связь с диспетчерской не отвечает';
             if (data.alive && data.via_fallback) {
-                message = `Свой вход не действует — выгрузки идут учёткой «Рассылок»: `
+                message = `Свой вход не действует — выгрузки идут запасной учёткой: `
                     + `${data.parks_count} диспетчерских`;
             } else if (data.alive) {
                 message = `Связь есть: ${data.parks_count} диспетчерских`;
+            }
+            const extras = Array.isArray(data.accounts) ? data.accounts : [];
+            if (extras.length) {
+                const alive = extras.filter((row) => !row.last_error).length;
+                message += ` · дополнительных учёток живы ${alive} из ${extras.length}`;
             }
             showToast?.(message, data.alive ? 'success' : 'error');
             await load();
         } catch (error) {
             showToast?.('Не удалось проверить связь', 'error');
         } finally {
+            setBusy('');
+        }
+    };
+
+    const removeAccount = async (account) => {
+        setBusy(`account:${account}`);
+        try {
+            await axios.delete(`${base}/accounts/${encodeURIComponent(account)}`, { headers: headers() });
+            showToast?.(`Учётка ${account} убрана из раздела`, 'success');
+            await load();
+        } catch (error) {
+            showToast?.(error?.response?.data?.error || 'Не удалось убрать учётку', 'error');
+        } finally {
+            setRemoveAsked(null);
             setBusy('');
         }
     };
@@ -311,7 +337,8 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
                             </div>
                             <div className="text-[12.5px] text-slate-500 tabular-nums">
                                 {running.progress_note || 'Идёт обход диспетчерских'}
-                                {running.rows_total ? ` · ${etaHint(running.rows_total)}` : ''}
+                                {etaHint(running.rows_total, running.progress_note)
+                                    ? ` · ${etaHint(running.rows_total, running.progress_note)}` : ''}
                             </div>
                         </div>
                         <div className="text-[15px] font-semibold text-slate-700 tabular-nums">
@@ -483,13 +510,72 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
                             <p className="text-[12.5px] leading-relaxed text-slate-600">
                                 {linked
                                     ? <>Раздел заходит в диспетчерскую от имени рабочей учётной записи —
-                                       сейчас это <span className="text-slate-800">{activeAccount.account || 'настроенный аккаунт'}</span>
-                                       {viaFallback && ' (запасная, раздела «Рассылки»)'},
-                                       доступно {num(activeAccount.parks_count)} диспетчерских.
-                                       Обновлено {formatDateTime(activeAccount.updated_at)}.</>
+                                       сейчас это <span className="text-slate-800">{activeAccount.account || (viaExtra ? 'дополнительная учётка' : 'настроенный аккаунт')}</span>
+                                       {viaFallback && ' (запасная, раздела «Рассылки»)'}
+                                       {viaExtra && ' (дополнительная)'}
+                                       {activeAccount.parks_count ? <>, доступно {num(activeAccount.parks_count)} диспетчерских</> : null}.
+                                       {activeAccount.updated_at ? <> Обновлено {formatDateTime(activeAccount.updated_at)}.</> : null}</>
                                     : <>Вход в диспетчерскую перестал действовать, и выгрузки временно не работают.
                                        Восстановление занимает пару минут.</>}
                             </p>
+
+                            {/* Дополнительные учётки — только админу: логины и чья учётка
+                                умерла нужны тому, кто перезаходит, остальным это шум. */}
+                            {canManage && (
+                                <div className="space-y-2">
+                                    <div className="flex items-baseline justify-between gap-3">
+                                        <span className={iosGroupLabel}>Дополнительные учётки</span>
+                                        <span className="text-[11.5px] text-slate-400">
+                                            каждая — ещё ~22 водителя в минуту на сверке карточками
+                                        </span>
+                                    </div>
+                                    {accountsList.length ? (
+                                        <div className="divide-y divide-slate-100 overflow-hidden rounded-xl ring-1 ring-slate-100">
+                                            {accountsList.map((row) => {
+                                                const dead = Boolean(row.last_error);
+                                                const working = busy === `account:${row.account}`;
+                                                return (
+                                                    <div key={row.account} className="flex items-center gap-3 px-3.5 py-2.5">
+                                                        <span className={`h-2 w-2 shrink-0 rounded-full ${dead ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="truncate text-[13px] font-medium text-slate-800">{row.account}</div>
+                                                            <div className={`truncate text-[11.5px] ${dead ? 'text-amber-700' : 'text-slate-400'}`}
+                                                                 title={dead ? row.last_error : undefined}>
+                                                                {dead
+                                                                    ? 'вход не действует — нужен новый вход этой учёткой'
+                                                                    : `${num(row.parks_count)} диспетчерских · проверена ${formatDateTime(row.last_ok_at || row.updated_at)}`}
+                                                            </div>
+                                                        </div>
+                                                        {/* Убрать — в два нажатия, как «Остановить». */}
+                                                        {removeAsked === row.account ? (
+                                                            <div className="flex shrink-0 items-center gap-1.5">
+                                                                <button type="button" className={btnDanger} disabled={working}
+                                                                        onClick={() => removeAccount(row.account)}>
+                                                                    {working ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                                                                    Точно убрать
+                                                                </button>
+                                                                <button type="button" className={iosBtnGhost}
+                                                                        onClick={() => setRemoveAsked(null)}>
+                                                                    Нет
+                                                                </button>
+                                                            </div>
+                                                        ) : (
+                                                            <button type="button" className={`${iosBtnGhost} shrink-0`}
+                                                                    onClick={() => setRemoveAsked(row.account)}>
+                                                                <Trash2 size={14} /> Убрать
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    ) : (
+                                        <p className="text-[12px] text-slate-400">
+                                            Пока нет — карточки идут одной-двумя учётками.
+                                        </p>
+                                    )}
+                                </div>
+                            )}
 
                             {/* Кто это делает — главный вопрос, поэтому он написан всем,
                                 а не спрятан под правами. */}
@@ -523,7 +609,8 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
                                     <span className="text-[11.5px] text-slate-400">
                                         Для разработчика: восстановить — <code className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">
                                         python scripts/fleet_edm_push_session.py</code> из папки проекта,
-                                        затем вход в кабинет в открывшемся окне.
+                                        затем вход в кабинет в открывшемся окне. Ещё учётка — <code className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">
+                                        --target extra --slot {accountsList.length + 1}</code>.
                                     </span>
                                 </div>
                             )}

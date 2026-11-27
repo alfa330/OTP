@@ -326,18 +326,18 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                        .format(ready, meta['rows_total']) if ready
                        else 'Файл разобран: {} строк'.format(meta['rows_total'])))
 
-            # Учётки кабинета по старшинству: своя, затем учётка «Рассылок». Основной
-            # становится первая живая (accounts.choose), остальные помогают с
-            # карточками — у каждой учётки свой лимит (см. queries.load_helper_sessions).
+            # Учётки кабинета по старшинству: своя, «Рассылок», дополнительные.
+            # Основной становится первая живая (accounts.choose), остальные помогают
+            # с карточками — у каждой учётки свой лимит (см. queries.load_helper_sessions).
             helper_sessions = []
             try:
                 with db._get_cursor() as cursor:
                     helper_sessions = queries.load_helper_sessions(cursor)
             except Exception:
-                logging.exception('Провайдер ЭДО: учётку «Рассылок» не прочитали — '
+                logging.exception('Провайдер ЭДО: учётки-помощницы не прочитали — '
                                   'идём одной своей')
             candidates = [(accounts.OWN, session)] + [
-                (accounts.MAILINGS, extra) for extra in helper_sessions]
+                (accounts.candidate_name(extra), extra) for extra in helper_sessions]
             if not any(row and row.get('cookies') for _name, row in candidates):
                 raise FleetSessionExpired(
                     'Сессия кабинета Fleet не настроена. Нужен вход в кабинет и '
@@ -354,17 +354,32 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 # Своя протухла — экран должен это знать, даже если выгрузка
                 # спокойно пойдёт запасной: восстанавливать вход всё равно нужно.
                 _mark_own_session_error(selection.failures)
+            # Мёртвые дополнительные — тоже в базу: до нового входа они не
+            # помощницы, а админ видит в списке учёток, какую перезайти.
+            for name, error in selection.failures:
+                if accounts.is_extra(name):
+                    _mark_extra_dead(name, error)
             if selection.main is None:
                 raise selection.failures[0][1]
             client = selection.main
             helpers = selection.helpers
             clients = [client] + helpers
             if selection.name != accounts.OWN:
-                logging.warning('Провайдер ЭДО: задание %s идёт учёткой «Рассылок» (%s) — '
-                                'своя не действует', job_id, selection.account or '?')
+                logging.warning('Провайдер ЭДО: задание %s идёт учёткой %s (%s) — '
+                                'своя не действует', job_id, accounts.title(selection.name),
+                                selection.account or '?')
             if helpers:
                 logging.info('Провайдер ЭДО: задание %s — карточки спрашиваем %s учётками (%s)',
                              job_id, len(clients), ', '.join(selection.helper_names))
+            helper_keys = {id(helper): key
+                           for helper, key in zip(helpers, selection.helper_keys)}
+
+            def helper_retired(helper, error):
+                # Помощница выбыла посреди обхода: протухший вход дополнительной
+                # учётки — в базу; лимит и сбои — не повод выкидывать её до входа.
+                key = helper_keys.get(id(helper))
+                if accounts.is_extra(key) and isinstance(error, FleetSessionExpired):
+                    _mark_extra_dead(key, error)
             resolution = engine.resolve(
                 rows, client, progress=emit,
                 checkpoint=make_checkpoint(
@@ -379,6 +394,7 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 card_cache=CardCache(),
                 helpers=helpers,
                 parks=selection.parks,
+                on_helper_retire=helper_retired,
             )
             requests_count = requests_before + (
                 resolution.get('requests') or sum(each.requests_count for each in clients))
@@ -463,6 +479,10 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                     # Протухшую на выборе уже отметили выше, а чужую строку
                     # («Рассылок») раздел не трогает — её ведут «Рассылки».
                     _mark_own_session_error([(accounts.OWN, error)])
+                elif in_flight and accounts.is_extra(selection.name):
+                    # Основной шла дополнительная учётка, и её вход умер — до
+                    # нового входа она в выгрузки не пойдёт.
+                    _mark_extra_dead(selection.name, error)
                 if in_flight and selection.spare:
                     # Основная умерла посреди обхода, а запасная есть: контрольная
                     # точка на месте — подхват начнёт с выбора учётки и продолжит ею.
@@ -492,6 +512,19 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
             life.close()
             with _local_lock:
                 _local_jobs.discard(job_id)
+
+    def _mark_extra_dead(name, error):
+        """Дополнительная учётка (имя кандидата «extra:<логин>») не годится:
+        вход протух или прав нет вовсе — в её строку, чтобы экран это сказал, а
+        выгрузки до нового входа ею не ходили (queries.load_helper_sessions)."""
+        account = accounts.extra_account(name)
+        if not account:
+            return
+        try:
+            with db._get_cursor() as cursor:
+                queries.mark_extra_session(cursor, account, str(error) or 'вход не действует')
+        except Exception:
+            logging.exception("Провайдер ЭДО: не удалось отметить учётку %s", account)
 
     def _session_alive(client):
         """Жив ли вход учётки: True — список диспетчерских отвечает, False —
@@ -642,6 +675,7 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
         # Брошенные выгрузки подхватываем здесь же, а не только по таймеру:
         # человек, который смотрит на экран, увидит «продолжаем» сразу.
         sweep_jobs()
+        can_manage = access.can_manage_session(requester)
         with db._get_cursor() as cursor:
             session = queries.session_status(cursor)
             # Запасная учётка экрану нужна, только когда своя не действует: тогда
@@ -649,13 +683,19 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
             fallback = None if _own_alive(session) else queries.fallback_status(cursor)
             jobs = queries.list_jobs(cursor, limit=request.args.get('limit', 50))
             running = queries.has_running_job(cursor)
+            extras = queries.extra_status(cursor)
         return jsonify({
             'status': 'success',
             'session': session,
             'fallback': fallback,
+            # Дополнительные учётки (27.11.2026): всем — сколько живых (по ним
+            # тоже идут выгрузки), админу — список, чтобы видеть, какую перезайти.
+            'extra_accounts': {'total': len(extras),
+                               'alive': sum(1 for row in extras if not row.get('last_error'))},
+            'accounts': extras if can_manage else None,
             'jobs': jobs,
             'running_job_id': running,
-            'can_manage_session': access.can_manage_session(requester),
+            'can_manage_session': can_manage,
         }), 200
 
     @section_route('/jobs', methods=('GET', 'POST'))
@@ -695,8 +735,11 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
         sweep_jobs()
         with db._get_cursor() as cursor:
             session = queries.session_status(cursor)
+            extras_alive = [row for row in queries.extra_status(cursor)
+                            if not row.get('last_error')]
             if (not session.get('configured')
-                    and not queries.fallback_status(cursor).get('configured')):
+                    and not queries.fallback_status(cursor).get('configured')
+                    and not extras_alive):
                 return jsonify({
                     "error": "Сессия кабинета Fleet не настроена — выгрузка не сможет "
                              "туда зайти.",
@@ -865,9 +908,13 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
 
         Своя не действует — проверяем и запасную (учётку «Рассылок»): выгрузки
         пойдут ею (см. accounts.choose), и ответ «связи нет» при рабочих
-        выгрузках был бы неправдой. Строку «Рассылок» при этом не пишем."""
+        выгрузках был бы неправдой. Строку «Рассылок» при этом не пишем.
+
+        Дополнительные учётки (27.11.2026) проверяем всегда, каждую: итог — в их
+        строки (жива / вход не действует), чтобы админ видел, какую перезайти."""
         with db._get_cursor() as cursor:
             session = queries.load_session(cursor)
+        extras = _check_extras()
         error_text = 'Сессия не настроена'
         if session and session.get('cookies'):
             try:
@@ -880,7 +927,8 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                     queries.mark_session_error(cursor, error_text)
         if error_text is not None:
             with db._get_cursor() as cursor:
-                spare_rows = queries.load_helper_sessions(cursor)
+                spare_rows = [row for row in queries.load_helper_sessions(cursor)
+                              if row.get('kind') != accounts.EXTRA]
             spare = None
             for row in spare_rows:
                 try:
@@ -889,22 +937,124 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 except FleetError as error:
                     logging.warning('Провайдер ЭДО: запасная учётка тоже не отвечает (%s)',
                                     str(error)[:160])
+            if spare is None:
+                # «Рассылок» нет или она мертва — выгрузки пойдут первой живой
+                # дополнительной (её только что проверили выше).
+                spare = next((checked_extra for alive, checked_extra in extras.values()
+                              if alive), None)
             with db._get_cursor() as cursor:
                 status = queries.session_status(cursor)
                 fallback = queries.fallback_status(cursor)
+                accounts_now = queries.extra_status(cursor)
             return jsonify({'status': 'success', 'alive': bool(spare),
                             'via_fallback': bool(spare),
                             'account': (spare or {}).get('account'),
                             'parks_count': (spare or {}).get('parks_count'),
                             'error': error_text, 'session': status,
-                            'fallback': fallback}), 200
+                            'fallback': fallback, 'accounts': accounts_now}), 200
         with db._get_cursor() as cursor:
             queries.mark_session_ok(cursor)
             status = queries.session_status(cursor)
+            accounts_now = queries.extra_status(cursor)
         return jsonify({'status': 'success', 'alive': True,
                         'account': checked.get('account'),
                         'parks_count': checked.get('parks_count'),
-                        'session': status}), 200
+                        'session': status, 'accounts': accounts_now}), 200
+
+    def _check_extras():
+        """Каждую дополнительную учётку — живым запросом (список диспетчерских и
+        профиль, как при входе). {логин: (жива ли, ответ check или текст)}:
+        True — жива, False — вход не действует или прав нет (пишем в строку),
+        None — кабинет не ответил (не пишем: моргнувшая сеть не повод выкидывать
+        учётку из помощниц до нового входа)."""
+        with db._get_cursor() as cursor:
+            rows = queries.extra_status(cursor, with_cookies=True)
+        results = {}
+        for row in rows:
+            account = row.get('account')
+            if not account or not row.get('cookies'):
+                continue
+            try:
+                checked = FleetClient(row['cookies'], row.get('user_agent')).check()
+            except (FleetSessionExpired, FleetAccessDenied) as error:
+                results[account] = (False, str(error))
+                _mark_extra_dead(accounts.EXTRA + ':' + account, error)
+                continue
+            except FleetError as error:
+                results[account] = (None, str(error))
+                logging.warning('Провайдер ЭДО: дополнительная учётка %s не ответила (%s)',
+                                account, str(error)[:160])
+                continue
+            results[account] = (True, checked)
+            try:
+                with db._get_cursor() as cursor:
+                    queries.mark_extra_session(cursor, account,
+                                               parks_count=checked.get('parks_count'))
+            except Exception:
+                logging.exception('Провайдер ЭДО: не удалось отметить учётку %s', account)
+        return results
+
+    # ── дополнительные учётки (27.11.2026) ───────────────────────────────────
+
+    @section_route('/accounts', methods=('GET', 'POST'), manage_session=True)
+    def fleet_edm_accounts(requester_id, requester):
+        """Дополнительные учётки кабинета — ради скорости карточек: у каждой свой
+        лимит, ~22 карточки в минуту (engine.CardPool). Кладёт их скрипт
+        scripts/fleet_edm_push_session.py --target extra (вход человеком в окне).
+
+        Принимаем только живую учётку (тот же check, что у своей сессии) и не ту,
+        что уже подключена своей или «Рассылок»: одна учётка дважды — это два
+        темпа на один лимит, то есть отказы вместо ускорения."""
+        if request.method == 'GET':
+            with db._get_cursor() as cursor:
+                return jsonify({'status': 'success',
+                                'accounts': queries.extra_status(cursor)}), 200
+
+        payload = request.get_json(silent=True) or {}
+        cookies = payload.get('cookies')
+        if not cookies:
+            return jsonify({"error": "Не переданы куки сессии"}), 400
+        user_agent = str(payload.get('user_agent') or '').strip()
+        try:
+            checked = FleetClient(cookies, user_agent).check()
+        except FleetSessionExpired as error:
+            return jsonify({"error": str(error), "code": "SESSION_INVALID"}), 400
+        except FleetError as error:
+            return jsonify({"error": "Кабинет не ответил: {}".format(error)}), 502
+        account = str(checked.get('account') or '').strip()
+        if not account:
+            return jsonify({"error": "Кабинет не назвал логин учётки — её не с чем "
+                                     "сверить, войдите заново.",
+                            "code": "ACCOUNT_UNKNOWN"}), 400
+        with db._get_cursor() as cursor:
+            taken = {str(row.get('account') or '').strip().lower(): name
+                     for name, row in (('своя', queries.session_status(cursor)),
+                                       ('«Рассылок»', queries.fallback_status(cursor)))
+                     if row and row.get('account')}
+            if account.lower() in taken:
+                return jsonify({
+                    "error": "Учётка {} уже подключена как {} — вторая копия не ускорит, "
+                             "а удвоит отказы кабинета.".format(account, taken[account.lower()]),
+                    "code": "ACCOUNT_TAKEN"}), 409
+            queries.save_extra_session(
+                cursor, account=account, cookies=cookies, user_agent=user_agent,
+                parks_count=checked.get('parks_count'), updated_by=requester_id)
+            listed = queries.extra_status(cursor)
+        logging.info("Провайдер ЭДО: дополнительная учётка %s подключена (%s парков)",
+                     account, checked.get('parks_count'))
+        return jsonify({'status': 'success', 'account': account,
+                        'parks_count': checked.get('parks_count'), 'accounts': listed}), 200
+
+    @section_route('/accounts/<path:account>', methods=('DELETE',), manage_session=True)
+    def fleet_edm_account_delete(requester_id, requester, account):
+        with db._get_cursor() as cursor:
+            removed = queries.delete_extra_session(cursor, account)
+            listed = queries.extra_status(cursor)
+        if not removed:
+            return jsonify({"error": "Такой учётки нет"}), 404
+        logging.info("Провайдер ЭДО: дополнительную учётку %s убрал пользователь %s",
+                     account, requester_id)
+        return jsonify({'status': 'success', 'accounts': listed}), 200
 
     return bp
 

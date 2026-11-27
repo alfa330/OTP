@@ -674,26 +674,117 @@ def load_helper_sessions(cursor):
 
     Лимит на карточки у кабинета — на учётку (измерено 28.10.2026: ~22 ответа в
     минуту, чужой парк и чужой адрес не помогают, а вторая учётка отвечает 200,
-    пока первая получает 429). Значит вторая учётка — это вторые 22 карточки в
-    минуту. Сейчас такая одна: учётка раздела «Рассылки» (driver_mailing_session,
-    те же 89 диспетчерских). Берём её строку как есть; если таблицы нет или она
-    пуста — обходимся одной учёткой, это не ошибка.
+    пока первая получает 429). Значит каждая учётка — ещё 22 карточки в минуту.
+    Порядок: учётка раздела «Рассылки» (driver_mailing_session, kind 'mailings'),
+    затем дополнительные (fleet_edm_extra_sessions, kind 'extra', 27.11.2026) —
+    кроме тех, чей вход уже признан мёртвым (last_error): их вернёт новый вход.
+    Нет таблицы или строки — обходимся теми, что есть, это не ошибка.
     """
-    cursor.execute("SELECT to_regclass('driver_mailing_session')")
+    helpers = []
+    cursor.execute("SELECT to_regclass('driver_mailing_session'), "
+                   "to_regclass('fleet_edm_extra_sessions')")
+    mailings_table, extra_table = cursor.fetchone() or (None, None)
+    if mailings_table:
+        cursor.execute(
+            "SELECT cookies, user_agent, account FROM driver_mailing_session WHERE id = 1"
+        )
+        row = _row_to_dict(cursor, cursor.fetchone())
+        if row and _parse_cookies(row):
+            row['kind'] = 'mailings'
+            helpers.append(row)
+    if extra_table:
+        for row in extra_sessions(cursor, with_cookies=True):
+            if row.get('cookies') and not row.get('last_error'):
+                row['kind'] = 'extra'
+                helpers.append(row)
+    return helpers
+
+
+def _parse_cookies(row):
+    """Куки строки сессии из текста JSON — на месте; битые — пустой список."""
+    try:
+        row['cookies'] = json.loads(row.get('cookies') or '[]')
+    except (TypeError, ValueError):
+        row['cookies'] = []
+    return row['cookies']
+
+
+# ── Дополнительные учётки (27.11.2026) ───────────────────────────────────────
+
+def save_extra_session(cursor, *, account, cookies, user_agent=None, parks_count=None,
+                       updated_by=None):
+    """Учётка, проверенная живым запросом (routes), — по логину: повторный вход
+    той же учёткой заменяет куки и снимает отметку об ошибке."""
+    cursor.execute(
+        """
+        INSERT INTO fleet_edm_extra_sessions (account, cookies, user_agent, parks_count,
+                                              updated_at, updated_by, last_ok_at, last_error)
+        VALUES (%s, %s, %s, %s, NOW(), %s, NOW(), NULL)
+        ON CONFLICT (account) DO UPDATE
+            SET cookies = EXCLUDED.cookies,
+                user_agent = EXCLUDED.user_agent,
+                parks_count = EXCLUDED.parks_count,
+                updated_at = NOW(),
+                updated_by = EXCLUDED.updated_by,
+                last_ok_at = NOW(),
+                last_error = NULL
+        """,
+        (str(account), json.dumps(cookies, ensure_ascii=False), (user_agent or None),
+         (int(parks_count) if parks_count else None),
+         (int(updated_by) if updated_by else None)),
+    )
+
+
+def extra_sessions(cursor, with_cookies=False):
+    """Дополнительные учётки по логину. Без with_cookies — для экрана (кук нет)."""
+    cursor.execute(
+        """
+        SELECT account, cookies, user_agent, parks_count, updated_at, last_ok_at, last_error
+          FROM fleet_edm_extra_sessions ORDER BY account
+        """
+    )
+    columns = _columns(cursor)
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    for row in rows:
+        if with_cookies:
+            _parse_cookies(row)
+        else:
+            row.pop('cookies', None)
+            row.pop('user_agent', None)
+    return rows
+
+
+def extra_status(cursor, with_cookies=False):
+    """Дополнительные учётки для экрана — без кук (with_cookies — для проверки
+    связи); таблицы ещё нет (схема не догнала посреди выкладки) — пусто, а не
+    упавшая ручка раздела."""
+    cursor.execute("SELECT to_regclass('fleet_edm_extra_sessions')")
     row = cursor.fetchone()
     if not row or not row[0]:
         return []
-    cursor.execute(
-        "SELECT cookies, user_agent, account FROM driver_mailing_session WHERE id = 1"
-    )
-    row = _row_to_dict(cursor, cursor.fetchone())
-    if not row:
-        return []
-    try:
-        row['cookies'] = json.loads(row['cookies'] or '[]')
-    except (TypeError, ValueError):
-        return []
-    return [row] if row['cookies'] else []
+    return extra_sessions(cursor, with_cookies=with_cookies)
+
+
+def delete_extra_session(cursor, account):
+    cursor.execute("DELETE FROM fleet_edm_extra_sessions WHERE account = %s RETURNING account",
+                   (str(account),))
+    return bool(cursor.fetchone())
+
+
+def mark_extra_session(cursor, account, error=None, parks_count=None):
+    """Итог проверки учётки: error — вход не действует (401, нет диспетчерских),
+    None — жива (parks_count — сколько диспетчерских она видит сейчас). Сбои сети
+    сюда не пишут: из-за моргнувшего кабинета учётка выпала бы из помощниц до
+    нового входа."""
+    if error:
+        cursor.execute(
+            "UPDATE fleet_edm_extra_sessions SET last_error = %s WHERE account = %s",
+            (str(error)[:500], str(account)))
+    else:
+        cursor.execute(
+            "UPDATE fleet_edm_extra_sessions SET last_ok_at = NOW(), last_error = NULL, "
+            "parks_count = COALESCE(%s, parks_count) WHERE account = %s",
+            ((int(parks_count) if parks_count else None), str(account)))
 
 
 def fallback_status(cursor):

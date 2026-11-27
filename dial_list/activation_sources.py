@@ -147,7 +147,7 @@ class FleetSource:
                 helpers = queries.load_helper_sessions(cur)
             except Exception:
                 log.exception("dial_list: активация — учётку «Рассылок» кабинета Fleet не прочитали")
-        return [(accounts.OWN, own)] + [(accounts.MAILINGS, row) for row in helpers]
+        return [(accounts.OWN, own)] + [(accounts.candidate_name(row), row) for row in helpers]
 
     def configured(self):
         """Есть ли хоть одна сессия кабинета (живость проверит первый запрос)."""

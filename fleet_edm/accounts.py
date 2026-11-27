@@ -17,12 +17,42 @@
 Живость проверяется тем же запросом, с которого начинается любой обход, —
 списком диспетчерских, — и его ответ уходит в обход, чтобы не спрашивать
 дважды. Учётки после выбранной идут в помощницы для карточек, как раньше.
+
+С 27.11.2026 после «Рассылок» идут дополнительные учётки (EXTRA,
+fleet_edm_extra_sessions): их заводят ради скорости карточек — лимит у кабинета
+на учётку, ~22 карточки в минуту каждая.
 """
 
 from .client import FleetAccessDenied, FleetSessionExpired
 
 OWN = 'own'
 MAILINGS = 'mailings'
+EXTRA = 'extra'
+_EXTRA_PREFIX = EXTRA + ':'
+
+
+def candidate_name(row):
+    """Имя учётки-кандидата по строке load_helper_sessions: «Рассылки» — MAILINGS,
+    дополнительная — «extra:<логин>» (по имени её отмечают мёртвой в базе)."""
+    if (row or {}).get('kind') == EXTRA:
+        return _EXTRA_PREFIX + str(row.get('account') or '')
+    return MAILINGS
+
+
+def is_extra(name):
+    return str(name or '').startswith(_EXTRA_PREFIX)
+
+
+def extra_account(name):
+    """Логин дополнительной учётки по имени кандидата; не дополнительная — ''."""
+    return str(name)[len(_EXTRA_PREFIX):] if is_extra(name) else ''
+
+
+def title(name):
+    """Как назвать учётку в журнале: «Рассылок» / «дополнительной (логин)»."""
+    if is_extra(name):
+        return 'дополнительной ({})'.format(extra_account(name) or '?')
+    return '«Рассылок»' if name == MAILINGS else 'своей'
 
 
 class Selection:
@@ -39,6 +69,8 @@ class Selection:
         self.parks = []
         self.helpers = []
         self.helper_names = []
+        # Имена кандидатов помощниц (MAILINGS, «extra:<логин>») — в том же порядке.
+        self.helper_keys = []
         self.failures = []
 
     @property
@@ -82,5 +114,6 @@ def choose(candidates, make_client):
         selection.helpers = [make_client(extra) for _extra_name, extra in rest]
         selection.helper_names = [str(extra.get('account') or extra_name)
                                   for extra_name, extra in rest]
+        selection.helper_keys = [extra_name for extra_name, _extra in rest]
         break
     return selection

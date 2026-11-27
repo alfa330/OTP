@@ -107,6 +107,46 @@ def test_live_job_is_left_alone(cur):
     assert _row(cur, job)[0] == 'running'
 
 
+COOKIES = [{'name': 'Session_id', 'value': 'x'}]
+
+
+def test_extra_account_is_one_row_per_login_and_relogin_clears_the_error(cur):
+    queries.save_extra_session(cur, account='a@', cookies=COOKIES, user_agent='ua', parks_count=80, updated_by=2)
+    queries.mark_extra_session(cur, 'a@', error='Кабинет Fleet не принял сессию (401).')
+    queries.save_extra_session(cur, account='a@', cookies=[{'name': 'Session_id', 'value': 'y'}],
+                               parks_count=89)
+    rows = queries.extra_status(cur)
+    assert [(r['account'], r['parks_count'], r['last_error']) for r in rows] == [('a@', 89, None)]
+    assert 'cookies' not in rows[0] and 'user_agent' not in rows[0]
+    with_cookies = queries.extra_status(cur, with_cookies=True)
+    assert with_cookies[0]['cookies'] == [{'name': 'Session_id', 'value': 'y'}]
+
+
+def test_helpers_are_mailings_then_live_extra_accounts(cur):
+    cur.execute("""CREATE TABLE driver_mailing_session (id INTEGER PRIMARY KEY DEFAULT 1, cookies TEXT NOT NULL,
+                                                         user_agent TEXT, account TEXT)""")
+    cur.execute("INSERT INTO driver_mailing_session (cookies, account) VALUES (%s, 'ooz@')",
+                ('[{"name": "Session_id", "value": "m"}]',))
+    for account in ('b@', 'a@', 'dead@'):
+        queries.save_extra_session(cur, account=account, cookies=COOKIES, parks_count=89)
+    queries.mark_extra_session(cur, 'dead@', error='401')
+    helpers = queries.load_helper_sessions(cur)
+    assert [(h['kind'], h['account']) for h in helpers] == [('mailings', 'ooz@'), ('extra', 'a@'),
+                                                           ('extra', 'b@')]
+    assert helpers[1]['cookies'] == COOKIES
+
+
+def test_alive_mark_refreshes_parks_and_removal_works(cur):
+    queries.save_extra_session(cur, account='a@', cookies=COOKIES, parks_count=50)
+    queries.mark_extra_session(cur, 'a@', parks_count=89)
+    assert queries.extra_status(cur)[0]['parks_count'] == 89
+    queries.mark_extra_session(cur, 'a@')                     # без числа — прежнее остаётся
+    assert queries.extra_status(cur)[0]['parks_count'] == 89
+    assert queries.delete_extra_session(cur, 'a@') is True
+    assert queries.delete_extra_session(cur, 'a@') is False
+    assert queries.extra_status(cur) == []
+
+
 def test_old_rows_without_attempt_start_count_from_the_job_start(cur):
     """Строки до правки: attempt_started_at пуст — попытка считается от начала выгрузки (так у №65:
     13 подхватов, последний жил 16 часов) и залипанием не считается."""

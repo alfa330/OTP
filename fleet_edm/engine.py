@@ -503,12 +503,18 @@ class CardPool:
     (card_slot_at), при равенстве — по кругу.
     """
 
-    def __init__(self, clients):
+    def __init__(self, clients, on_retire=None):
         self._clients = [client for client in clients if client is not None]
         if not self._clients:
             raise ValueError('CardPool: нужна хотя бы одна учётка')
         self._main = self._clients[0]
         self._dead = set()
+        # (id учётки, парк) — помощнице в этой диспетчерской отказано в правах:
+        # дальше её карточки этого парка идут мимо неё. Учётки добавляют в парки
+        # руками, и новая может стоять не во всех 89 — без этой памяти каждая
+        # карточка такого парка тратила бы её запрос (и место в её ~22 в минуту).
+        self._denied = set()
+        self._on_retire = on_retire
         self._turn = 0
         self._lock = threading.Lock()
 
@@ -524,8 +530,12 @@ class CardPool:
     def _alive(self):
         return [client for client in self._clients if id(client) not in self._dead]
 
-    def _order(self):
-        alive = self._alive()
+    def _order(self, park_id=None):
+        key_park = _park_key(park_id)
+        with self._lock:
+            denied = set(self._denied)
+        alive = [client for client in self._alive()
+                 if client is self._main or (id(client), key_park) not in denied]
         with self._lock:
             self._turn += 1
             turn = self._turn
@@ -541,29 +551,38 @@ class CardPool:
             return [self._main]
         return [client for client in ordered if client is not self._main] + [self._main]
 
-    def _retire(self, client, reason):
+    def _retire(self, client, reason, error=None):
         with self._lock:
+            if id(client) in self._dead:
+                return
             self._dead.add(id(client))
-        logging.warning('Провайдер ЭДО: вторая учётка кабинета выбыла до конца прогона — %s',
+        logging.warning('Провайдер ЭДО: учётка-помощница кабинета выбыла до конца прогона — %s',
                         reason)
+        if self._on_retire is not None:
+            try:
+                self._on_retire(client, error)
+            except Exception:  # noqa: BLE001 — отметка в базе не повод ронять карточку
+                logging.exception('Провайдер ЭДО: выбывшую учётку не отметили')
 
     def driver_card(self, park_id, driver_id):
-        for client in self._order():
+        for client in self._order(park_id):
             try:
                 return client.driver_card(park_id, driver_id)
             except FleetSessionExpired as error:
                 if client is self._main:
                     raise
-                self._retire(client, 'сессия протухла ({})'.format(str(error)[:80]))
+                self._retire(client, 'сессия протухла ({})'.format(str(error)[:80]), error)
             except FleetThrottled as error:
                 if client is self._main:
                     raise
-                self._retire(client, 'закрылась по лимиту ({})'.format(str(error)[:80]))
+                self._retire(client, 'закрылась по лимиту ({})'.format(str(error)[:80]), error)
             except FleetAccessDenied:
                 if client is self._main:
                     raise
-                logging.info('Провайдер ЭДО: у второй учётки нет доступа к диспетчерской '
-                             '%s — спрашиваем основную', str(park_id)[:8])
+                with self._lock:
+                    self._denied.add((id(client), _park_key(park_id)))
+                logging.info('Провайдер ЭДО: у учётки-помощницы нет доступа к диспетчерской '
+                             '%s — её карточки идут основной', str(park_id)[:8])
         raise FleetError('Карточку водителя {}… не ответила ни одна учётка'.format(
             str(driver_id)[:8]))
 
@@ -607,7 +626,8 @@ def _entry_prior(contractor_id, park_id, provider_name, provider_id, info, known
 def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_SAMPLE,
             max_orphan_lookups=MAX_ORPHAN_CARD_LOOKUPS, rng=None,
             checkpoint=None, resume=None, should_stop=None,
-            verify_providers=VERIFY_BY_CARD, card_cache=None, helpers=(), parks=None):
+            verify_providers=VERIFY_BY_CARD, card_cache=None, helpers=(), parks=None,
+            on_helper_retire=None):
     """Главная функция: заполняет провайдера по строкам. Возвращает словарь с
     результатом по каждому уникальному ID и статистикой прогона.
 
@@ -621,6 +641,8 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     есть, get_known (всё известное за KNOWN_PROVIDER_DAYS, с датой).
     parks — диспетчерские основной учётки, если их уже спросили (выбор учётки,
     см. accounts.choose): второй раз тот же запрос не шлём.
+    on_helper_retire(клиент, ошибка) — помощница выбыла до конца прогона (вход
+    протух, закрылась по лимиту): вызывающий отмечает учётку у себя.
     """
     progress = Progress(progress) if not isinstance(progress, Progress) else progress
     save = checkpoint if isinstance(checkpoint, Checkpoint) else Checkpoint(checkpoint)
@@ -628,7 +650,8 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     rng = rng or random.Random(20260820)
     resume = resume or {}
     # Карточки — через пул учёток; список по-прежнему ходит основной.
-    cards = CardPool([client] + list(helpers or ())) if helpers else client
+    cards = (CardPool([client] + list(helpers or ()), on_retire=on_helper_retire)
+             if helpers else client)
     stages = dict(resume.get('stages') or {})
     done_rounds = set(stages.get('rounds') or ())
 
@@ -1280,11 +1303,15 @@ def _verify_by_card(client, results, providers, verify_providers, progress,
                 # с процессом — иначе следующая попытка заплатит за него снова.
                 cache.put(list(fresh))
                 del fresh[:]
+            # Темп и остаток — как у добора карточками: на сутки работы человеку
+            # нужно видеть, сколько ещё ждать и что дают дополнительные учётки.
             progress(percent=_percent(done, total, low=91, high=94),
                      requests=client.requests_count,
-                     note='Подтверждаем «{}» карточками: {} из {}, поправлено {}'
-                          .format(label, done, total, len(outcome['fixed'])))
+                     note='Подтверждаем «{}» карточками: {} из {}, поправлено {}{}'
+                          .format(label, done, total, len(outcome['fixed']),
+                                  _pace_note(verify_started, done, total)))
 
+    verify_started = time.time()
     _run_parallel(client, pending, ask, stop=stop, on_result=tick)
     if cache is not None and fresh:
         cache.put(list(fresh))
