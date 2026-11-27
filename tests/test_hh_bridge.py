@@ -80,6 +80,34 @@ def page(*rows):
                                         'rawEnrichingData': {'resumes': {'resumes': [r for _c, r in rows]}}}}
 
 
+def resume_id_of(topic):
+    return 290000000 + topic % 1000000
+
+
+def page_entities(*rows):
+    """Выдача откликов в виде hh с вечера 26.11.2026 (снята с живого кабинета 27.11): кандидаты и резюме — словари
+    {"ids", "entities"}, ключи entities — строки, ids кандидатов — числа, а резюме — строки; отклик связан с резюме
+    номером резюме (resumeId), у кандидата — этап «Воронки подбора». Номер темы в резюме здесь нарочно убран: связь
+    должна держаться на resumeId."""
+    candidates, resumes = {'ids': [], 'entities': {}}, {'ids': [], 'entities': {}}
+    for candidate, resume in rows:
+        resume_id = resume_id_of(candidate['topicId'])
+        entity = dict(candidate, resumeId=resume_id, state=candidate['employerState'], archived=False,
+                      funnelStage={'funnelStageId': 107152297, 'state': candidate['employerState'],
+                                   'name': 'Все неразобранные', 'collectionId': 'response_107152297'})
+        candidates['ids'].append(candidate['topicId'])
+        candidates['entities'][str(candidate['topicId'])] = entity
+        entry = {key: value for key, value in resume.items() if key != 'topicId'}
+        entry['_attributes'] = dict(resume['_attributes'], id=str(resume_id))
+        resumes['ids'].append(str(resume_id))
+        resumes['entities'][str(resume_id)] = entry
+    return {'contactCenterCandidates': {
+        'candidates': candidates, 'resumes': resumes,
+        'rawEnrichingData': {'vacancyById': {OPERATOR: {'vacancyId': int(OPERATOR), 'archived': False}},
+                             'testSolutionById': {}, 'lastActivityTime': {}},
+        'collection': {'id': 'funnel_137988397_vacancy_%s' % OPERATOR, 'type': 'VACANCY'}}}
+
+
 def wrapped(value, kind='string'):
     """Поле страницы резюме, как его отдаёт hh: часть полей — в обёртке {value, type, block, _attributes}."""
     return {'value': value, 'type': kind, 'block': None, '_attributes': None}
@@ -229,13 +257,15 @@ class HhBridgeTests(unittest.TestCase):
                      response(5000000002, '2026-11-23T10:09:00+03:00'),         # 12:09 — после
                      response(5000000001, '2026-11-23T10:07:59+03:00'),         # 12:07:59 — до отсечки
                      response(5000000004, '2026-11-23T10:30:00+03:00', invitation=True)]
-        # Папки выдачи: «Отклики» (без collection) и этапы, куда рекрутер в hh переводит отклики.
+        # Папки выдачи: «Отклики» (без collection) и этапы, куда рекрутер в hh переводит отклики. Вид выдачи — прежний
+        # список (page) или словари с вечера 26.11.2026 (page_entities).
         self.folders = {None: self.rows, 'phone_interview': []}
+        self.listing = page
         self.http = FakeHttp({
             '/employer/vacancies': lambda params: FakeResponse(200, vacancies_page(), url='https://almaty.hh.kz/employer/vacancies'),
             '/shards/employer/candidates/counts': lambda params: self.fingerprint,
             '/shards/employer/vacancyresponses/candidates_list': lambda params: (
-                page(*self.folders.get(params.get('collection'), [])) if params['page'] == 0 else page()),
+                self.listing(*self.folders.get(params.get('collection'), [])) if params['page'] == 0 else self.listing()),
             '/resume/*': lambda path, params: FakeResponse(200, resume_page(path.rsplit('/', 1)[1]),
                                                            url='https://almaty.hh.kz' + path),
         })
@@ -275,6 +305,43 @@ class HhBridgeTests(unittest.TestCase):
             hh_bridge.items_from_page({}, {'id': OPERATOR})
         self.assertNotEqual(hh_bridge.counts_fingerprint(counts(31, 24)), hh_bridge.counts_fingerprint(counts(31, 23)))
         self.assertEqual(hh_bridge.parse_moment('2026-11-23T10:07:59+03:00'), hh_bridge.parse_moment('2026-11-23T12:07:59'))
+
+    def test_listing_of_late_november(self):
+        """С вечера 26.11.2026 hh отдаёт выдачу откликов словарями {ids, entities} и связывает резюме с откликом номером
+        резюме. Мост hh/1.5.1 видел в ней ноль откликов и молчал (рекрутеры 27.11: «не доходят отклики»): оба вида дают
+        одно и то же, а незнакомый вид — беда сайта, а не тихий ноль."""
+        vacancy = {'id': OPERATOR, 'name': 'Оператор call-центра'}
+        self.assertEqual(hh_bridge.items_from_page(page_entities(*self.rows), vacancy),
+                         hh_bridge.items_from_page(page(*self.rows), vacancy))
+        # Порядок — по ids, а не по ключам entities.
+        shuffled = page_entities(*self.rows)
+        listing = shuffled['contactCenterCandidates']['candidates']
+        listing['entities'] = dict(reversed(list(listing['entities'].items())))
+        self.assertEqual([i['topic_id'] for i in hh_bridge.items_from_page(shuffled, vacancy)],
+                         ['5000000003', '5000000002', '5000000001'])
+        # Вакансия без откликов — пустая выдача, не беда.
+        empty = {'contactCenterCandidates': {'candidates': {'ids': [], 'entities': {}}, 'resumes': {'ids': [], 'entities': {}}}}
+        self.assertEqual(hh_bridge.items_from_page(empty, vacancy), [])
+        # Резюме одного отклика hh не отдал (скрытое, удалённое) — он без телефона, остальные — с телефоном.
+        partial = page_entities(*self.rows)
+        partial['contactCenterCandidates']['resumes']['entities'].pop(str(resume_id_of(5000000002)))
+        phones = {i['topic_id']: i['phone'] for i in hh_bridge.items_from_page(partial, vacancy)}
+        self.assertEqual((phones['5000000003'], phones['5000000002']), ('+7 (701) 555-00-03', None))
+        # Незнакомый вид — «ошибка» порталу (и тревога руководителям), а не ноль откликов.
+        strange = page_entities(*self.rows)
+        strange['contactCenterCandidates']['candidates'] = {'byId': strange['contactCenterCandidates']['candidates']['entities']}
+        nameless = page_entities(*self.rows)
+        for entity in nameless['contactCenterCandidates']['candidates']['entities'].values():
+            entity['id'] = entity.pop('topicId')
+        unlinked = page_entities(*self.rows)
+        for entity in unlinked['contactCenterCandidates']['candidates']['entities'].values():
+            entity['resume'] = entity.pop('resumeId')
+        odd_resumes = page_entities(*self.rows)
+        odd_resumes['contactCenterCandidates']['resumes'] = 'список'
+        for name, broken in (('strange', strange), ('nameless', nameless), ('unlinked', unlinked), ('odd_resumes', odd_resumes)):
+            with self.subTest(name), self.assertRaises(hh_bridge.SiteTrouble) as caught:
+                hh_bridge.items_from_page(broken, vacancy)
+            self.assertEqual(caught.exception.kind, 'error')
 
     def test_site_trouble_kinds(self):
         site = hh_bridge.Site(self.config, http=self.http, sleep=lambda _s: None)
@@ -343,6 +410,42 @@ class HhBridgeTests(unittest.TestCase):
         again = self.bridge()
         again.cycle()
         self.assertEqual([p['items'] for p in self.portal.payloads[-2:]], [[], []])
+
+    def test_cycle_on_listing_of_late_november(self):
+        """Тот же такт — на выдаче вида hh с вечера 26.11.2026."""
+        self.listing = page_entities
+        self.test_cycle_brings_only_fresh_responses_once()
+
+    def test_updated_parser_catches_up_what_the_old_one_missed(self):
+        """Состояние оставил hh/1.5.1: счётчики «увидены», а отклик, который рекрутер в hh уже перевёл в «Телефонное
+        интервью», не отдан — прежний разбор не понял выдачу (так пропали 8 откликов 26–27.11.2026). Обновлённый мост
+        первым тактом заново смотрит «Отклики» и непустые этапы и отдаёт пропущенное; отданное раньше не повторяется,
+        следующий перезапуск выдачу заново не читает."""
+        self.listing = page_entities
+        candidate, resume = response(5000000010, '2026-11-26T21:33:07.1+03:00')
+        candidate.update(employerState='PHONE_INTERVIEW', initialTopicType='RESPONSE_BY_APPLICANT_WITH_PROFILE')
+        self.folders['phone_interview'] = [(candidate, resume)]
+        with open(self.config['state_file'], 'w', encoding='utf-8') as handle:
+            json.dump({'seen': ['5000000003', '5000000002'], 'pending': [], 'photos': [],
+                       'fingerprints': {OPERATOR: hh_bridge.counts_fingerprint(self.fingerprint)}}, handle)
+        bridge = self.bridge()
+        bridge.cycle()
+        self.assertEqual([[i['topic_id'] for i in p['items']] for p in self.portal.payloads], [[], ['5000000010']])
+        self.assertEqual(self.portal.payloads[1]['items'][0]['phone'], '+7 (701) 555-00-10')
+        self.assertEqual([p.get('collection') for p in self.calls('/shards/employer/vacancyresponses/candidates_list')],
+                         [None, 'phone_interview'])
+        with open(self.config['state_file'], encoding='utf-8') as handle:
+            self.assertEqual(json.load(handle)['listing'], hh_bridge.LISTING_VERSION)
+        # Перезапуск на новом состоянии: счётчики не сдвинулись — выдача не читается, отданное не повторяется.
+        reads = len(self.calls('/shards/employer/vacancyresponses/candidates_list'))
+        self.bridge().cycle()
+        self.assertEqual(len(self.calls('/shards/employer/vacancyresponses/candidates_list')), reads)
+        self.assertEqual(self.portal.payloads[-1]['items'], [])
+        # Новый отклик — уходит, как прежде.
+        self.rows.insert(0, response(5000000011, '2026-11-27T10:00:00+03:00'))
+        self.fingerprint = counts(32, 25)
+        bridge.cycle()
+        self.assertEqual([i['topic_id'] for i in self.portal.payloads[-1]['items']], ['5000000011'])
 
     def test_portal_down_keeps_queue_across_restart(self):
         bridge = self.bridge()

@@ -32,6 +32,16 @@
 один раз — один запрос, как рекрутер, открывший отклик. Контакты (email, адрес, дата рождения) из резюме не берутся:
 телефон и так приходит в выдаче.
 
+Два вида выдачи откликов (hh/1.6.0)
+-----------------------------------
+С вечера 26.11.2026 hh отдаёт выдачу откликов по-новому (вместе с «Воронкой подбора» — своими этапами вакансии):
+кандидаты и резюме — словари {"ids": [...], "entities": {номер: запись}}, резюме связано с откликом номером резюме
+(resumeId), а не номером темы. Мост hh/1.5.1 понимал только прежний список, видел в новой выдаче ноль откликов и молчал:
+с 26.11 18:20 до 27.11 в воронку не пришёл ни один отклик hh (рекрутеры 27.11: «не доходят отклики»). Теперь читаются
+оба вида, а незнакомый вид выдачи — беда сайта: портал узнаёт «ошибку», руководителям уходит тревога, а не тихий ноль.
+Сменился разбор выдачи (LISTING_VERSION) — отпечатки счётчиков сбрасываются, и первый такт заново смотрит «Отклики» и
+непустые этапы: отклики, которые прежний разбор пропустил, находятся сами (отданное помнится, повторы портал отсеет).
+
 Поиск по базе резюме (hh/1.4.0)
 -------------------------------
 Владелец 25.11.2026: «поиск кандидатов по конкретной вакансии… с помощью ключевых слов с ИИ… обновление резюмешки в
@@ -104,7 +114,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'hh/1.5.1'
+VERSION = 'hh/1.6.0'
 log = logging.getLogger('cdr_bridge.hh_bridge')
 
 PUSH_PATH = '/api/hiring/hh/agent/push'
@@ -171,6 +181,10 @@ RESUME_HASH = re.compile(r'^[0-9a-f]{16,64}$')
 # Потолки текста резюме: hh разрешает описание места работы до 4000 знаков; письмо и «о себе» — длиннее не бывает.
 TEXT_LIMITS = {'description': 4000, 'about': 6000, 'letter': 10000, 'short': 300}
 SEEN_LIMIT = 20000
+# Версия разбора выдачи откликов. Другая в состоянии на диске — отпечатки счётчиков сбрасываются: прежний разбор мог
+# «увидеть» сдвиг счётчиков, не найдя в выдаче ни одного отклика (так было 26–27.11.2026), и первый такт нового должен
+# посмотреть выдачу заново.
+LISTING_VERSION = 2
 # Рекрутер в hh успевает перевести свежий отклик дальше по этапам («Телефонное интервью» у «Оператора call-центра» —
 # 71 из 153 на 23.11.2026) раньше, чем мост его увидит в «Откликах». Поэтому, когда растёт счётчик этапа, мост смотрит
 # и первую страницу его папки (имя папки — состояние строчными буквами). Отказы — нет: отклонённый в hh кандидат в
@@ -330,23 +344,65 @@ def _first(resume, field):
     return values
 
 
+def _entries(value):
+    """Записи выдачи hh в её порядке → [(номер или None, запись)]. Прежний вид — список; с 26.11.2026 —
+    {"ids": [...], "entities": {номер: запись}} (порядок — по ids, записи, которых в ids нет, — следом). Пусто — [];
+    незнакомый вид — None."""
+    if value is None or value == [] or value == {}:
+        return []
+    if isinstance(value, list):
+        return [(None, item) for item in value if isinstance(item, dict)]
+    if isinstance(value, dict) and isinstance(value.get('entities'), dict):
+        entities = {str(key): item for key, item in value['entities'].items() if isinstance(item, dict)}
+        order = [str(key) for key in value['ids']] if isinstance(value.get('ids'), list) else []
+        keys = list(dict.fromkeys([key for key in order if key in entities] + list(entities)))
+        return [(key, entities[key]) for key in keys]
+    return None
+
+
+def _scalar(value):
+    """Номер из выдачи (число или строка) → строка; всё остальное — None."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    return str(value).strip() or None
+
+
 def items_from_page(payload, vacancy):
-    """Страница выдачи откликов → отклики для портала. Только отклики кандидатов (не наши приглашения)."""
+    """Страница выдачи откликов → отклики для портала. Только отклики кандидатов (не наши приглашения). Выдача — в
+    одном из двух видов (см. «Два вида выдачи откликов»): резюме находится по номеру темы (прежний вид) или по номеру
+    резюме (новый). Незнакомый вид — SiteTrouble: тихий ноль откликов хуже тревоги."""
     block = (payload or {}).get('contactCenterCandidates') if isinstance(payload, dict) else None
     if not isinstance(block, dict):
         raise SiteTrouble(SITE_ERROR, 'выдача откликов без contactCenterCandidates')
-    resumes = {}
-    for resume in (((block.get('rawEnrichingData') or {}).get('resumes') or {}).get('resumes') or []):
-        if isinstance(resume, dict) and resume.get('topicId'):
-            resumes[str(resume['topicId'])] = resume
+    enriching = block.get('rawEnrichingData') if isinstance(block.get('rawEnrichingData'), dict) else {}
+    old_resumes = enriching.get('resumes') if isinstance(enriching.get('resumes'), dict) else {}
+    candidates = _entries(block.get('candidates'))
+    listings = (_entries(old_resumes.get('resumes')), _entries(block.get('resumes')))
+    if candidates is None or None in listings:
+        raise SiteTrouble(SITE_ERROR, 'выдача откликов в незнакомом виде — hh поменял страницу «Отклики»')
+    by_topic, by_resume = {}, {}
+    for key, resume in listings[0] + listings[1]:
+        topic = _scalar(resume.get('topicId'))
+        if topic:
+            by_topic[topic] = resume
+        attributes = resume.get('_attributes') if isinstance(resume.get('_attributes'), dict) else {}
+        for resume_id in {key, _scalar(attributes.get('id'))} - {None}:
+            by_resume[resume_id] = resume
+
+    def resume_of(candidate):
+        return by_topic.get(_scalar(candidate['topicId'])) or by_resume.get(_scalar(candidate.get('resumeId')) or '')
+
+    numbered = [candidate for _key, candidate in candidates if _scalar(candidate.get('topicId'))]
+    if candidates and not numbered:
+        raise SiteTrouble(SITE_ERROR, 'в выдаче откликов нет номеров тем — hh поменял страницу «Отклики»')
+    if numbered and (by_topic or by_resume) and not any(resume_of(candidate) for candidate in numbered):
+        raise SiteTrouble(SITE_ERROR, 'резюме в выдаче откликов не связываются с откликами — hh поменял страницу «Отклики»')
     items = []
-    for candidate in block.get('candidates') or []:
-        if not isinstance(candidate, dict) or not candidate.get('topicId'):
-            continue
+    for candidate in numbered:
         if not str(candidate.get('initialTopicType') or 'RESPONSE').startswith('RESPONSE'):
             continue
-        topic = str(candidate['topicId'])
-        resume = resumes.get(topic) or {}
+        topic = _scalar(candidate['topicId'])
+        resume = resume_of(candidate) or {}
         phone = resume.get('phone') if isinstance(resume.get('phone'), list) else []
         phone = phone[0] if phone and isinstance(phone[0], dict) else {}
         area = resume.get('area') if isinstance(resume.get('area'), list) else []
@@ -879,7 +935,7 @@ class HhBridge:
         """Что уже отдано порталу, отпечатки счётчиков вакансий и очередь, которую портал ещё не подтвердил: очередь
         на диске — иначе перезапуск между чтением выдачи и ответом портала терял бы отклики (счётчики-то уже сошлись)."""
         path = self.config.get('state_file')
-        state = {'seen': [], 'fingerprints': {}, 'photos': []}
+        state = {'seen': [], 'fingerprints': {}, 'photos': [], 'listing': LISTING_VERSION}
         if path and os.path.exists(path):
             try:
                 with open(path, encoding='utf-8') as handle:
@@ -887,6 +943,11 @@ class HhBridge:
                 if isinstance(loaded, dict):
                     state['seen'] = [str(x) for x in loaded.get('seen') or []][-SEEN_LIMIT:]
                     state['fingerprints'] = {str(k): str(v) for k, v in (loaded.get('fingerprints') or {}).items()}
+                    if state['fingerprints'] and loaded.get('listing') != LISTING_VERSION:
+                        # Отпечатки записал прежний разбор выдачи: он мог принять сдвиг счётчиков, не найдя откликов.
+                        log.info('разбор выдачи откликов обновлён (%s) — первый такт заново посмотрит «Отклики» и '
+                                 'непустые этапы вакансий', VERSION)
+                        state['fingerprints'] = {}
                     # Резюме, чьё фото уже отдано порталу (хеши): повторно картинку не качаем.
                     state['photos'] = [str(x) for x in loaded.get('photos') or []][-PHOTOS_LIMIT:]
                     self.pending = [item for item in loaded.get('pending') or []
