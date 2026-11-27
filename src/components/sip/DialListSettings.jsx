@@ -240,17 +240,19 @@ const RetryScheduleEditor = ({ values, onChange, maxAttempts, canEdit }) => {
    переключились бы в обзвон. Кому работать в режиме, руководитель включает лично —
    «Сотрудники» ниже; это и есть «операторы под распределение». Пояснения — под «i»,
    на экране числа и их вид словами. */
-const TezAutodialRows = ({ form, setForm, canEdit, numberInput, activation = false }) => {
+const TezAutodialRows = ({ form, setForm, canEdit, numberInput, activation = false, hosted = false }) => {
     const schedule = scheduleFromInputs(form.retry_schedule);
+    // «Активация» на линиях удалённого КЦ (режим линий, 26.11.2026): своих сотрудников у отдела нет — операторов
+    // переводят в её режим во вкладке «Линии».
+    const howEnabled = hosted
+        ? 'Операторов переводят в режим «Активация» во вкладке «Линии» — по линии или все сразу: им сервер и раздаёт пачки. Режим отдела целиком здесь не включается. Телефон подхватывает эти настройки при следующем обновлении списка.'
+        : `Режим включают каждому оператору лично — «Сотрудники» ниже: им сервер и раздаёт пачки. Режим отдела целиком ${activation ? 'здесь' : 'у Тез'} не включается. Телефон подхватывает эти настройки при следующем обновлении списка.`;
     return (
         <>
             <section className="space-y-1.5">
                 <div className="flex items-center gap-1.5">
                     <span className={iosGroupLabel}>Автообзвон</span>
-                    <IosHint
-                        label="Как включается режим"
-                        text={`Режим включают каждому оператору лично — «Сотрудники» ниже: им сервер и раздаёт пачки. Режим отдела целиком ${activation ? 'здесь' : 'у Тез'} не включается. Телефон подхватывает эти настройки при следующем обновлении списка.`}
-                    />
+                    <IosHint label="Как включается режим" text={howEnabled} />
                 </div>
                 <div className={`${iosCard} divide-y divide-slate-100`}>
                     <Row
@@ -443,7 +445,8 @@ export const DialListSettingsPanel = ({ apiBaseUrl, authHeaders, departmentId, s
                 </section>
             )}
             {isTez ? (
-                <TezAutodialRows form={form} setForm={setForm} canEdit={canEdit} numberInput={numberInput} activation={isActivation} />
+                <TezAutodialRows form={form} setForm={setForm} canEdit={canEdit} numberInput={numberInput} activation={isActivation}
+                    hosted={isActivation && settings?.host_department_id != null} />
             ) : (
                 <section className="space-y-1.5">
                     <div className={iosGroupLabel}>Режим</div>

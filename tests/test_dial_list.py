@@ -1658,6 +1658,8 @@ class WorkedTabsTests(unittest.TestCase):
             def fetchall(self):
                 if 'FROM dial_list_outcomes o' in self.sql and 'DISTINCT ON' not in self.sql:
                     return outcomes
+                if 'WHERE host_department_id = %s' in self.sql:
+                    return []  # отделы режима линий (_other_mode_departments): у отдела режима нет
                 return rows
 
         class Db:

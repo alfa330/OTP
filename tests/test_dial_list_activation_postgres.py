@@ -610,3 +610,57 @@ def test_release_from_the_line_clears_the_mode(hosted):
     hosted.q("INSERT INTO dial_list_operator_modes (user_id, department_id, host_department_id) VALUES (%s, %s, %s)",
              (RCC_OWN, SZOV, 9999))
     assert svc.work_operator(RCC_OWN)["department_id"] == RCC
+
+
+def _talk_with_outcome(env, user_id, assignment_id, department_id, outcome_name):
+    """Разговор 30 с и итог outcome_name из справочника отдела department_id."""
+    svc = env.svc
+    attempt = svc.start_call(user_id, assignment_id, operator_status='outbound')
+    svc.phone_event(user_id, attempt["attempt_id"], 'ringing', phone_version=GUARDED)
+    svc.phone_event(user_id, attempt["attempt_id"], 'answered', phone_version=GUARDED)
+    svc.phone_event(user_id, attempt["attempt_id"], 'ended', by_operator=False, leg_sec=30, talk_detected=True,
+                    phone_version=GUARDED)
+    env.binotel.live[attempt["general_call_id"]] = {"disposition": 'ANSWER', "billsec": 30, "waitsec": 5}
+    env.poll_now()
+    svc.get_state(user_id, phone_version=GUARDED)
+    outcome = str(env.one("SELECT id FROM dial_list_outcomes WHERE department_id = %s AND name = %s",
+                          (department_id, outcome_name))[0])
+    svc.set_attempt_outcome(user_id, attempt["attempt_id"], outcome)
+
+
+def test_phone_tabs_and_progress_show_only_the_current_mode(hosted):
+    """Владелец 26.11.2026: «что отображается в iCORE Phone, зависит от включённого режима» — вкладки итогов и
+    «Мой прогресс» оператора, который работал в обоих режимах, показывают только обзвон нынешнего режима."""
+    svc = hosted.svc
+    _enroll_szov(hosted)
+    hosted.q("INSERT INTO dial_list_outcomes (department_id, name, position) VALUES (%s, 'Отказ РКЦ', 1)", (RCC,))
+    svc.import_leads(RCC, 1, 'rcc.xlsx', [(2, 'Водитель РКЦ', '77009990001', '77009990001', '')], require_iin=False)
+    item = svc.issue_next_portion(RCC_OWN, phone_version=GUARDED)["portion"]["items"][0]
+    _talk_with_outcome(hosted, RCC_OWN, item["assignment_id"], RCC, 'Отказ РКЦ')
+
+    svc.set_line_modes(RCC, 'activation', user_ids=[RCC_OWN], changed_by=1)
+    hosted.crm.counts = {D1: 34, D2: 12}
+    items = svc.issue_next_portion(RCC_OWN, phone_version=GUARDED)["portion"]["items"]
+    first = next(i for i in items if i["full_name"] == 'Тестов Тест')
+    _talk_with_outcome(hosted, RCC_OWN, first["assignment_id"], SZOV, 'Перейдёт на Sapar')
+
+    def phone_view():
+        worked = svc.operator_worked(RCC_OWN)
+        progress = svc.operator_progress(RCC_OWN)
+        return ({t["name"] for t in worked["tabs"] if t["count"]}, len(worked["items"]),
+                [o["name"] for o in progress["outcomes"]], progress["month"]["attempts"])
+
+    # В «Активации» — только её водитель, её итоги и её звонок.
+    assert phone_view() == ({'Перейдёт на Sapar'}, 1, ['Перейдёт на Sapar'], 1)
+    assert 'Отказ РКЦ' not in {t["name"] for t in svc.operator_worked(RCC_OWN)["tabs"]}
+
+    # Назад в удалённый КЦ — только его.
+    svc.set_line_modes(RCC, 'host', user_ids=[RCC_OWN], changed_by=1)
+    assert phone_view() == ({'Отказ РКЦ'}, 1, ['Отказ РКЦ'], 1)
+    assert 'Перейдёт на Sapar' not in {t["name"] for t in svc.operator_worked(RCC_OWN)["tabs"]}
+
+    # Отдел без режима линий: водители отдела, где оператор работал раньше, на вкладках остаются (как было).
+    hosted.q("DELETE FROM dial_list_department_settings WHERE department_id = %s", (SZOV,))
+    with hosted.db._get_cursor() as cur:
+        assert svc._other_mode_departments(cur, {"department_id": RCC}) == []
+    assert len(svc.operator_worked(RCC_OWN)["items"]) == 2

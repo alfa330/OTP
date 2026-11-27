@@ -291,7 +291,9 @@ class PackageSqlTests(unittest.TestCase):
         # обзвонённые для зарплаты, у каждого подзапроса своё соединение с лидом и своё условие
         # реестра. Пятый (14.10.2026) — свои диалоги и подписавшие за сегодня для зарплаты:
         # у звонков и у успешек дня — тоже своё.
-        progress, outcomes, subtypes, conversion, today = cursor.sql
+        # Первый (26.11.2026) — отделы режима линий (_other_mode_departments): номеров в нём нет.
+        modes, progress, outcomes, subtypes, conversion, today = cursor.sql
+        self.assertIn('WHERE host_department_id = %s', modes)
         self.assertEqual(progress.count(keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL), 1)
         self.assertEqual(progress.count(keys.DIAL_LIST_ASSIGNMENT_NOT_TEST_SQL), 1)
         self.assertIn(keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL, outcomes)

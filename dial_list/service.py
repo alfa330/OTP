@@ -5985,7 +5985,24 @@ class DialListService:
             "department_id": int(department_id),
             "internal_number": internal_number,
             "settings": settings,
+            # Режим «Активация» на линии другого отдела (work_operator): отдел линии; не в режиме — None.
+            "mode_host_department_id": operator.get("mode_host_department_id"),
         }
+
+    def _other_mode_departments(self, cur, ctx):
+        """Отделы другой стороны режима линии (владелец 26.11.2026: «что отображается в iCORE Phone, зависит от
+        включённого режима»): в «Активации» — отдел линии, в обзвоне своей линии — «Активация» на линиях этого отдела.
+        Их водителей, итоги и счётчики вкладки итогов и «Мой прогресс» не показывают. [] — режима линий у отдела нет
+        (и для прочих отделов всё как было: водители отдела, где оператор работал раньше, на вкладках остаются).
+        В транзакции вызывающего — той, что читает и сами вкладки или счётчики."""
+        host = ctx.get("mode_host_department_id")
+        if host is not None:
+            return [int(host)]
+        cur.execute("""
+            SELECT department_id FROM dial_list_department_settings
+            WHERE host_department_id = %s AND profile = %s
+        """, (int(ctx["department_id"]), PROFILE_ACTIVATION))
+        return sorted(int(r[0]) for r in cur.fetchall())
 
     def _lock_operator(self, cur, user_id):
         """Выдача строк оператору — по одной за раз: второй «Ещё» (повтор запроса,
@@ -6532,16 +6549,16 @@ class DialListService:
     # talk — разговор ли попытка при ответе Binotel (ATTEMPT_TALK_SQL): сообщение сети,
     # которое положил телефон, ни в «дозвонились», ни в минуты разговора не идёт. Дозвон
     # оператора удалённого КЦ — разговор не короче %(min_sec)s (ATTEMPT_DIAL_COUNTED_SQL);
-    # %(any_talk)s — автообзвон Тез, у него дозвон — любой разговор.
-    _PROGRESS_SQL = """
-        WITH att AS (
+    # %(any_talk)s — движок автообзвона (Тез, «Активация»), у него дозвон — любой разговор.
+    _PROGRESS_SQL_TEMPLATE = """
+        WITH {hidden}att AS (
             SELECT t.state, UPPER(t.disposition) AS disp, t.billsec, t.cancelled,
                    (t.requested_at AT TIME ZONE 'Asia/Almaty')::date AS day,
                    (""" + ATTEMPT_TALK_SQL + """) AS talk
             FROM dial_list_attempts t
             WHERE t.operator_id = %(operator_id)s
               AND t.requested_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
-              AND """ + test_keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL + """
+              AND """ + test_keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL + """{att_hidden}
         ), asg AS (
             SELECT a.state,
                    (a.created_at AT TIME ZONE 'Asia/Almaty')::date AS day,
@@ -6549,7 +6566,7 @@ class DialListService:
             FROM dial_list_assignments a
             WHERE a.operator_id = %(operator_id)s
               AND a.created_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
-              AND """ + test_keys.DIAL_LIST_ASSIGNMENT_NOT_TEST_SQL + """
+              AND """ + test_keys.DIAL_LIST_ASSIGNMENT_NOT_TEST_SQL + """{asg_hidden}
         )
         SELECT
             (SELECT COUNT(*) FROM asg)                                                    AS issued,
@@ -6568,6 +6585,20 @@ class DialListService:
                                                           AND day = %(today)s)            AS talk_sec_today,
             (SELECT COUNT(*) FROM att WHERE cancelled)                                    AS cancelled
     """
+    _PROGRESS_SQL = (_PROGRESS_SQL_TEMPLATE.replace("{hidden}", "")
+                     .replace("{att_hidden}", "").replace("{asg_hidden}", ""))
+    # Режим линии (26.11.2026): строки оператора в отделах другой стороны режима (_other_mode_departments) — один
+    # список на запрос (CTE, хэш один раз), не подзапрос на каждую попытку: тот поднял бы оценку к порогу JIT.
+    # Отдельный вариант, а не условие в общем запросе: у отделов без режима линий запрос прежний до буквы.
+    _PROGRESS_MODE_SQL = (_PROGRESS_SQL_TEMPLATE
+                          .replace("{hidden}", """hidden AS (
+            SELECT ha.id FROM dial_list_assignments ha
+            JOIN dial_list_leads hl ON hl.id = ha.lead_id
+            WHERE ha.operator_id = %(operator_id)s AND hl.department_id = ANY(%(hidden)s::int[])
+        ), """)
+                          .replace("{att_hidden}", "\n              AND t.assignment_id NOT IN (SELECT id FROM hidden)")
+                          .replace("{asg_hidden}", "\n              AND a.id NOT IN (SELECT id FROM hidden)"))
+    # Итоги и их типы — справочники отдела: итоги отделов другой стороны режима (%(hidden)s; [] — все) не в списке.
     _PROGRESS_OUTCOMES_SQL = """
         SELECT o.id, o.name, o.color, COUNT(*) AS cnt,
                COUNT(*) FILTER (WHERE (t.requested_at AT TIME ZONE 'Asia/Almaty')::date = %(today)s) AS cnt_today
@@ -6575,6 +6606,7 @@ class DialListService:
         JOIN dial_list_outcomes o ON o.id = t.outcome_id
         WHERE t.operator_id = %(operator_id)s
           AND t.requested_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+          AND o.department_id <> ALL(%(hidden)s::int[])
           AND """ + test_keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL + """
         GROUP BY o.id, o.name, o.color, o.position
         ORDER BY cnt DESC, o.position, o.name
@@ -6589,6 +6621,7 @@ class DialListService:
         JOIN dial_list_outcome_subtypes s ON s.id = t.outcome_subtype_id
         WHERE t.operator_id = %(operator_id)s
           AND t.requested_at >= (%(month)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+          AND o.department_id <> ALL(%(hidden)s::int[])
           AND """ + test_keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL + """
         GROUP BY t.outcome_id, s.id, s.name
         ORDER BY cnt DESC, s.name
@@ -6747,9 +6780,12 @@ class DialListService:
         month = current_period()
         today = datetime.now(PERIOD_TZ).date()
         params = {"operator_id": ctx["user_id"], "month": month, "today": today, "answered": ANSWERED_SQL,
-                  "any_talk": is_tez(ctx.get("settings")), "min_sec": signing.SUCCESS_MIN_BILLSEC}
+                  # Дозвон на движке автообзвона (Тез и «Активация») — любой разговор, как во вкладке «Операторы».
+                  "any_talk": is_autodial(ctx.get("settings")), "min_sec": signing.SUCCESS_MIN_BILLSEC}
         with self.db._get_cursor() as cur:
-            cur.execute(self._PROGRESS_SQL, params)
+            # Режим линии: счётчики и итоги — только обзвона, в котором оператор сейчас работает.
+            params["hidden"] = hidden = self._other_mode_departments(cur, ctx)
+            cur.execute(self._PROGRESS_MODE_SQL if hidden else self._PROGRESS_SQL, params)
             r = cur.fetchone() or (0,) * 10
             cur.execute(self._PROGRESS_OUTCOMES_SQL, params)
             outcomes = [{"id": _sid(o[0]), "name": o[1], "color": o[2] or "#8E8E93",
@@ -6931,9 +6967,12 @@ class DialListService:
         LEFT JOIN dial_list_outcome_subtypes st ON st.id = t.outcome_subtype_id
     """ + _RECALL_JOINS_SQL + _LAST_COMMENT_JOIN_SQL.format(lead="s.lead_id", operator="%(operator_id)s") + """
         WHERE (%(period)s::date IS NULL OR l.period = %(period)s::date)
+          AND l.department_id <> ALL(%(hidden)s::int[])
     """
     # %(period)s — база месяца, водителей которой видит телефон (_dial_base): отработанные из
     # прошлой базы на вкладках не показываются (10.11.2026); NULL (автообзвон Тез) — все.
+    # %(hidden)s — отделы другой стороны режима линии (_other_mode_departments, 26.11.2026): что на вкладках — по
+    # режиму; [] — все отделы, где оператор работал за месяц, как было.
     # Номер водителя на вкладках — только автообзвону Тез с прямым звонком (with_phone, 20.11.2026): отдельный
     # вариант запроса с номером последней колонкой, как _PORTION_PHONE_COLUMN у пачки, — запрос удалённого КЦ
     # номер не выбирает вовсе.
@@ -6974,9 +7013,10 @@ class DialListService:
         with_phone = is_tez(ctx.get("settings") or {}) and phone_dials_direct(phone_version)
         with self.db._get_cursor() as cur:
             outcomes = self._outcome_rows(cur, ctx["department_id"], active_only=True)
+            hidden = self._other_mode_departments(cur, ctx)
             cur.execute(self._WORKED_PHONE_SQL if with_phone else self._WORKED_SQL,
                         {"operator_id": ctx["user_id"], "month": month,
-                                           "period": self._dial_base(ctx.get("settings") or {})})
+                         "period": self._dial_base(ctx.get("settings") or {}), "hidden": hidden})
             rows = cur.fetchall()
         tabs = {o["id"]: {"key": o["id"], "name": o["name"], "color": o["color"], "position": o["position"],
                           "count": 0} for o in outcomes}

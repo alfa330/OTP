@@ -265,6 +265,39 @@ class ProfileTests(unittest.TestCase):
         self.assertFalse(dial_service.is_tez({'profile': 'activation'}))
         self.assertIn('activation', dial_service.PROFILES)
 
+    def test_progress_counts_any_talk_as_a_dial_like_the_operators_tab(self):
+        """«Мой прогресс» на движке автообзвона («Активация», Тез): дозвон — любой разговор, как во вкладке
+        «Операторы» руководителя (overview с tez); удалённый КЦ — разговор от 10 с (владелец, 29.10.2026)."""
+        import contextlib
+
+        class Cur:
+            def __init__(self):
+                self.params = []
+
+            def execute(self, sql, params=None):
+                self.params.append(params)
+
+            def fetchone(self):
+                return None
+
+            def fetchall(self):
+                return []
+
+        for profile, any_talk in (('activation', True), ('tez', True), ('remote_cc', False)):
+            cur = Cur()
+
+            class Db:
+                @contextlib.contextmanager
+                def _get_cursor(self):
+                    yield cur
+
+            svc = dial_service.DialListService(db=Db())
+            svc.operator_context = lambda uid: {"user_id": uid, "department_id": 2100, "name": "Оператор",
+                                                "settings": {"profile": profile, "_period": date(2026, 11, 1)}}
+            svc.operator_progress(7)
+            progress = next(p for p in cur.params if isinstance(p, dict) and 'any_talk' in p)
+            self.assertIs(progress["any_talk"], any_talk, profile)
+
     def test_activation_outcomes_seed(self):
         names = [o[0] for o in dial_service.DEFAULT_ACTIVATION_OUTCOMES]
         self.assertIn('Перейдёт на Sapar', names)
