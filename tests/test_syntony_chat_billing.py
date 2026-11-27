@@ -11,7 +11,7 @@ SYNTONY_CHATS_TEST_PORT — порт локального кластера (па
 
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -70,7 +70,9 @@ def test_wallboard_shows_syntony_statuses_when_they_are_fresh(db):
     assert now_block['operators'][0]['since'] == '2026-11-20 14:30:00'
     assert [item['chats'] for item in now_block['operators']] == [1, 1]
     assert (now_block['operators_online'], now_block['operators_on_break'],
-            now_block['operators_busy'], now_block['operators_other']) == (1, 1, 0, 0)
+            now_block['operators_on_holiday'], now_block['operators_other']) == (1, 1, 0, 0)
+    # Отдельного «Занят» у Syntony нет — её «Занят» считается закрытием чатов.
+    assert now_block['operators_busy'] is None
     # Жумабаева ушла в 13:00 — «не в системе с» по концу её интервала.
     assert now_block['offline_operators'] == [
         {'operator_id': 3, 'name': 'Жумабаева Сауле', 'since': '2026-11-20 13:00:00'}]
@@ -81,6 +83,48 @@ def test_wallboard_shows_syntony_statuses_when_they_are_fresh(db):
     assert [(p['name'], p['seconds']) for p in hours[14]['operators']] == [
         ('Ахметова Айгерим', 55 * 60), ('Бекова Динара', 30 * 60)]
     assert hours[11]['operators_online'] == 1 and hours[13]['operators_online'] == 0
+
+
+def _seed_closing(db):
+    """Жумабаева (3) вернулась в 14:40 в «Занят» Syntony — закрывает чаты."""
+    with db._get_cursor() as cur:
+        statuses.upsert(cur, statuses.interval_row(
+            _interval(5, 3, 'busy', '2026-11-20T09:40:00Z'), NOW))
+
+
+def _shift(db, operator_id, day, start, end):
+    """Смена в графике работы (work_shifts) — по ней часы биллинга режут «Закрытие чатов»."""
+    with db._get_cursor() as cur:
+        cur.execute('INSERT INTO work_shifts (operator_id, shift_date, start_time, end_time) '
+                    'VALUES (%s, %s, %s, %s)', (operator_id, day, start, end))
+
+
+def test_busy_is_closing_chats_on_the_wallboard_and_stays_off_the_line(db):
+    """Решение владельца 27.11.2026: «Занят» Syntony у чатников — «Закрытие чатов»: на табло
+    так подписан и окрашен (как закрытие чатов Chat2Desk), считается отдельным счётчиком, в
+    людей на линии и в «Онлайн» не идёт."""
+    _seed(db)
+    _seed_statuses(db)
+    _seed_closing(db)
+    with mock.patch.dict(os.environ, KEY_ENV):
+        snapshot = szov.wallboard_snapshot(db, _ctx(), now=NOW)
+        report = szov.hourly_report(db, _ctx(), now=NOW)
+    now_block = snapshot['now']
+    assert [(item['name'], item['status'], item['status_key']) for item in now_block['operators']] == [
+        ('Бекова Динара', 'Онлайн', 'online'), ('Ахметова Айгерим', 'Перерыв', 'break'),
+        ('Жумабаева Сауле', 'Закрытие чатов', 'holiday')]
+    assert now_block['operators'][2]['seconds'] == 20 * 60
+    assert (now_block['operators_online'], now_block['operators_on_break'],
+            now_block['operators_on_holiday'], now_block['operators_other'],
+            now_block['operators_offline']) == (1, 1, 1, 0, 0)
+    assert now_block['operators_busy'] is None
+    hours = {row['hour']: row for row in snapshot['hourly']}
+    assert [p['name'] for p in hours[14]['operators']] == ['Ахметова Айгерим', 'Бекова Динара']
+    # Почасовой отчёт: закрытие чатов — статусом, не онлайн.
+    assert report['on_status'] == [{'name': 'Ахметова Айгерим', 'status': 'Перерыв'},
+                                   {'name': 'Жумабаева Сауле', 'status': 'Закрытие чатов'}]
+    by_name = {item['name']: (item['status'], item['presence']) for item in report['operators']}
+    assert by_name['Жумабаева Сауле'] == ('закрытие чатов', 'status')
 
 
 def test_stale_statuses_fall_back_to_replies(db):
@@ -160,10 +204,87 @@ def test_build_day_takes_line_hours_from_statuses_when_they_cover_the_day(db):
     _seed_statuses(db)
     with mock.patch.dict(os.environ, KEY_ENV):
         result = billing.build_day(db, _ctx(), DAY, now=NOW)
-    assert result['staff_source'] == 'status'
+    assert result['staff_source'] == billing.STAFF_FROM_STATUSES == 'status_work'
     staff = {(row['hour'], row['operator_id']): row['online_seconds']
              for row in _rows(db, 'syntony_chat_billing_staff', 'hour, operator_id')}
     assert staff == {(11, 3): 3600, (12, 3): 3600, (14, 1): 55 * 60, (14, 2): 30 * 60}
+    assert {row['source'] for row in _rows(db, 'syntony_chat_billing_staff', 'hour')} == {'status_work'}
+
+
+def test_billing_hours_count_closing_chats_inside_the_shift(db):
+    """Решения владельца 27.11.2026: закрытие чатов («Занят» Syntony) засчитывается в часы
+    биллинга — «Факт по сотрудникам» и «Часы работы», — но только внутри смены по графику:
+    забытый на ночь «Занят» (34 часа у чатника 22–24.11) в часы не идёт. «Онлайн» — целиком."""
+    _seed(db)
+    _seed_statuses(db)
+    _seed_closing(db)
+    staff_of = lambda: {(row['hour'], row['operator_id']): row['online_seconds']  # noqa: E731
+                        for row in _rows(db, 'syntony_chat_billing_staff', 'hour, operator_id')}
+    # Смены в графике у Жумабаевой нет — её «Занят» с 14:40 в часы не идёт; онлайн 11–13 — идёт.
+    with mock.patch.dict(os.environ, KEY_ENV):
+        billing.build_day(db, _ctx(), DAY, now=NOW)
+    assert staff_of() == {(11, 3): 3600, (12, 3): 3600, (14, 1): 55 * 60, (14, 2): 30 * 60}
+    # Смена до 14:50 — из «Занят» 14:40–15:00 в часы идут 10 минут.
+    _shift(db, 3, DAY, dtime(10, 0), dtime(14, 50))
+    with mock.patch.dict(os.environ, KEY_ENV):
+        billing.build_day(db, _ctx(), DAY, now=NOW)
+    assert staff_of() == {(11, 3): 3600, (12, 3): 3600, (14, 1): 55 * 60, (14, 2): 30 * 60,
+                          (14, 3): 10 * 60}
+    # Тот же факт читает экран биллинга: три человека в 14:00, 1 ч 35 мин работы в этом часу.
+    with db._get_cursor() as cur:
+        fact_rows = billing_chat._chat_billing_fact_staff_tx(cur, DAY, DAY)
+    report = billing_chat.build_chat_billing_staff(DAY, DAY, fact_rows, {})[DAY.isoformat()]
+    assert report['fact_heads'][14] == 3
+    assert report['fact_hours'][14] == round((55 + 30 + 10) / 60, 4)
+
+
+def test_night_shift_from_yesterday_covers_closing_chats_after_midnight(db):
+    """Смена 22:00–06:00 накануне — та же смена и после полуночи: «Занят» в 01:00–01:30 идёт в
+    часы суток 20.11, а в 07:00–07:30 (смены уже нет) — нет."""
+    _seed(db)
+    with db._get_cursor() as cur:
+        for item in (_interval(11, 3, 'busy', '2026-11-19T20:00:00Z', '2026-11-19T20:30:00Z'),
+                     _interval(12, 3, 'busy', '2026-11-20T02:00:00Z', '2026-11-20T02:30:00Z')):
+            statuses.upsert(cur, statuses.interval_row(item, NOW))
+        _mark(cur, statuses.MARK_STATUSES, NOW, written_at=NOW)
+        _mark(cur, statuses.MARK_STATUSES_FROM, utc('2026-11-12T19:00:00Z'), written_at=NOW)
+    _shift(db, 3, DAY - timedelta(days=1), dtime(22, 0), dtime(6, 0))
+    with mock.patch.dict(os.environ, KEY_ENV):
+        result = billing.build_day(db, _ctx(), DAY, now=NOW)
+    assert result['staff_source'] == 'status_work'
+    staff = {(row['hour'], row['operator_id']): row['online_seconds']
+             for row in _rows(db, 'syntony_chat_billing_staff', 'hour, operator_id')}
+    assert staff == {(1, 3): 30 * 60}
+
+
+def test_days_built_by_online_only_are_rebuilt_with_closing_chats(db):
+    """Сутки, собранные до правила (staff_source 'status' — только «Онлайн»), пересобираются
+    сами следующим прогоном, а потом больше не трогаются."""
+    _seed(db)
+    _seed_statuses(db)
+    _seed_closing(db)
+    _shift(db, 3, DAY, dtime(9, 0), dtime(18, 0))
+    later = NOW + timedelta(days=1)                       # 21.11 15:00: сутки 20.11 закрыты
+    with db._get_cursor() as cur:
+        _mark(cur, statuses.MARK_STATUSES, later, written_at=later)
+    with mock.patch.dict(os.environ, KEY_ENV), \
+            mock.patch.object(szov, 'feed_caught_up', return_value=True):
+        billing.build_day(db, _ctx(), DAY, now=later)
+        with db._get_cursor() as cur:
+            # Как было собрано до 27.11.2026: часы только по «Онлайн».
+            cur.execute("UPDATE syntony_chat_billing_days SET staff_source = 'status'")
+            cur.execute("DELETE FROM syntony_chat_billing_staff WHERE operator_id = 3 AND hour >= 14")
+            cur.execute("UPDATE syntony_chat_billing_staff SET source = 'status'")
+        [journal] = _rows(db, 'syntony_chat_billing_days', 'day')
+        assert journal['complete'] is True and journal['staff_source'] == 'status'
+        results = billing.refresh(db, _ctx(), first_day=DAY, now=later)
+        assert {'day': '2026-11-20', 'chats': 2, 'complete': True,
+                'staff_source': 'status_work'} in results
+        staff = {(row['hour'], row['operator_id']): row['online_seconds']
+                 for row in _rows(db, 'syntony_chat_billing_staff', 'hour, operator_id')}
+        assert staff[(14, 3)] == 20 * 60
+        again = billing.refresh(db, _ctx(), first_day=DAY, now=later + timedelta(minutes=10))
+    assert [item['day'] for item in again] == ['2026-11-21']   # только сегодняшние сутки
 
 
 def test_day_without_data_is_not_written_as_zeros(db):

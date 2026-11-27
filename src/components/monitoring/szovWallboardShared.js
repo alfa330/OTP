@@ -493,13 +493,26 @@ export const CHAT_WALLBOARD_METRICS = [
     {
         key: 'chat_busy',
         group: 'now',
-        // Статус оператора: Chat2Desk или Syntony (метод статусов, 24.11.2026); пока статусов нет
-        // (`statuses: false`), показатель прячется.
+        // «Занят» — статус Chat2Desk. У Syntony его нет: её «Занят» чатники ставят на закрытие
+        // чатов, и он считается показателем ниже (решение владельца 27.11.2026).
         statusOnly: true,
+        chat2deskOnly: true,
         label: 'Занят',
         hint: 'В системе, но не на линии',
         tone: 'violet',
         read: (now) => ({ value: formatInt(now.operators_busy) }),
+    },
+    {
+        key: 'chat_closing',
+        group: 'now',
+        // «Занят» Syntony — закрытие чатов (решение владельца 27.11.2026); цвет — как у чипа
+        // «Закрытие чатов» в списке смены. Пока статусов нет (`statuses: false`), прячется.
+        statusOnly: true,
+        syntonyOnly: true,
+        label: 'Закрытие чатов',
+        hint: 'Дорабатывают открытые чаты, новых не берут',
+        tone: 'warn',
+        read: (now) => ({ value: formatInt(now.operators_on_holiday) }),
     },
     {
         key: 'chat_training',
@@ -618,6 +631,26 @@ export const chatMetricAvailable = (metric, snapshot) => {
     return true;
 };
 
+/*
+ * Сохранённый до 27.11.2026 набор виджета чатов: «Занят» Syntony тогда показывал людей на
+ * закрытии чатов. Теперь у Syntony это показатель «Закрытие чатов», а «Занят» — только у
+ * Chat2Desk; без замены плитка у Syntony молча пропала бы. Поэтому к «Занят» в наборе
+ * добавляется «Закрытие чатов» рядом с ним — каждый виден у своего источника.
+ */
+export const upgradeChatWidgetMetrics = (keys) => {
+    const list = Array.isArray(keys) ? keys : [];
+    const at = list.indexOf('chat_busy');
+    if (at === -1 || list.includes('chat_closing')) return list;
+    return [...list.slice(0, at + 1), 'chat_closing', ...list.slice(at + 1)];
+};
+
+/*
+ * Версия сохранённого набора показателей виджета. 2 — с 27.11.2026 (см. выше). Набор старой
+ * версии переводится к нынешним ключам каждый раз, пока человек сам не поменяет выбор: тогда
+ * набор пишется уже с версией, и снятое им «Закрытие чатов» больше не возвращается.
+ */
+export const WIDGET_METRICS_VERSION = 2;
+
 /** Отфильтровать сохранённый набор: ключи, которых больше нет в каталоге, молча выбрасываем. */
 export const sanitizeWidgetMetrics = (keys, map = WALLBOARD_METRIC_MAP) => {
     const list = Array.isArray(keys) ? keys : [];
@@ -627,6 +660,13 @@ export const sanitizeWidgetMetrics = (keys, map = WALLBOARD_METRIC_MAP) => {
         seen.add(key);
         return true;
     });
+};
+
+/** Набор показателей из хранилища ({metrics, version}) → ключи каталога направления. */
+export const restoreWidgetMetrics = (stored, config) => {
+    const outdated = (Number(stored?.version) || 1) < WIDGET_METRICS_VERSION;
+    const keys = outdated && config?.upgradeMetrics ? config.upgradeMetrics(stored?.metrics) : stored?.metrics;
+    return sanitizeWidgetMetrics(keys, config?.metricMap);
 };
 
 /* ─────────────────────────── Единый снимок табло ───────────────────────────
@@ -821,6 +861,7 @@ export const WALLBOARD_DIRECTIONS = {
             return clock ? `Данные ${snapshot?.source_label || 'Chat2Desk'} на ${formatClock(clock)}` : null;
         },
         metricAvailable: chatMetricAvailable,
+        upgradeMetrics: upgradeChatWidgetMetrics,
         icon: 'fa-comments',
         useSnapshot: useSzovChatWallboardSnapshot,
         metrics: CHAT_WALLBOARD_METRICS,

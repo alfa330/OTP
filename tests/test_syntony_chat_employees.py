@@ -83,18 +83,32 @@ def test_syntony_keys_land_in_chat_manager_profile_as_owner_decided():
     assert employees.KEY_MAP['available'] in work
     assert employees.KEY_MAP['break'] in brk
     assert employees.KEY_MAP['training'] in training
-    # «Занят», «Техническая причина», «Офлайн работа» — видны, но в часы не идут (как у Chat2Desk).
-    assert employees.KEY_MAP['busy'] in ignored
-    for key in ('busy', 'technical', 'offline_work'):
+    # «Занят» Syntony у чатников — закрытие чатов (решение владельца 27.11.2026): тот же ключ,
+    # что у закрытия чатов Chat2Desk, и он — работа.
+    assert employees.KEY_MAP['busy'] == 'закрытие чатов'
+    assert employees.KEY_MAP['busy'] in work and employees.KEY_MAP['busy'] not in ignored
+    # Тот же вывод — у настоящего профиля часов модели чат-менеджера: работа и начало смены.
+    from db.salary import SalaryMixin
+
+    class Profiles(SalaryMixin):
+        def _normalize_calculation_model_code(self, code):
+            return code
+
+    profile = Profiles()._status_profile_for_calculation_model('chat_manager')
+    assert profile['code'] == 'chat_manager'
+    assert employees.KEY_MAP['busy'] in profile['work'] and employees.KEY_MAP['busy'] in profile['late_start']
+    assert employees.KEY_MAP['busy'] not in profile['ignored'] | profile['break'] | profile['training']
+    # «Техническая причина», «Офлайн работа» — видны, но в часы не идут (как у Chat2Desk).
+    for key in ('technical', 'offline_work'):
         mapped = employees.KEY_MAP[key]
         assert mapped not in work | brk | training
     # «Техническая причина» — тот же ключ, что «тех причина» Chat2Desk: оправдывает опоздание.
     assert employees.KEY_MAP['technical'].replace(' ', '') == 'техпричина'
-    # Подписи таймлайна — по-русски, как в Syntony.
+    # Подписи таймлайна — по-русски, как в Syntony; «Занят» — «Закрытие чатов».
     assert core.SCHEDULE_STATUS_KEY_LABELS['онлайн'] == 'Онлайн'
+    assert core.SCHEDULE_STATUS_KEY_LABELS['закрытие чатов'] == 'Закрытие чатов'
     assert core.SCHEDULE_STATUS_KEY_LABELS['офлайн работа'] == 'Офлайн работа'
     assert core.SCHEDULE_STATUS_KEY_LABELS['перерыв'] == 'Перерыв'
-    assert core.SCHEDULE_STATUS_KEY_LABELS['занят'] == 'Занят'
 
 
 def test_frontend_labels_follow_syntony_names():
@@ -102,7 +116,11 @@ def test_frontend_labels_follow_syntony_names():
     block = source[source.index('const plannerStatusKeyLabelMap = {'):]
     block = block[:block.index('};')]
     assert "'онлайн': 'Онлайн'" in block
+    assert "'закрытие чатов': 'Закрытие чатов'" in block
     assert "'офлайн работа': 'Офлайн работа'" in block
+    # На таймлайне «Закрытие чатов» — работа, как у Chat2Desk.
+    work = source[source.index('const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set(['):]
+    assert "'закрытие чатов'" in work[:work.index(']);')]
 
 
 def test_unknown_syntony_status_keeps_its_label_and_stays_out_of_hours():
@@ -351,7 +369,8 @@ def test_first_status_pull_reaches_back_to_the_cutover():
 
 
 def test_billing_restaffs_complete_reply_days_once_statuses_cover_them():
-    journal = {FIRST_DAY + timedelta(days=offset): {'complete': True, 'staff_source': 'status'}
+    journal = {FIRST_DAY + timedelta(days=offset): {'complete': True,
+                                                     'staff_source': billing.STAFF_FROM_STATUSES}
                for offset in range(7)}                                  # 18–24.11 собраны
     journal[DAY] = {'complete': True, 'staff_source': 'replies'}
     journal[DAY + timedelta(days=2)] = {'complete': True, 'staff_source': 'replies'}
@@ -367,6 +386,27 @@ def test_billing_restaffs_complete_reply_days_once_statuses_cover_them():
         date(2026, 11, 25), DAY + timedelta(days=2), DAY]
     # Без статусов — как раньше: собранные сутки не пересобираются.
     assert billing.days_to_build(journal, first_day=FIRST_DAY, now=NOW) == [date(2026, 11, 25)]
+
+
+def test_billing_restaffs_days_built_with_online_only_once():
+    """Сутки, собранные до 27.11.2026 по одному «Онлайн» (staff_source 'status'), сами
+    пересобираются — в часы биллинга теперь идёт и закрытие чатов. Пересобранные (status_work)
+    и сутки, которые статусы не покрывают, не трогаются."""
+    journal = {FIRST_DAY + timedelta(days=offset): {'complete': True, 'staff_source': 'status'}
+               for offset in range(2, 7)}                               # 20–24.11 — по «Онлайн»
+    journal[FIRST_DAY] = {'complete': True, 'staff_source': 'replies'}  # 18.11 — статусов нет
+    journal[DAY + timedelta(days=1)] = {'complete': True, 'staff_source': billing.STAFF_FROM_STATUSES}
+    journal[DAY + timedelta(days=3)] = {'complete': False, 'staff_source': 'status'}  # не дособраны
+    state = {'since': (NOW, NOW), 'from': local(DAY, 0)}
+    restaff = billing.restaff_days(journal, state, now=NOW, keep_days=30)
+    assert restaff == {DAY, DAY + timedelta(days=2), DAY + timedelta(days=4)}
+    # Догоняются по три за прогон, свежие первыми, — в той же очереди, что недособранные.
+    assert billing.days_to_build(journal, first_day=FIRST_DAY, now=NOW, restaff=restaff) == [
+        date(2026, 11, 25), DAY + timedelta(days=4), DAY + timedelta(days=3), DAY + timedelta(days=2)]
+    # Пересобранные по новому правилу больше не пересобираются.
+    for day in restaff:
+        journal[day] = {'complete': True, 'staff_source': billing.STAFF_FROM_STATUSES}
+    assert billing.restaff_days(journal, state, now=NOW, keep_days=30) == set()
 
 
 # ── Общее сохранение статусов: «снять сутки» без новых строк ──────────────────
@@ -817,6 +857,38 @@ def test_statuses_replace_chat2desk_day_and_second_run_is_silent(pg):
         {'day': '2026-11-20', 'replaced': 0, 'cleared': 1, 'segments': 0, 'skipped_live': 1},
         {'day': '2026-11-21', 'replaced': 0, 'cleared': 1, 'segments': 0, 'skipped_live': 0}]
     assert 102 not in _segments(pg)
+    assert employees.refresh_statuses(pg, Ctx, first_day=FIRST_DAY, now=NOW) == []
+
+
+@needs_pg
+def test_days_written_with_busy_become_closing_chats_and_hours_are_recounted(pg):
+    """Решение владельца 27.11.2026: «Занят» Syntony у чатников — «закрытие чатов», работа.
+    Сутки, перенесённые раньше с ключом «занят» (не в часах), переписываются сами следующей
+    сверкой — и часы этих суток пересчитываются; дальше сверка молчит."""
+    pg.run("""
+        INSERT INTO syntony_chat_sync_marks (name, mark) VALUES
+            ('statuses_since', %s), ('statuses_from', %s)
+    """, (NOW, local(FIRST_DAY, 0)))
+    for row in (('c1', 'available', 'Онлайн', local(DAY, 9), local(DAY, 12)),
+                ('c2', 'busy', 'Занят', local(DAY, 12), local(DAY, 12, 40))):
+        pg.run("""
+            INSERT INTO syntony_operator_statuses (id, operator_id, operator_name, partner_user_ids,
+                park_name, status_key, status_label, started_at, ended_at)
+            VALUES (%s, 'op-1', 'Анна Иванова', %s, 'Парк А', %s, %s, %s, %s)
+        """, (row[0], ['101']) + row[1:])
+    # Как перенесено до 27.11.2026: «занят» отдельным готовым отрезком, в часы не шёл.
+    pg.run("""
+        INSERT INTO operator_status_segments (operator_id, status_date, start_at, end_at,
+            duration_sec, status_key, is_authoritative)
+        VALUES (101, '2026-11-20', '2026-11-20 09:00', '2026-11-20 12:00', 10800, 'онлайн', TRUE),
+               (101, '2026-11-20', '2026-11-20 12:00', '2026-11-20 12:40', 2400, 'занят', TRUE)
+    """)
+    results = employees.refresh_statuses(pg, Ctx, first_day=FIRST_DAY, now=NOW)
+    assert results == [{'day': '2026-11-20', 'replaced': 1, 'cleared': 0, 'segments': 2,
+                        'skipped_live': 0}]
+    assert _segments(pg)[101] == [(wall(DAY, 9), wall(DAY, 12), 'онлайн', True),
+                                  (wall(DAY, 12), wall(DAY, 12, 40), 'закрытие чатов', True)]
+    assert pg.recalculated and pg.recalculated[0][0] == [101]
     assert employees.refresh_statuses(pg, Ctx, first_day=FIRST_DAY, now=NOW) == []
 
 

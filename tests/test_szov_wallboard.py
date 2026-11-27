@@ -1123,7 +1123,9 @@ class SzovWallboardWiringTests(unittest.TestCase):
         self.assertIn("Выбрать показатели", self.widget)
         self.assertIn("По умолчанию", self.widget)
         self.assertIn("otp:szov-wallboard-widget", self.widget)
-        self.assertIn("sanitizeWidgetMetrics", self.widget)
+        # сохранённый набор чистится от незнакомых ключей (и старой версии — переводится)
+        self.assertIn("restoreWidgetMetrics(parsed, config)", self.widget)
+        self.assertIn("return sanitizeWidgetMetrics(keys, config?.metricMap);", self.shared)
         # порядок плиток — порядок каталога, а не порядок нажатий
         self.assertIn("config.metrics.filter((metric) => metric.key === key", self.widget)
         # у направлений свои наборы, поэтому и ключ хранения свой

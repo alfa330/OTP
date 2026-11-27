@@ -175,3 +175,9 @@ class ChatBroadcastSyntonyTests(unittest.TestCase):
         notes = _function('_szov_chat_broadcast_notes')
         self.assertIn("_szov_plural(busy, 'занят', 'заняты', 'заняты')", notes)
 
+    def test_closing_chats_reach_the_broadcast_line(self):
+        """«Занят» Syntony у чатников — закрытие чатов (решение владельца 27.11.2026): в снимке
+        он — счётчик operators_on_holiday, и строка отбивки называет его так же, как табло."""
+        notes = _function('_szov_chat_broadcast_notes')
+        self.assertIn("now.get('operators_on_holiday')), 'на закрытии чатов'", notes)
+

@@ -110,12 +110,24 @@ def test_current_status_prefers_online_in_any_park_and_ignores_closed():
         interval(3, 'training', '2025-11-17T08:00:00Z', '2025-11-17T09:00:00Z',
                  name='Пётр Петров', partner=()),
         interval(4, 'busy', '2025-11-17T09:50:00Z', name='Пётр Петров', partner=(),
-                 label='Занят звонком'))
+                 label='Занят'))
     now = statuses.current(items, MATCH, NOW)
     assert now[101]['key'] == 'available' and now[101]['label'] == 'Онлайн'
     assert now[101]['since'] == datetime(2025, 11, 17, 9, 40, tzinfo=UTC)
-    # Подпись Syntony — как есть; закрытый интервал тренинга не текущий.
-    assert now[102]['key'] == 'busy' and now[102]['label'] == 'Занят звонком'
+    # «Занят» Syntony у чатников — «Закрытие чатов» (решение владельца 27.11.2026), какой бы ни
+    # была её подпись; закрытый интервал тренинга не текущий.
+    assert now[102]['key'] == 'busy' and now[102]['label'] == 'Закрытие чатов'
+
+
+def test_busy_is_named_closing_chats_and_other_labels_stay_syntonys():
+    def one(key, label):
+        return parsed(interval(1, key, '2025-11-17T09:00:00Z', label=label))[0]
+    assert statuses.label_of(one('busy', 'Занят')) == 'Закрытие чатов'
+    assert statuses.label_of(one('busy', 'Занят звонком')) == 'Закрытие чатов'
+    assert statuses.label_of(one('break', 'Обед')) == 'Обед'
+    assert statuses.label_of(one('offline_work', 'Офлайн работа')) == 'Офлайн работа'
+    assert statuses.STATUS_LABELS['busy'] == 'Закрытие чатов'
+    assert statuses.WORK_STATUSES == {'available', 'busy'}
 
 
 def test_no_open_interval_means_not_in_system_since_last_end():
@@ -140,6 +152,54 @@ def test_only_online_holds_the_line_and_parks_merge_not_add():
     assert hours[10] == {101: 20 * 60}
     assert 11 not in hours                                              # перерыв и «занят» — не линия
     assert hours[14] == {102: 5 * 60}
+
+
+def test_work_seconds_count_closing_chats_inside_the_shift_and_merge_across_parks():
+    """Часы биллинга (решения владельца 27.11.2026): «Онлайн» — целиком, «Закрытие чатов»
+    («Занят» Syntony) — только внутри смены по графику; перерыв, тренинг и прочее — нет. Онлайн в
+    одном парке и закрытие чатов в другом в одно время — одни и те же секунды, а не вдвое."""
+    day_start = datetime(2025, 11, 16, 19, 0, tzinfo=UTC)               # 00:00 Алматы 17.11
+    items = parsed(
+        # 09:10–09:40 онлайн, 09:30–10:20 «Занят» в другом парке — работа 09:10–10:20.
+        interval(1, 'available', '2025-11-17T04:10:00Z', '2025-11-17T04:40:00Z'),
+        interval(2, 'busy', '2025-11-17T04:30:00Z', '2025-11-17T05:20:00Z', park='Таксопарк Честный'),
+        interval(3, 'break', '2025-11-17T05:20:00Z', '2025-11-17T05:35:00Z'),
+        interval(4, 'training', '2025-11-17T05:35:00Z', '2025-11-17T05:50:00Z'),
+        interval(5, 'offline_work', '2025-11-17T06:00:00Z', '2025-11-17T06:30:00Z'),
+        # Онлайн 12:00–12:30 вне смены — «Онлайн» сменой не режется.
+        interval(6, 'available', '2025-11-17T07:00:00Z', '2025-11-17T07:30:00Z'),
+        # Открытое «Занят» с 14:55 — до «сейчас» (15:00).
+        interval(7, 'busy', '2025-11-17T09:55:00Z', name='Пётр Петров', partner=()))
+    almaty = timezone(timedelta(hours=5))
+    shift = lambda h1, m1, h2, m2: (datetime(2025, 11, 17, h1, m1, tzinfo=almaty),  # noqa: E731
+                                    datetime(2025, 11, 17, h2, m2, tzinfo=almaty))
+    shifts = {101: [shift(9, 0, 11, 0)], 102: [shift(14, 0, 23, 0)]}
+    work = statuses.work_seconds_by_hour(items, MATCH, day_start, 16, until=NOW, shifts=shifts)
+    assert work[9] == {101: 50 * 60}
+    assert work[10] == {101: 20 * 60}
+    assert 11 not in work                                               # тренинг и офлайн-работа — нет
+    assert work[12] == {101: 30 * 60}
+    assert work[14] == {102: 5 * 60}
+    # Смена 101 кончилась в 10:00 — «Занят» 10:00–10:20 уже не работа; у 102 смены нет — ничего.
+    short = {101: [shift(9, 0, 10, 0)]}
+    work = statuses.work_seconds_by_hour(items, MATCH, day_start, 16, until=NOW, shifts=short)
+    assert work[9] == {101: 50 * 60} and 10 not in work and 14 not in work
+    assert statuses.work_seconds_by_hour(items, MATCH, day_start, 16, until=NOW)[9] == {101: 30 * 60}
+    # Люди на линии табло — по-прежнему только «Онлайн».
+    line = statuses.line_seconds_by_hour(items, MATCH, day_start, 16, until=NOW)
+    assert line[9] == {101: 30 * 60} and 10 not in line and 14 not in line
+
+
+def test_shift_span_crosses_midnight():
+    from datetime import date, time as dtime
+    from syntony_chats import billing
+    day = date(2026, 11, 20)
+    begin, end = billing.shift_span(day, dtime(22, 0), dtime(6, 0))
+    assert (begin.isoformat(), end.isoformat()) == ('2026-11-20T22:00:00+05:00', '2026-11-21T06:00:00+05:00')
+    begin, end = billing.shift_span(day, dtime(18, 0), dtime(0, 0))
+    assert end.isoformat() == '2026-11-21T00:00:00+05:00'
+    begin, end = billing.shift_span(day, dtime(9, 0), dtime(18, 0))
+    assert (begin.hour, end.hour, end.date()) == (9, 18, day)
 
 
 # ── Сторож ────────────────────────────────────────────────────────────────────

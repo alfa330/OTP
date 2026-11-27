@@ -198,12 +198,16 @@ const SYNTONY_STATUS_SNAPSHOT = {
     statuses: true,
     now: {
         ...SYNTONY_SNAPSHOT.now,
-        operators_online: 1, operators_on_break: 1, operators_busy: 2, operators_on_training: 0,
-        operators_other: 1, operators_on_holiday: null, open_chats: null,
+        // «Занят» Syntony у чатников — закрытие чатов (решение владельца 27.11.2026): отдельного
+        // «Занят» у Syntony нет, есть счётчик закрытия чатов.
+        operators_online: 1, operators_on_break: 1, operators_busy: null, operators_on_training: 0,
+        operators_other: 1, operators_on_holiday: 2, open_chats: null,
         operators: [
             { ...ON_SHIFT[0], status: 'Онлайн', status_key: 'online', open_chats: null },
             { ...ON_SHIFT[0], operator_id: 99, name: 'Перерывова Дана', status: 'Перерыв',
               status_key: 'break', seconds: 600, chats: 0, open_chats: null },
+            { ...ON_SHIFT[0], operator_id: 98, name: 'Закрывающая Алия', status: 'Закрытие чатов',
+              status_key: 'holiday', seconds: 300, chats: 4, open_chats: null },
         ],
     },
 };
@@ -217,11 +221,12 @@ test('Syntony со статусами: плитки онлайн, перерыв
         assert.doesNotMatch(html, new RegExp(`>${label}<`), label);
     }
     const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.match(text, /Ещё 2 заняты · 1 в прочих статусах/);
+    assert.match(text, /Ещё 2 на закрытии чатов · 1 в прочих статусах/);
+    assert.doesNotMatch(text, /занят/i);
     const one = renderToStaticMarkup(React.createElement(SzovChatWallboardBody, {
-        snapshot: { ...SYNTONY_STATUS_SNAPSHOT, now: { ...SYNTONY_STATUS_SNAPSHOT.now, operators_busy: 1, operators_other: 0 } },
+        snapshot: { ...SYNTONY_STATUS_SNAPSHOT, now: { ...SYNTONY_STATUS_SNAPSHOT.now, operators_on_holiday: 1, operators_other: 0 } },
     })).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    assert.match(one, /Ещё 1 занят /);
+    assert.match(one, /Ещё 1 на закрытии чатов/);
     assert.doesNotMatch(text, /на тренинге/);
     assert.match(html, /статус «Онлайн» в Syntony/);
     // «Поступивших» у Syntony есть и со статусами.
@@ -234,5 +239,8 @@ test('Syntony со статусами: у человека статус Syntony,
     assert.match(text, /Перерывова Дана Перерыв 10:00/);
     assert.match(text, /чатов за сутки/);
     assert.doesNotMatch(text, /в работе/);
+    // «Закрытие чатов» — янтарным чипом, как закрытие чатов у Chat2Desk.
+    assert.match(text, /Закрывающая Алия Закрытие чатов 5:00/);
+    assert.match(html, /bg-amber-100 text-amber-700[^>]*>Закрытие чатов</);
 });
 

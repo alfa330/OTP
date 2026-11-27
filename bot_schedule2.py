@@ -37428,7 +37428,10 @@ def _szov_chat_broadcast_notes(data):
     online = _szov_wallboard_int(now.get('operators_online'))
     busy = _szov_wallboard_int(now.get('operators_busy'))
     parts = [f"{online} {_szov_plural(online, 'чатник', 'чатника', 'чатников')} на линии"]
+    # «Занят» Syntony у чатников — закрытие чатов (решение владельца 27.11.2026): в снимке он
+    # приходит счётчиком operators_on_holiday, как закрытие чатов у Chat2Desk.
     for count, label in ((busy, _szov_plural(busy, 'занят', 'заняты', 'заняты')),
+                         (_szov_wallboard_int(now.get('operators_on_holiday')), 'на закрытии чатов'),
                          (_szov_wallboard_int(now.get('operators_on_break')), 'на перерыве'),
                          (_szov_wallboard_int(now.get('operators_on_training')), 'на тренинге')):
         if count:

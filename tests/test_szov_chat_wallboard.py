@@ -1459,6 +1459,20 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         self.assertEqual(self._workbook(self._period()).sheetnames,
                          ['Показатели', 'По дням', 'По часам', 'Первый ответ по часам', 'Ответ внутри чата по часам', 'Чатники'])
 
+    def test_syntony_now_block_names_closing_chats_instead_of_busy(self):
+        """«Занят» Syntony у чатников — закрытие чатов (решение владельца 27.11.2026): у Syntony
+        счётчика «Занят» нет (None), и строка сводки названа как статус человека на листе
+        «Чатники». У Chat2Desk — как было: «Занят» своим счётчиком."""
+        now = dict(NOW_BLOCK, operators_busy=None, operators_on_holiday=2)
+        wb = self._workbook(dict(self._today(), now=now, statuses=True))
+        self.assertEqual(self._find_row(wb['Показатели'], 'Закрытие чатов')[1], 2)
+        with self.assertRaises(AssertionError):
+            self._find_row(wb['Показатели'], 'Занят')
+        wb = self._workbook(self._today())
+        self.assertEqual(self._find_row(wb['Показатели'], 'Занят')[1], NOW_BLOCK['operators_busy'])
+        with self.assertRaises(AssertionError):
+            self._find_row(wb['Показатели'], 'Закрытие чатов')
+
     def test_shift_sheet_appears_only_with_today_inside(self):
         """Состава смены «сейчас» у прошедшего дня не существует: живой список — только на сейчас."""
         payload = self._payload([_export_day(self.ns, '2026-08-17')], now=None, chat2desk_now=None)

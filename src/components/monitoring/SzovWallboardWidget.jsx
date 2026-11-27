@@ -5,10 +5,11 @@ import { APPLE_FONT } from '../ui/ios';
 import { cloneDocumentStyles } from '../../utils/pipWindow';
 import {
     WALLBOARD_TONE_TEXT,
+    WIDGET_METRICS_VERSION,
     formatClock,
     formatDuration,
     readWallboardMetric,
-    sanitizeWidgetMetrics,
+    restoreWidgetMetrics,
     wallboardDirection,
     wallboardStaleNotice,
 } from './szovWallboardShared';
@@ -72,7 +73,9 @@ const readStoredMetrics = (userId, config) => {
     try {
         const raw = window.localStorage.getItem(storageKey(userId, config.key));
         const parsed = raw ? JSON.parse(raw) : null;
-        const stored = sanitizeWidgetMetrics(parsed?.metrics, config.metricMap);
+        // Набор старой версии — к нынешним ключам (у чатов «Занят» Syntony стал «Закрытием
+        // чатов», restoreWidgetMetrics).
+        const stored = restoreWidgetMetrics(parsed, config);
         return stored.length > 0 ? stored : config.defaultMetrics;
     } catch (error) {
         return config.defaultMetrics;
@@ -82,7 +85,8 @@ const readStoredMetrics = (userId, config) => {
 const writeStoredMetrics = (userId, config, metrics) => {
     if (typeof window === 'undefined') return;
     try {
-        window.localStorage.setItem(storageKey(userId, config.key), JSON.stringify({ metrics }));
+        window.localStorage.setItem(storageKey(userId, config.key),
+            JSON.stringify({ metrics, version: WIDGET_METRICS_VERSION }));
     } catch (error) {
         // Набор показателей — предпочтение браузера, без него виджет просто откроется по умолчанию.
     }

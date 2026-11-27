@@ -10,6 +10,12 @@ offline_work — офлайн работа, training — тренинг, break �
 Chat2Desk; занят, тренинг, перерыв, техническая причина и офлайн-работа в людей на линии не
 идут, но на табло видны справа точным статусом.
 
+Решение владельца 27.11.2026: «Занят» (busy) чатники ставят, когда закрывают чаты, — у нас он
+называется «Закрытие чатов» (как статус holiday у Chat2Desk: человек в системе, новых чатов не
+берёт, дорабатывает открытые) и засчитывается в часы: в «Учёте часов» и в часы биллинга
+(work_seconds_by_hour) — в обоих только внутри смены по графику, так что забытый на ночь
+«Занят» часов не даёт. Людей «на линии» на табло по-прежнему считает только «Онлайн».
+
 Сторож (sync.py) зовёт pull() каждым своим прогоном: интервалы с последней отметки (и с начала
 самого раннего ещё открытого — пока он открыт, Syntony его переписывает), сутками-срезами, все
 страницы среза. Срез дочитан — открытые у нас интервалы этого среза, которых Syntony больше не
@@ -23,8 +29,9 @@ Syntony может начинаться с выкладки метода, и ч�
 табло считает онлайн по ответам за 15 минут, как до статусов.
 
 Правила присутствия — чистые функции ниже: сопоставление с сотрудником iCORE (partnerUserIds —
-наш id, иначе ФИО тем же правилом, что ответы), текущий статус человека и секунды «Онлайн» по
-часам для графика табло и факта сотрудников биллинга.
+наш id, иначе ФИО тем же правилом, что ответы), текущий статус человека, секунды «Онлайн» по
+часам для графика табло и рабочие секунды («Онлайн» + «Закрытие чатов») для факта сотрудников
+биллинга.
 """
 
 import os
@@ -37,10 +44,16 @@ from psycopg2.extras import Json
 from . import client, rules, store
 
 LINE_STATUS = 'available'
-# Подписи — на случай, когда Syntony не прислала свою (её label показывается как есть).
+# «Занят» Syntony — закрытие чатов (решение владельца 27.11.2026): подпись своя, а не Syntony.
+CLOSING_STATUS = 'busy'
+CLOSING_LABEL = 'Закрытие чатов'
+# Рабочее время чатника — «Онлайн» и «Закрытие чатов»: так считаются часы биллинга.
+WORK_STATUSES = frozenset({LINE_STATUS, CLOSING_STATUS})
+# Подписи — на случай, когда Syntony не прислала свою (её label показывается как есть, кроме
+# «Занят»: он всегда «Закрытие чатов», см. label_of).
 STATUS_LABELS = {
     'available': 'Онлайн',
-    'busy': 'Занят',
+    'busy': CLOSING_LABEL,
     'technical': 'Техническая причина',
     'offline_work': 'Офлайн работа',
     'training': 'Тренинг',
@@ -328,6 +341,10 @@ class Interval:
 
 
 def label_of(interval):
+    """Подпись статуса для табло и отчётов: Syntony как есть, а «Занят» — «Закрытие чатов»
+    (решение владельца 27.11.2026: у чатников в Syntony этим статусом закрывают чаты)."""
+    if interval.key == CLOSING_STATUS:
+        return CLOSING_LABEL
     return interval.label or STATUS_LABELS.get(interval.key) or interval.key or 'Статус'
 
 
@@ -417,26 +434,72 @@ def _merge(spans):
     return [(begin, end) for begin, end in merged if end > begin]
 
 
+def _window_limit(day_start, hours, until):
+    window_end = day_start + timedelta(hours=hours)
+    return min(window_end, until) if until is not None else window_end
+
+
+def _clipped(interval, day_start, limit):
+    """(начало, конец) интервала внутри [day_start, limit) или None. Открытый тянется до limit."""
+    if interval.started_at is None:
+        return None
+    begin = max(interval.started_at, day_start)
+    end = min(interval.ended_at if interval.ended_at is not None else limit, limit)
+    return (begin, end) if end > begin else None
+
+
 def line_seconds_by_hour(intervals, match, day_start, hours, until=None):
     """{час: {id сотрудника: секунды «Онлайн»}} за часы [0, hours) суток day_start.
 
-    Только available — линию держит лишь «Онлайн» (решение владельца 24.11.2026). Интервалы
-    одного человека в разных парках сливаются, а не складываются. Открытый интервал тянется до
-    until («сейчас»), у закрытых суток until — конец суток.
+    Только available — людей на линии на табло держит лишь «Онлайн» (решение владельца
+    24.11.2026). Интервалы одного человека в разных парках сливаются, а не складываются.
+    Открытый интервал тянется до until («сейчас»), у закрытых суток until — конец суток.
     """
-    window_end = day_start + timedelta(hours=hours)
-    limit = min(window_end, until) if until is not None else window_end
+    limit = _window_limit(day_start, hours, until)
     spans = {}
     for interval in intervals:
-        if interval.key != LINE_STATUS or interval.started_at is None:
+        if interval.key != LINE_STATUS:
             continue
         operator = match(interval)
-        if operator is None:
+        piece = _clipped(interval, day_start, limit) if operator is not None else None
+        if piece is not None:
+            spans.setdefault(int(operator['id']), []).append(piece)
+    return _seconds_by_hour(spans, day_start, hours)
+
+
+def work_seconds_by_hour(intervals, match, day_start, hours, until=None, shifts=None):
+    """{час: {id сотрудника: рабочие секунды}} — часы сотрудников биллинга.
+
+    Решения владельца 27.11.2026: «Онлайн» — целиком, «Закрытие чатов» («Занят» Syntony) —
+    только внутри смены человека по графику (shifts: {id: [(начало, конец)]}): забытый на ночь
+    «Занят» (у чатника 22–24.11 он висел 34 часа) иначе шёл бы в часы и в людей каждого часа.
+    «Учёт часов» тоже считает работу только внутри смены. Наложения сливаются, а не складываются.
+    """
+    limit = _window_limit(day_start, hours, until)
+    spans = {}
+    for interval in intervals:
+        if interval.key not in WORK_STATUSES:
             continue
-        begin = max(interval.started_at, day_start)
-        end = min(interval.ended_at if interval.ended_at is not None else limit, limit)
-        if end > begin:
-            spans.setdefault(int(operator['id']), []).append((begin, end))
+        operator = match(interval)
+        piece = _clipped(interval, day_start, limit) if operator is not None else None
+        if piece is None:
+            continue
+        operator_id = int(operator['id'])
+        if interval.key == CLOSING_STATUS:
+            begin, end = piece
+            pieces = [(max(begin, start), min(end, stop))
+                      for start, stop in (shifts or {}).get(operator_id, ())]
+            pieces = [(start, stop) for start, stop in pieces if stop > start]
+        else:
+            pieces = [piece]
+        if pieces:
+            spans.setdefault(operator_id, []).extend(pieces)
+    return _seconds_by_hour(spans, day_start, hours)
+
+
+def _seconds_by_hour(spans, day_start, hours):
+    """{id: [(начало, конец)]} → {час: {id: секунды}}: отрезки человека сливаются, затем режутся
+    по часам [0, hours) суток day_start."""
     per_hour = {}
     for operator_id, items in spans.items():
         for begin, end in _merge(items):

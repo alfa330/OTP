@@ -9,8 +9,10 @@
 Статусы операторов — метод /operator-statuses (24.11.2026, statuses.py): пока их забирает
 сторож (отметка свежая), онлайн — статус «Онлайн», справа у человека точный статус Syntony и
 время в нём, люди на линии по часам — по статусу «Онлайн» (решение владельца 24.11.2026:
-линию держит только он). Статусов нет (метод не отвечает, отметка устарела) — как до них:
-онлайн = ответил водителю за 15 минут, `statuses: false`.
+линию держит только он). «Занят» Syntony на табло — «Закрытие чатов» (решение владельца
+27.11.2026; счётчик operators_on_holiday, как у закрытия чатов Chat2Desk). Статусов нет (метод
+не отвечает, отметка устарела) — как до них: онлайн = ответил водителю за 15 минут,
+`statuses: false`.
 
 Откатиться на Chat2Desk — SZOV_CHAT_SOURCE=chat2desk в окружении. Без ключа истории и без
 секрета вебхука Syntony источник тоже остаётся прежним: брать данные было бы неоткуда.
@@ -76,10 +78,14 @@ LOOKBACK = timedelta(hours=6)
 STATUSES_STALE_SECONDS = 10 * 60
 # «Не в системе с» по статусам — конец последнего интервала за неделю.
 LAST_SEEN_LOOKBACK = timedelta(days=7)
-# Подпись статуса → ключ цвета на табло (CHAT_STATUS_STYLE во фронте). Незнакомый статус
-# Syntony — как «занят»: человек в системе, но не на линии.
-STATUS_STYLE = {'available': 'online', 'busy': 'busy', 'training': 'training', 'break': 'break',
+# Подпись статуса → ключ цвета на табло (CHAT_STATUS_STYLE во фронте). «Занят» Syntony —
+# «Закрытие чатов» (решение владельца 27.11.2026), цвет тот же, что у закрытия чатов Chat2Desk.
+# Незнакомый статус Syntony — фиолетовым, как прочие: человек в системе, но не на линии.
+STATUS_STYLE = {'available': 'online', 'busy': 'holiday', 'training': 'training', 'break': 'break',
                 'technical': 'tech', 'offline_work': 'busy'}
+# Плитка/счётчик табло по ключу Syntony; прочие статусы — в «прочих».
+STATUS_BUCKET = {'available': 'online', 'busy': 'holiday', 'training': 'training',
+                 'break': 'break'}
 # Порядок людей на смене — как плитки: онлайн, перерыв, потом прочие статусы.
 DISPLAY_RANK = {'available': 0, 'break': 1, 'busy': 2, 'training': 3, 'technical': 4,
                 'offline_work': 5}
@@ -312,7 +318,7 @@ def _status_people(ctx, now_status, seen, now):
     кто сегодня взял больше чатов (порядок задаёт вызывающий). Не в системе — остальные
     (уволенных нет), «с» — конец последнего интервала.
     """
-    counts = {'online': 0, 'busy': 0, 'training': 0, 'break': 0, 'other': 0}
+    counts = {'online': 0, 'holiday': 0, 'training': 0, 'break': 0, 'other': 0}
     on_shift, offline = [], []
     seen_ids = set()
     for operator in ctx.roster:
@@ -328,9 +334,7 @@ def _status_people(ctx, now_status, seen, now):
                             'since': seen.get(operator_id)})
             continue
         key = status['key']
-        bucket = {'available': 'online', 'busy': 'busy', 'training': 'training',
-                  'break': 'break'}.get(key, 'other')
-        counts[bucket] += 1
+        counts[STATUS_BUCKET.get(key, 'other')] += 1
         on_shift.append({
             'operator_id': operator_id,
             'name': operator.get('name') or '',
@@ -425,10 +429,11 @@ def wallboard_snapshot(db, ctx, *, now=None, target_seconds=120):
         'target_seconds': target_seconds,
         'now': {
             'operators_online': counts['online'] if live else len(people),
-            'operators_busy': counts['busy'] if live else None,
+            # Отдельного «Занят» у Syntony теперь нет: её «Занят» — закрытие чатов (27.11.2026).
+            'operators_busy': None,
             'operators_on_training': counts['training'] if live else None,
             'operators_on_break': counts['break'] if live else None,
-            'operators_on_holiday': None,
+            'operators_on_holiday': counts['holiday'] if live else None,
             'operators_other': counts['other'] if live else None,
             'operators_offline': len(offline_people),
             'open_chats': None,

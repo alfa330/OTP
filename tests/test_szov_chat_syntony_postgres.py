@@ -75,6 +75,13 @@ def db():
     handle = _Db(name)
     with handle._get_cursor() as cur:
         schema.init_syntony_chats_schema(cur)
+        # График работы: по нему часы биллинга режут «Закрытие чатов» сменой (billing.shift_spans).
+        cur.execute("""
+            CREATE TABLE work_shifts (
+                id SERIAL PRIMARY KEY, operator_id INTEGER NOT NULL, shift_date DATE NOT NULL,
+                start_time TIME NOT NULL, end_time TIME NOT NULL,
+                shift_type VARCHAR(32) NOT NULL DEFAULT 'regular')
+        """)
     try:
         yield handle
     finally:

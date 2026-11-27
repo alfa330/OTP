@@ -9,8 +9,11 @@
 * **первый ответ и SL** — по диалогам, начатым в эти сутки: от первого сообщения водителя, а
   если чат передал ИИ — от передачи (правило табло, metrics.conversation_facts);
 * **ответ внутри чата** — среднее по ходам водителя, начатым в эти сутки (тоже правило табло);
-* **сотрудники по часам** — секунды статуса «Онлайн» Syntony; за сутки без статусов —
-  онлайн по ответам за 15 минут, как считало табло до статусов.
+* **сотрудники по часам** — секунды статуса «Онлайн» Syntony и «Закрытия чатов» (её «Занят»)
+  внутри смены человека по графику (решения владельца 27.11.2026: закрытие чатов засчитывается
+  в часы, но по смене — забытый на ночь «Занят» в часы не идёт); за сутки без статусов — онлайн
+  по ответам за 15 минут, как считало табло до статусов. Сутки, собранные раньше по одному
+  «Онлайн», пересобираются сами (restaff_days).
 
 Переписка Syntony хранится 30 дней (sync.KEEP_DAYS), а биллинг смотрят за любой месяц, поэтому
 сутки сворачиваются в «чат дня» — строку на диалог, как обращение Chat2Desk в c2d_requests, —
@@ -60,8 +63,13 @@ REBUILD_MAX_AGE_DAYS = 29
 # Догонять прошлые сутки — не больше стольких за прогон: каждые сутки — чтение ~25 тыс. сообщений.
 BACKFILL_DAYS_PER_RUN = 3
 
-STAFF_FROM_STATUSES = 'status'
+# Откуда сотрудники по часам: по статусам «Онлайн» + «Закрытие чатов» внутри смены (с
+# 27.11.2026), по статусам только «Онлайн» (прежнее правило — такие сутки пересобираются) или по
+# ответам.
+STAFF_FROM_STATUSES = 'status_work'
+STAFF_FROM_ONLINE_ONLY = 'status'
 STAFF_FROM_REPLIES = 'replies'
+RESTAFF_SOURCES = frozenset({STAFF_FROM_REPLIES, STAFF_FROM_ONLINE_ONLY})
 
 
 def park_of(channel_id, park_name):
@@ -206,6 +214,44 @@ def reply_line_seconds_by_hour(activity, resolve, day_start, hours, until=None,
     return per_hour
 
 
+def _roster_ids(ctx):
+    out = set()
+    for operator in getattr(ctx, 'roster', None) or []:
+        try:
+            out.add(int((operator or {})['id']))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return sorted(out)
+
+
+def shift_span(shift_day, start_time, end_time):
+    """Смена графика → (начало, конец) с поясом Алматы. Конец не позже начала — смена за полночь
+    (22:00–06:00, 18:00–00:00)."""
+    begin = datetime.combine(shift_day, start_time, tzinfo=szov.LOCAL_TZ)
+    end = datetime.combine(shift_day, end_time, tzinfo=szov.LOCAL_TZ)
+    if end <= begin:
+        end += timedelta(days=1)
+    return begin, end
+
+
+def shift_spans(cursor, operator_ids, day):
+    """{id сотрудника: [(начало, конец)]} — смены по графику работы (work_shifts, любой вид
+    смены, как у «Учёта часов»), задевающие сутки day: с ночной сменой накануне."""
+    if not operator_ids:
+        return {}
+    cursor.execute("""
+        SELECT operator_id, shift_date, start_time, end_time
+          FROM work_shifts
+         WHERE operator_id = ANY(%s) AND shift_date BETWEEN %s AND %s
+    """, (list(operator_ids), day - timedelta(days=1), day))
+    out = {}
+    for operator_id, shift_day, start_time, end_time in cursor.fetchall():
+        if shift_day is None or start_time is None or end_time is None:
+            continue
+        out.setdefault(int(operator_id), []).append(shift_span(shift_day, start_time, end_time))
+    return out
+
+
 def staff_rows(per_hour, source):
     return [{'hour': hour, 'operator_id': operator_id, 'online_seconds': int(seconds),
              'source': source}
@@ -309,7 +355,10 @@ def build_day(db, ctx, day, *, now):
     status_state, intervals, _seen = szov._load_statuses(db, start, until)
     if szov.statuses_cover(status_state, start, until - timedelta(minutes=5) if now < end else end):
         match = statuses.matcher(ctx.roster, ctx.resolve)
-        staff = staff_rows(statuses.line_seconds_by_hour(intervals, match, start, hours, until=until),
+        with db._get_cursor() as cursor:
+            shifts = shift_spans(cursor, _roster_ids(ctx), day)
+        staff = staff_rows(statuses.work_seconds_by_hour(intervals, match, start, hours, until=until,
+                                                         shifts=shifts),
                            STAFF_FROM_STATUSES)
         source = STAFF_FROM_STATUSES
     else:
@@ -331,9 +380,9 @@ def days_to_build(journal, *, first_day, now, restaff=()):
     """Какие сутки собирать сейчас: сегодня всегда; вчера и раньше — пока не собраны целиком
     (не дальше 29 дней: переписка старше удалена), прошлые — не больше 3 за прогон, свежие сначала.
 
-    restaff — собранные целиком сутки, где сотрудники по часам посчитаны по ответам, а статусы
-    Syntony их теперь покрывают (метод отдал историю задним числом): их сотрудники пересчитываются
-    по статусам — в той же очереди прошлых суток.
+    restaff — собранные целиком сутки, где сотрудники по часам посчитаны не по нынешнему правилу
+    (по ответам, а статусы Syntony их теперь покрывают, или по одному «Онлайн» без закрытия
+    чатов): их сотрудники пересчитываются по статусам — в той же очереди прошлых суток.
     """
     today = now.astimezone(szov.LOCAL_TZ).date()
     floor = max(first_day, today - timedelta(days=REBUILD_MAX_AGE_DAYS))
@@ -349,16 +398,18 @@ def days_to_build(journal, *, first_day, now, restaff=()):
 
 
 def restaff_days(journal, state, *, now, keep_days=None):
-    """Собранные целиком прошлые сутки со «сотрудниками по ответам», которые статусы Syntony
-    теперь покрывают целиком. Не старше срока хранения переписки (sync.keep_days): сутки
-    пересобираются по ней целиком, а старше — её уже нет."""
+    """Собранные целиком прошлые сутки, чьи сотрудники по часам посчитаны не по нынешнему
+    правилу, а статусы Syntony их покрывают целиком: «по ответам» (статусы пришли задним числом)
+    или «только Онлайн» (собраны до 27.11.2026, когда в часы добавили закрытие чатов). Не старше
+    срока хранения переписки (sync.keep_days): сутки пересобираются по ней целиком, а старше —
+    её уже нет."""
     today = now.astimezone(szov.LOCAL_TZ).date()
     keep = sync.keep_days() if keep_days is None else keep_days
     oldest = today - timedelta(days=max(1, min(REBUILD_MAX_AGE_DAYS, int(keep) - 1)))
     out = set()
     for day, entry in journal.items():
         if day >= today or day < oldest or not entry.get('complete') \
-                or entry.get('staff_source') != STAFF_FROM_REPLIES:
+                or entry.get('staff_source') not in RESTAFF_SOURCES:
             continue
         start, end = szov.local_day_bounds(day)
         if szov.statuses_cover(state, start, end):

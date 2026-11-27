@@ -2540,8 +2540,9 @@ def _chat_billing_fact_staff_tx(cursor, day_from: date, day_to: date,
     """(день, час, чатник, секунды онлайн).
 
     До syntony_from — те же сегменты статусов Chat2Desk, что факт чатнико-часов раздела; с
-    него — секунды «Онлайн» Syntony из сборки суток (syntony_chats/billing.py; за сутки без
-    статусов там онлайн по ответам за 15 минут).
+    него — рабочие секунды Syntony из сборки суток: «Онлайн» и «Закрытие чатов» (её «Занят»)
+    внутри смены по графику (решения владельца 27.11.2026; syntony_chats/billing.py; за сутки
+    без статусов там онлайн по ответам за 15 минут).
     """
     cutover = syntony_from or chat_billing_syntony_from()
     rows: List[Tuple[Any, ...]] = []

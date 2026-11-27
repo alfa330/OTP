@@ -769,9 +769,14 @@ def build_szov_wallboard_blueprint(
                     ('Не в системе', _int(now_block.get('operators_offline')), None),
                 ])
             else:
+                # У Syntony отдельного «Занят» нет: её «Занят» у чатников — закрытие чатов
+                # (решение владельца 27.11.2026), так он и назван на листе «Чатники».
+                busy_row = (('Закрытие чатов', _int(now_block.get('operators_on_holiday')), None)
+                            if now_block.get('operators_busy') is None else
+                            ('Занят', _int(now_block.get('operators_busy')), None))
                 _block('Чатники · сейчас', [
                     ('Онлайн', _int(now_block.get('operators_online')), None),
-                    ('Занят', _int(now_block.get('operators_busy')), None),
+                    busy_row,
                     ('Тренинг', _int(now_block.get('operators_on_training')), None),
                     ('На перерыве', _int(now_block.get('operators_on_break')), None),
                     ('В прочих статусах', _int(now_block.get('operators_other')), None),
