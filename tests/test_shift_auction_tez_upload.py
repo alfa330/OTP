@@ -580,8 +580,12 @@ class ReviewFixesWiringTests(unittest.TestCase):
         self.assertIn("sizeKey={preview ? 'preview' : 'pick'}", SHEET_SOURCE)
 
     def test_generation_link_is_hidden_on_phone_too(self):
-        self.assertIn("if (canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function') {", VIEW_SOURCE)
-        self.assertIn("canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function' ? (", VIEW_SOURCE)
+        # С IC-1 к условию добавлен canOpenResourceGeneration(direction): планировщик «Основы ОП»
+        # открыт только суперадмину и главе ОП. Правило Тез КЦ (!isUploadDirection) — на обоих экранах.
+        self.assertIn("if (canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function'\n"
+                      "      && canOpenResourceGeneration(direction)) {", VIEW_SOURCE)
+        self.assertIn("canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function'\n"
+                      "              && canOpenResourceGeneration(direction) ? (", VIEW_SOURCE)
 
     def test_requested_direction_is_applied_once(self):
         self.assertIn("if (appliedRequestedDirectionKeyRef.current === requestedDirectionKey) return;", VIEW_SOURCE)

@@ -1,9 +1,10 @@
 /*
  * IC-1 (#470): «Основа ОП» — расчёт ресурсов и аукцион смен отдела продаж.
  *
- * Руководство отдела (глава и СВ) получает «Расчет ресурсов → Основа ОП» и аукцион; из
- * рядовых — только операторы «Основы ОП» (модель направления op_osnova): прогон аукциона
- * есть лишь у неё, а «Яндекс Регистрация», «Поток» и верификаторы в нём не участвуют.
+ * «Расчет ресурсов → Основа ОП» — только глава отдела (владелец 27.11: «на данный момент
+ * только суперадминам и руководителю ОП»); аукцион ведут глава и СВ, из рядовых в нём —
+ * только операторы «Основы ОП» (модель направления op_osnova): прогон аукциона есть лишь у
+ * неё, а «Яндекс Регистрация», «Поток» и верификаторы в нём не участвуют.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,9 +30,9 @@ test('стажёру «Основы» аукцион не открывается
   assert.equal(departmentAllowsView({ ...salesOperator('op_osnova'), role: 'trainee' }, 'shift_auction'), false);
 });
 
-test('СВ и глава отдела продаж видят расчёт «Основы ОП» и аукцион', () => {
+test('расчёт «Основы ОП» — у главы отдела продаж; аукцион — у главы и СВ', () => {
   const sv = { id: 9002, role: 'sv', department_code: 'op', department_id: 367 };
-  assert.equal(departmentAllowsView(sv, 'resource_fte_op'), true);
+  assert.equal(departmentAllowsView(sv, 'resource_fte_op'), false);
   assert.equal(departmentAllowsView(sv, 'shift_auction'), true);
   // Линия и чат СЗоВ — не их раздел.
   assert.equal(departmentAllowsView(sv, 'resource_fte'), false);

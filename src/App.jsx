@@ -2296,11 +2296,11 @@ const canAccessResourceFteSectionForUser = (userLike) => {
     return role === 'super_admin' || role === 'admin' || isSupervisorRole(role);
 };
 
-/* «Расчет ресурсов → Основа ОП» (IC-1, #470) — входящая линия отдела продаж. Суперадмин —
-   да; админ и СВ — только руководство отдела продаж (свой или возглавляемый отдел 'op'):
-   ровно этот круг ведёт и аукцион «Основы», а общему админу другого отдела планировщик
-   показал бы вместо него аукцион его отдела. СВ СЗоВ и Тез КЦ расчёт ресурсов открыт, но
-   этот вариант не их. Та же граница на бэкенде — _resource_fte_op_route_guard. */
+/* «Расчет ресурсов → Основа ОП» (IC-1, #470) — входящая линия отдела продаж. Владелец 27.11:
+   «на данный момент только суперадминам и руководителю ОП» — суперадмин и глава отдела продаж
+   (отдел, где человек указан главой). Админы и СВ отдела без главенства раздел пока не видят,
+   аукцион «Основы» ведут без перехода в планировщик. Та же граница на бэкенде —
+   _resource_fte_op_route_guard. */
 const OP_RESOURCE_DEPARTMENT_CODE = 'op';
 const canAccessOpResourceFteForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
@@ -2311,8 +2311,7 @@ const canAccessOpResourceFteForUser = (userLike) => {
         .filter(Boolean);
     const headedCode = String(userLike?.headed_department_code || '').trim().toLowerCase();
     if (headedCode) headedCodes.push(headedCode);
-    const ownCode = String(userLike?.department_code ?? userLike?.departmentCode ?? '').trim().toLowerCase();
-    return ownCode === OP_RESOURCE_DEPARTMENT_CODE || headedCodes.includes(OP_RESOURCE_DEPARTMENT_CODE);
+    return headedCodes.includes(OP_RESOURCE_DEPARTMENT_CODE);
 };
 
 const canManageFourYouForUser = (userLike) => (
@@ -48098,6 +48097,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setResourceFteInitialView('schedule_planner');
                 navigateToView(direction === 'op_osnova' ? 'resource_fte_op' : 'resource_fte');
             }, [navigateToView]);
+            // Планировщик «Основы» открыт не всем, кто ведёт её аукцион (владелец 27.11: расчёт —
+            // только суперадмину и главе ОП): СВ ОП кнопка вела бы в закрытый раздел.
+            const canOpenAuctionResourceGeneration = useCallback(
+                (direction) => direction !== 'op_osnova' || canAccessOpResourceFteSection,
+                [canAccessOpResourceFteSection],
+            );
 
             const openShiftAuctionSection = useCallback((period = null) => {
                 const dateFrom = String(period?.dateFrom || period?.date_from || '').trim();
@@ -59722,6 +59727,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     onOpenResourceGeneration={openResourceScheduleGeneration}
+                                    canOpenResourceGeneration={canOpenAuctionResourceGeneration}
                                     initialPeriod={shiftAuctionInitialPeriod}
                                     onInitialPeriodApplied={clearShiftAuctionInitialPeriod}
                                     onDepartmentShown={setShiftAuctionDepartmentShown}

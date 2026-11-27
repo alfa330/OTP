@@ -4649,7 +4649,11 @@ const ShiftAuctionShiftsTable = ({
   );
 };
 
-const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration, initialPeriod = null, onInitialPeriodApplied = null, onDepartmentShown = null }) => {
+// canOpenResourceGeneration(direction) — открыт ли человеку планировщик прогона: у «Основы ОП»
+// он только у суперадмина и главы отдела (владелец 27.11), а аукцион ведут и СВ ОП.
+const ALWAYS_OPEN_RESOURCE_GENERATION = () => true;
+
+const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration, canOpenResourceGeneration = ALWAYS_OPEN_RESOURCE_GENERATION, initialPeriod = null, onInitialPeriodApplied = null, onDepartmentShown = null }) => {
   const role = normalizeRole(user?.role);
   const departmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
   // Супервайзеры СЗоВ, Тез КЦ (задача #124) и отдела продаж (IC-1) управляют
@@ -7723,7 +7727,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
     // Тому же условию, что на компьютере: у направлений со сменами из файла (Тез КЦ)
     // генерации нет — пункт вёл бы в «Расчёт ресурсов» СЗоВ.
-    if (canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function') {
+    if (canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function'
+      && canOpenResourceGeneration(direction)) {
       links.push(
         <AuctionPhoneLinkRow
           key="generation"
@@ -9174,7 +9179,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 })}
               </div>
             ) : null}
-            {canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function' ? (
+            {canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function'
+              && canOpenResourceGeneration(direction) ? (
               <button
                 type="button"
                 // Прогон — чтобы «Основа ОП» вела в свой планировщик, а не в линию СЗоВ.

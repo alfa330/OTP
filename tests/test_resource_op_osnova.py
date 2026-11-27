@@ -522,14 +522,15 @@ class BackendRoutesTests(unittest.TestCase):
         body = ast.get_source_segment(self.source, node)
         self.assertEqual(body.count('direction_mode=OP_AUCTION_MODE'), 2)
 
-    def test_guard_admits_only_super_admin_and_sales_management(self):
-        # Общий админ другого отдела не ведёт аукцион «Основы» — и расчёт ему не открыт,
-        # иначе планировщик показал бы ему аукцион его отдела вместо «Основы» (разбор 27.11).
+    def test_guard_admits_only_super_admin_and_the_sales_head(self):
+        # Владелец 27.11: «на данный момент только суперадминам и руководителю ОП» — глава
+        # отдела продаж по departments.head_user_id; свой отдел ОП (админ, СВ) уже не пропуск.
         node = self._route_functions('/api/resource_fte/op/')['/api/resource_fte/op/overview']
         guard = self.source[self.source.index('def _resource_fte_op_route_guard'):]
         guard = guard[:guard.index('def _resource_fte_op_value_error')]
         self.assertNotIn("role == 'admin' and not", guard)
-        self.assertIn('if OP_DEPARTMENT_CODE in codes:', guard)
+        self.assertIn('if OP_DEPARTMENT_CODE in set(_headed_department_codes(requester_id) or []):', guard)
+        self.assertNotIn('get_shift_auction_staff_department_codes', guard)
         self.assertIn('_resource_fte_op_route_guard()', ast.get_source_segment(self.source, node))
 
     def test_billing_does_not_need_oktell(self):
@@ -723,12 +724,23 @@ class FrontendWiringTests(unittest.TestCase):
         source = _read('src/App.jsx')
         self.assertIn("['chat', 'line', 'op_osnova'].includes(directionRaw)", source)
 
-    def test_menu_predicate_matches_the_auction_staff(self):
+    def test_menu_predicate_is_super_admin_and_the_sales_head(self):
         app = _read('src/App.jsx')
         block = app[app.index('const canAccessOpResourceFteForUser'):]
         block = block[:block.index('};') + 2]
-        self.assertNotIn("role === 'admin' && !headedCodes.length", block)
-        self.assertIn("return ownCode === OP_RESOURCE_DEPARTMENT_CODE || headedCodes.includes(OP_RESOURCE_DEPARTMENT_CODE);", block)
+        self.assertIn("if (role === 'super_admin') return true;", block)
+        self.assertIn('return headedCodes.includes(OP_RESOURCE_DEPARTMENT_CODE);', block)
+        self.assertNotIn('ownCode', block)
+
+    def test_auction_generation_button_needs_the_osnova_planner(self):
+        # СВ ОП ведут аукцион «Основы», но планировщик им закрыт — кнопка вела бы в отказ.
+        app = _read('src/App.jsx')
+        self.assertIn("(direction) => direction !== 'op_osnova' || canAccessOpResourceFteSection,", app)
+        self.assertIn('canOpenResourceGeneration={canOpenAuctionResourceGeneration}', app)
+        view = _read('src/components/resources/ShiftAuctionView.jsx')
+        self.assertIn('canOpenResourceGeneration = ALWAYS_OPEN_RESOURCE_GENERATION', view)
+        self.assertEqual(view.count("typeof onOpenResourceGeneration === 'function'\n"), 2)
+        self.assertEqual(view.count('&& canOpenResourceGeneration(direction)'), 2)
 
     def test_planner_ignores_lots_of_another_run(self):
         planner = _read('src/components/resources/ResourceSchedulePlanner.jsx')

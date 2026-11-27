@@ -12510,11 +12510,10 @@ def api_resource_fte_recalculate():
 def _resource_fte_op_route_guard():
     """Кому открыт расчёт «Основы ОП» — та же граница, что у пункта меню на фронте.
 
-    Суперадмин — да. Остальные (админ и СВ) — только руководство отдела продаж: свой или
-    возглавляемый отдел 'op'. Ровно этот круг ведёт и прогон аукциона «Основы»
-    (_shift_auction_staff_modes): общий админ другого отдела увидел бы в планировщике
-    вместо её аукциона аукцион своего отдела. СВ СЗоВ и Тез КЦ расчёт ресурсов видят,
-    но этот вариант им не принадлежит."""
+    Владелец 27.11.2026: «на данный момент только суперадминам и руководителю ОП» — суперадмин
+    и глава отдела продаж (departments.head_user_id). Админы и СВ отдела без главенства раздел
+    пока не видят; аукцион «Основы» они ведут по-прежнему (_shift_auction_staff_modes), только
+    без перехода в планировщик. СВ СЗоВ и Тез КЦ расчёт ресурсов видят, но этот вариант не их."""
     requester_id, guard_response, guard_status = _resource_fte_route_guard()
     if guard_response is not None:
         return requester_id, guard_response, guard_status
@@ -12523,14 +12522,9 @@ def _resource_fte_op_route_guard():
     role = normalize_role_value(requester[3]) if requester else ''
     if role == 'super_admin':
         return requester_id, None, None
-    codes = set(_headed_department_codes(requester_id) or [])
-    try:
-        codes |= set(db.get_shift_auction_staff_department_codes(requester_id) or [])
-    except Exception:
-        pass
-    if OP_DEPARTMENT_CODE in codes:
+    if OP_DEPARTMENT_CODE in set(_headed_department_codes(requester_id) or []):
         return requester_id, None, None
-    return None, jsonify({"error": "Расчет «Основы ОП» открыт руководителям отдела продаж"}), 403
+    return None, jsonify({"error": "Расчет «Основы ОП» пока открыт суперадминам и руководителю отдела продаж"}), 403
 
 
 def _resource_fte_op_value_error(error):
