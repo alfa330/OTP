@@ -6,6 +6,7 @@
 Охват — забота базы (tests/test_task_search_wiring.py); здесь — что прощается,
 что нет и в каком порядке встают находки. Модуль чистый: ни базы, ни Flask.
 """
+import gc
 import random
 import time
 import unittest
@@ -378,10 +379,19 @@ class SpeedTests(unittest.TestCase):
                     description='Нужно до пятницы, данные взять из выгрузки Oktell. ' * rnd.randint(0, 3),
                     people=rnd.sample(names, 2), code='HR', number=index)
                 for index in range(1, 3001)]
-        started = time.perf_counter()
-        for query in ('отчт', 'табель ноябрь', 'жана', 'HR-125', 'jnxtn', 'сотрдуник', 'выгрузку oktell'):
-            ts.search(query, docs)
-        per_query = (time.perf_counter() - started) / 7
+        # Замер как у timeit: без этого в окно попадает полная сборка мусора кучи всего
+        # прогона (на CI 19 тыс. тестов в одном процессе), а сам поиск даёт ~480 проходов
+        # сборщика за семь запросов. 27.11 тест дважды упал на CI у коммита, который поиск
+        # не трогал (1,11 с и 0,67 с на запрос); куча в 12 млн объектов здесь же — +1,7 с.
+        gc.collect()
+        gc.disable()
+        try:
+            started = time.perf_counter()
+            for query in ('отчт', 'табель ноябрь', 'жана', 'HR-125', 'jnxtn', 'сотрдуник', 'выгрузку oktell'):
+                ts.search(query, docs)
+            per_query = (time.perf_counter() - started) / 7
+        finally:
+            gc.enable()
         # Обычно ~25 мс; потолок с запасом на медленную машину CI.
         self.assertLess(per_query, 0.5)
 
