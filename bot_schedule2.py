@@ -54769,12 +54769,15 @@ def _hr_office_viewer(requester_id, requester):
 
 
 def _hr_office_features_for(user_id, role):
-    """Новое из ТЗ HR «iCore 4» в общих окнах — пока идёт пилот «Кадров», только его учёткам."""
+    """Новое из ТЗ HR «iCore 4» в общих окнах — пока идёт пилот «Кадров», только его учёткам:
+    суперадминам, отделу кадров (членство в отделе — тот же признак, что is_hr у ручек раздела)
+    и учёткам списка."""
     if user_id is None:
         return False
     try:
         from hr_office import rules as hr_office_rules  # noqa: E402
-        return hr_office_rules.pilot_allows(user_id, _normalize_user_role(role))
+        return hr_office_rules.pilot_allows(user_id, _normalize_user_role(role),
+                                            is_hr=bool(_is_employee_accounting_manager(user_id)))
     except Exception:
         logging.exception("Кадры: не удалось определить пилот для пользователя %s", user_id)
         return False

@@ -96,8 +96,8 @@ def build_hr_office_blueprint(*, db, require_api_key, build_cors_preflight_respo
                         return jsonify({'error': message}), status
                     ctx = viewer_context(requester_id, requester)
                     # Пилот (rules.PILOT_USER_IDS): пока идёт проверка, ручки «Кадров» отвечают
-                    # только суперадминам и учёткам списка — для остальных раздела ещё нет.
-                    if not rules.pilot_allows(ctx['user_id'], ctx['role']):
+                    # только суперадминам, отделу кадров и учёткам списка — для остальных раздела ещё нет.
+                    if not rules.pilot_allows(ctx['user_id'], ctx['role'], is_hr=ctx.get('is_hr')):
                         return jsonify({'error': 'Раздел «Кадры» пока открыт только для проверки',
                                         'code': 'HR_PILOT'}), 403
                     return handler(*args, ctx=ctx, today=today_almaty(), **kwargs)
