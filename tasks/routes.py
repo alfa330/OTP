@@ -1818,6 +1818,9 @@ def build_tasks_blueprint(
                         "has_more": has_more
                     },
                     "query": query_text,
+                    # Поиск с опечатками: запрос, найденный только в исправленной
+                    # раскладке («jnxtn» → «отчет»), — экран так и подпишет.
+                    "search": payload.get("search"),
                     "filters": {
                         "status": status_filter,
                         "tag": tag_filter,

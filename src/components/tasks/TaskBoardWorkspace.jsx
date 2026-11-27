@@ -7,7 +7,9 @@ import FullscreenSheet from '../common/FullscreenSheet';
 import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
 import { ACTION_NEED_META } from './taskActionNeeds';
-import { BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, normalizeBoardChunk } from './boardQuery';
+import { BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, normalizeBoardChunk, scopeQueryParams } from './boardQuery';
+import { BOARD_SEARCH_PAGE, OPEN_WINDOW_SELECTOR, SEARCH_TIER_PARTIAL, foundLabel, searchTierOf } from './taskSearch';
+import useTaskBoardSearch from './useTaskBoardSearch';
 import { BOARD_COLUMNS, BOARD_COLUMN_STATE, columnOfTask, mergeBoardRows, overrideFromServer, resolveBoardDrop, sendBoardMove, transientColumnsKnown, visibleBoardColumns } from './boardColumns';
 import {
   PRIORITY_SCORE_HINT,
@@ -505,12 +507,128 @@ const TaskKeyLabel = ({ task, className = '' }) => {
   return <span className={className}>{parts.join(' · ')}</span>;
 };
 
-const EmptyState = ({ title, hint }) => (
+const EmptyState = ({ title, hint, children = null }) => (
   <div className="grid place-items-center rounded-2xl border border-dashed border-slate-200 px-6 py-12 text-center">
     <p className="text-[13.5px] font-medium text-slate-600">{title}</p>
     {hint && <p className="mt-1 max-w-sm text-[12px] leading-relaxed text-slate-400">{hint}</p>}
+    {children}
   </div>
 );
+
+/* ─────────────── Поиск по доске (владелец 27.11.2026) ─────────────── */
+
+/* Поле поиска — справа в панели доски, как поиск в окне macOS. Пока в нём
+   текст, вместо колонок стоит выдача — те же карточки, что в «Все задачи». */
+const SearchGlyph = () => (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+    <circle cx="7" cy="7" r="4.6" stroke="currentColor" strokeWidth="1.7" />
+    <path d="m10.6 10.6 3.2 3.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+  </svg>
+);
+
+const BoardSearchField = React.forwardRef(({
+  text, isPending, onChange, onClear, onKeyDown, onFocus, onBlur,
+}, ref) => (
+  <label className={`tb-search${text ? ' has-text' : ''}`}>
+    <span className={`tb-search-icon${isPending ? ' is-pending' : ''}`} aria-hidden="true">
+      {isPending ? <span className="tb-search-spinner" /> : <SearchGlyph />}
+    </span>
+    <input
+      ref={ref}
+      type="search"
+      value={text}
+      onChange={(event) => onChange(event.target.value)}
+      onKeyDown={onKeyDown}
+      onFocus={onFocus}
+      onBlur={onBlur}
+      placeholder="Поиск по доске"
+      aria-label="Поиск задач на выбранной доске и в выбранном проекте"
+      title="Поиск по доске — Ctrl+K или ⌘K"
+      autoComplete="off"
+      spellCheck={false}
+      enterKeyHint="search"
+    />
+    {text && (
+      <button type="button" className="tb-search-clear" aria-label="Очистить поиск" onClick={onClear}>
+        <svg width="8" height="8" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+          <path d="m2 2 6 6M8 2 2 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+      </button>
+    )}
+  </label>
+));
+BoardSearchField.displayName = 'BoardSearchField';
+
+const SEARCH_HINT = 'Ищет на выбранной доске и в выбранном проекте: в теме, описании, по людям '
+  + 'и по ключу задачи (HR-125 или просто номер). Прощает ошибку в букве, другое окончание слова '
+  + 'и забытую раскладку. Сначала — точные совпадения, ниже — похожие по написанию.';
+
+const BoardSearchResults = ({
+  search, tasks, activeId, renderList, canWiden, onWiden, onLoadMore, onRetry,
+}) => {
+  // Первый ответ по строке ещё не пришёл — места под выдачу не схлопываем.
+  const waiting = search.isPending && !tasks.length;
+  const rest = Math.max(0, search.total - tasks.length);
+  // Всех слов на этой доске нет ни в одной задаче — возможно, задача на другой доске.
+  const onlyPartial = tasks.length > 0 && tasks.every((task) => searchTierOf(task) === SEARCH_TIER_PARTIAL);
+  return (
+    <section className="tb-search-results" aria-label="Найденные задачи" aria-busy={search.isPending}>
+      {/* Сбой без находок — «Ничего не нашлось» было бы неправдой: мы не знаем.
+          Тогда на экране только ошибка с «Повторить». */}
+      {!(search.error && !tasks.length) && (
+        <div className="tb-search-summary">
+          <span className="tb-search-count" aria-live="polite">
+            {waiting ? 'Ищу…' : foundLabel(search.total)}
+          </span>
+          {search.layout && !waiting && (
+            <span className="tb-search-layout">раскладка исправлена: «{search.layout}»</span>
+          )}
+          <InfoHint side="left" text={SEARCH_HINT} />
+        </div>
+      )}
+      {search.error && (
+        <p className="tb-search-error">
+          {search.error}
+          <button type="button" className="tb-search-retry" onClick={onRetry}>Повторить</button>
+        </p>
+      )}
+      {waiting && (
+        <div className="space-y-2">
+          {[0, 1, 2].map((index) => (
+            <div key={index} className="h-14 animate-pulse rounded-2xl bg-slate-100" />
+          ))}
+        </div>
+      )}
+      {!waiting && tasks.length > 0 && renderList(tasks, { activeId })}
+      {!waiting && !tasks.length && !search.error && (
+        <EmptyState
+          title="Ничего не нашлось"
+          hint="Поиск идёт по выбранной доске и проекту. Проверьте выбор или сократите запрос."
+        >
+          {canWiden && (
+            <button type="button" className="tb-search-widen" onClick={onWiden}>
+              Искать везде
+            </button>
+          )}
+        </EmptyState>
+      )}
+      {!waiting && search.hasMore && (
+        <div className="tb-search-more">
+          <button type="button" onClick={onLoadMore} disabled={search.loadingMore}>
+            {search.loadingMore ? 'Загружаю…' : `Показать ещё ${Math.min(BOARD_SEARCH_PAGE, rest)}`}
+          </button>
+        </div>
+      )}
+      {!waiting && onlyPartial && canWiden && !search.hasMore && (
+        <div className="tb-search-more">
+          <button type="button" className="tb-search-widen" onClick={onWiden}>
+            Искать везде
+          </button>
+        </div>
+      )}
+    </section>
+  );
+};
 
 /* ─────────────── Поповер планирования (оценка + срок) ─────────────── */
 
@@ -1840,6 +1958,11 @@ const TaskBoardWorkspace = ({
   onMoveTask,
   onCreateBacklogItem,
   onExport,
+  // Поиск по доске: запрос к серверу и отрисовка выдачи карточками раздела.
+  searchTasks = null,
+  renderSearchList = null,
+  // «Искать везде»: раздел снимает выбор проекта и раздела (доску снимает сама доска).
+  onWidenSearch = null,
   notify,
 }) => {
   const [scope, setScope] = useState('my');
@@ -2286,10 +2409,140 @@ const TaskBoardWorkspace = ({
     }
   }, [onExport, isExporting, scope, projectId, sectionId]);
 
+  /* Поиск по доске (владелец 27.11.2026: «поиск будет искать по выбранной доске
+     и проекту»). Охват — тот же, что у доски и выгрузки: «Моя доска / На мне /
+     Все / сотрудник» отсюда и проект с разделом из шапки раздела. Пока в поле
+     текст, вместо колонок — выдача; стёрли — доска на месте, без перезагрузки. */
+  const canSearch = typeof searchTasks === 'function' && typeof renderSearchList === 'function';
+  const searchScopeParams = useMemo(
+    () => scopeQueryParams(scope, projectId, sectionId),
+    [scope, projectId, sectionId]
+  );
+  const search = useTaskBoardSearch({
+    searchTasks: canSearch ? searchTasks : null,
+    scopeKey: `${scope}|${projectId}|${sectionId}`,
+    scopeParams: searchScopeParams,
+    reloadToken,
+  });
+  const isSearching = canSearch && search.isActive;
+  const searchInputRef = useRef(null);
+  const searchResultsRef = useRef(null);
+  const openOnArrivalRef = useRef(false);
+  const [isSearchFocused, setIsSearchFocused] = useState(false);
+  const [activeSearchIndex, setActiveSearchIndex] = useState(0);
+  // Карточку правили в открытой задаче (чек-лист, отчёты) — выдача показывает правку.
+  const searchResults = useMemo(() => search.tasks.map((task) => (
+    taskPatches?.[task.id] ? { ...taskPatches[task.id], search_match: task.search_match } : task
+  )), [search.tasks, taskPatches]);
+  const activeSearchTask = searchResults[Math.min(activeSearchIndex, searchResults.length - 1)] || null;
+
+  // Новая строка или другая доска — выбор стрелками снова с первой находки.
+  useEffect(() => { setActiveSearchIndex(0); }, [search.query, scope, projectId, sectionId]);
+
+  // Ctrl+K / ⌘K — к полю поиска. По коду клавиши: на русской раскладке это «л».
+  useEffect(() => {
+    if (!canSearch) return undefined;
+    const onKey = (event) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+      if (event.code !== 'KeyK' && String(event.key).toLowerCase() !== 'k') return;
+      const input = searchInputRef.current;
+      if (!input || isTaskOpen) return;
+      // Открыто окно («Новая задача», правка, окно статуса) — поле под ним, не трогаем.
+      if (document.querySelector(OPEN_WINDOW_SELECTOR)) return;
+      // Человек пишет в другом поле — там Ctrl+K свой (на Mac — «удалить до конца строки»).
+      const target = event.target;
+      if (target !== input && target?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) return;
+      event.preventDefault();
+      input.focus();
+      input.select();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [canSearch, isTaskOpen]);
+
+  // Выбранная стрелками находка не уходит за край окна.
+  useEffect(() => {
+    if (!isSearching || !isSearchFocused) return;
+    searchResultsRef.current?.querySelector('[data-search-active="true"]')?.scrollIntoView?.({ block: 'nearest' });
+  }, [activeSearchIndex, isSearching, isSearchFocused]);
+
+  const handleSearchKeyDown = useCallback((event) => {
+    // Карточка задачи поверх — клавиши её: Esc закрывает карточку, а не стирает поиск.
+    if (isTaskOpen) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (!searchResults.length) return;
+      event.preventDefault();
+      const last = searchResults.length - 1;
+      setActiveSearchIndex((prev) => {
+        const current = Math.min(prev, last);
+        return event.key === 'ArrowDown' ? Math.min(last, current + 1) : Math.max(0, current - 1);
+      });
+      return;
+    }
+    if (event.key === 'Enter') {
+      if (event.nativeEvent?.isComposing) return;
+      event.preventDefault();
+      // На экране ещё выдача прежней строки: откроем первую находку новой, когда
+      // придёт, — а не задачу, которую человек уже не ищет (разбор 27.11.2026).
+      if (search.isPending) {
+        openOnArrivalRef.current = true;
+        return;
+      }
+      if (!activeSearchTask) return;
+      // Фокус уходит из поля: иначе Esc открытой карточки стёр бы строку под ней.
+      event.currentTarget.blur();
+      onOpenTask(activeSearchTask);
+      return;
+    }
+    if (event.key === 'Escape') {
+      // Первый Esc стирает строку, второй уводит из поля.
+      if (search.text) {
+        event.preventDefault();
+        event.stopPropagation();
+        search.clear();
+      } else {
+        event.currentTarget.blur();
+      }
+    }
+  }, [isTaskOpen, searchResults.length, activeSearchTask, onOpenTask, search]);
+
+  const clearSearch = useCallback(() => {
+    openOnArrivalRef.current = false;
+    search.clear();
+    searchInputRef.current?.focus();
+  }, [search]);
+
+  const changeSearchText = useCallback((value) => {
+    // Дописали строку после Enter — прежнее «открыть, когда придёт» уже не про неё.
+    openOnArrivalRef.current = false;
+    search.setText(value);
+  }, [search]);
+
+  // Enter, нажатый до ответа: ответ пришёл — открываем первую находку.
+  useEffect(() => {
+    if (!openOnArrivalRef.current || search.isPending) return;
+    openOnArrivalRef.current = false;
+    const first = searchResults[0];
+    if (!first || isTaskOpen) return;
+    searchInputRef.current?.blur();
+    onOpenTask(first);
+  }, [search.isPending, searchResults, isTaskOpen, onOpenTask]);
+
+  /* Ничего не нашлось (или совпала только часть слов) там, где охват сужен, —
+     одна кнопка снимает сужение целиком: доску, проект и раздел. Снять только
+     доску мало: при выбранном проекте человек снова видел бы пустоту. */
+  const isNarrowProject = String(projectId ?? 'all') !== 'all' || String(sectionId ?? 'all') !== 'all';
+  const canWidenSearch = scope !== 'all' || (isNarrowProject && typeof onWidenSearch === 'function');
+  const widenSearch = useCallback(() => {
+    if (scope !== 'all') changeScope('all');
+    if (isNarrowProject && typeof onWidenSearch === 'function') onWidenSearch();
+  }, [scope, changeScope, isNarrowProject, onWidenSearch]);
+
   /* Доска после полной загрузки ждёт и первую непустую колонку, и ответ по
      временной: без него колонка возврата вставала бы позже и сдвигала соседей.
-     Перезагрузка после действия скелетон не показывает — fetched у колонок остаётся. */
-  if (isBoardMode ? (isColumnsLoading && (!boardRows.length || !isTransientKnown)) : (isPageLoading && !pageTasks.length)) {
+     Перезагрузка после действия скелетон не показывает — fetched у колонок остаётся.
+     Во время поиска доска спрятана — её загрузка поле поиска не убирает. */
+  if (!isSearching && (isBoardMode ? (isColumnsLoading && (!boardRows.length || !isTransientKnown)) : (isPageLoading && !pageTasks.length))) {
     return (
       <div className="space-y-2">
         {[0, 1, 2].map((index) => (
@@ -2313,7 +2566,10 @@ const TaskBoardWorkspace = ({
   return (
     <CardSectionContext.Provider value={!sectionId || sectionId === 'all'}>
     <div className="tb-scope space-y-3" style={{ fontFamily: APPLE_FONT }}>
-      <div className="tb-toolbar flex flex-wrap items-center justify-between gap-2">
+      {/* Во время поиска панель не перестраивается: поле не должно прыгать под
+          курсором. Порядок и порция к выдаче не применяются — они неактивны, а
+          подсказка про перетаскивание невидима, но держит своё место. */}
+      <div className={`tb-toolbar flex flex-wrap items-center justify-between gap-2${isSearching ? ' is-searching' : ''}`}>
         <div className="tb-toolbar-main flex flex-1 flex-wrap items-center gap-2">
           {isAdmin ? (
             <CustomSelect
@@ -2337,6 +2593,7 @@ const TaskBoardWorkspace = ({
               value={boardSort}
               options={BOARD_SORT_OPTIONS}
               onChange={changeBoardSort}
+              disabled={isSearching}
             />
           )}
           <CustomSelect
@@ -2346,13 +2603,29 @@ const TaskBoardWorkspace = ({
             value={chunkSize}
             options={chunkOptions}
             onChange={changeChunkSize}
+            disabled={isSearching}
           />
         </div>
         <div className="tb-toolbar-side flex items-center gap-3">
           {mode === 'board' && (
-            <span className="tb-drag-hint text-[11.5px] text-slate-400">
+            <span
+              className={`tb-drag-hint text-[11.5px] text-slate-400${isSearching ? ' invisible' : ''}`}
+              aria-hidden={isSearching || undefined}
+            >
               Перетащите карточку между колонками, чтобы сменить статус
             </span>
+          )}
+          {canSearch && (
+            <BoardSearchField
+              ref={searchInputRef}
+              text={search.text}
+              isPending={search.isPending}
+              onChange={changeSearchText}
+              onClear={clearSearch}
+              onKeyDown={handleSearchKeyDown}
+              onFocus={() => setIsSearchFocused(true)}
+              onBlur={() => setIsSearchFocused(false)}
+            />
           )}
           {typeof onExport === 'function' && (
             <button
@@ -2374,7 +2647,24 @@ const TaskBoardWorkspace = ({
         <BoardPersonHeader person={focusPerson} stats={focusStats} onReset={() => changeScope('my')} />
       )}
 
-      {mode === 'backlog' && (
+      {isSearching && (
+        <div ref={searchResultsRef}>
+          <BoardSearchResults
+            search={search}
+            tasks={searchResults}
+            // Обводка выбранной стрелками — только пока человек в поле: иначе
+            // первая карточка выглядела бы выбранной сама по себе.
+            activeId={isSearchFocused ? activeSearchTask?.id : null}
+            renderList={renderSearchList}
+            canWiden={canWidenSearch}
+            onWiden={widenSearch}
+            onLoadMore={search.loadMore}
+            onRetry={search.retry}
+          />
+        </div>
+      )}
+
+      {!isSearching && mode === 'backlog' && (
         <BacklogView
           tasks={backlogTasks}
           canPlan={canPlan}
@@ -2387,7 +2677,7 @@ const TaskBoardWorkspace = ({
         />
       )}
 
-      {mode === 'board' && (
+      {!isSearching && mode === 'board' && (
         <BoardView
           tasksByColumn={tasksByColumn}
           canPlan={canPlan}
@@ -2407,7 +2697,7 @@ const TaskBoardWorkspace = ({
         />
       )}
 
-      {mode === 'timeline' && (
+      {!isSearching && mode === 'timeline' && (
         <TimelineView tasks={scopedTasks} onOpen={onOpenTask} />
       )}
 
@@ -2432,7 +2722,7 @@ const TaskBoardWorkspace = ({
         />
       )}
 
-      {!isBoardMode && (
+      {!isBoardMode && !isSearching && (
         <BoardPager
           from={rangeFrom}
           to={rangeTo}

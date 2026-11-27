@@ -980,9 +980,29 @@ body.mobile-shell .tv-root .tb-export-btn svg {
     height: 17px;
 }
 
-body.mobile-shell .tv-root .tb-sort-select {
+/* Поиск по доске — строкой во всю ширину сразу под доской: искать задачу на
+   телефоне нужнее, чем менять порядок карточек. Шрифт 16 px — иначе Safari
+   на iPhone увеличивает страницу, как только поле получает фокус. */
+body.mobile-shell .tv-root .tb-search {
     grid-column: 1 / -1;
     grid-row: 2;
+    width: 100%;
+    min-height: 40px;
+}
+
+body.mobile-shell .tv-root .tb-search input {
+    font-size: 16px;
+}
+
+body.mobile-shell .tv-root .tb-sort-select {
+    grid-column: 1 / -1;
+    grid-row: 3;
+}
+
+/* Во время поиска порядок карточек ни на что не влияет: строка ниже поля, и
+   без неё выдача просто встаёт выше — само поле не сдвигается. */
+body.mobile-shell .tv-root .tb-toolbar.is-searching .tb-sort-select {
+    display: none;
 }
 
 /* Оценку и срок на карточке правят за компьютером: значок в 24 px на каждой

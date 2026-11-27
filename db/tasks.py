@@ -2,6 +2,9 @@
 
 Методы класса Database, вынесено из database.py скриптом scripts/split_database_mixins.py, 02.11.2026,
 без изменений тел. Модульные помощники и константы — в db/core.py."""
+import logging
+
+import task_search
 from db.core import (  # noqa: F401
     _TASK_EMPLOYEE_SQL,
     _TASK_OPEN_ASSIGNEE_SQL,
@@ -3463,29 +3466,13 @@ class TasksMixin:
             filtered_conditions.append(self._TASK_KEY_MATCH_SQL)
             filtered_params.extend([parsed_key[0], parsed_key[1], parsed_key[0], parsed_key[1]])
 
-        if search_text:
-            like_pattern = f"%{search_text}%"
-            # Строка поиска, похожая на ключ задачи (HR-125), ищет и по ключу.
-            search_key = task_projects.parse_task_key(search_text)
-            key_sql = f"OR {self._TASK_KEY_MATCH_SQL}" if search_key else ""
-            # Ищем по ЛЮБОМУ исполнителю, но через EXISTS: джойн на состав
-            # вернул бы задачу с тремя исполнителями трижды.
-            filtered_conditions.append(f"""
-                (
-                    t.subject ILIKE %s
-                    OR COALESCE(t.description, '') ILIKE %s
-                    OR EXISTS (
-                        SELECT 1 FROM task_assignees ta_s
-                        JOIN users au ON au.id = ta_s.user_id
-                        WHERE ta_s.task_id = t.id AND COALESCE(au.name, '') ILIKE %s
-                    )
-                    OR COALESCE(creator.name, '') ILIKE %s
-                    {key_sql}
-                )
-            """)
-            filtered_params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
-            if search_key:
-                filtered_params.extend([search_key[0], search_key[1], search_key[0], search_key[1]])
+        # Поиск (владелец 27.11.2026: «учитывать ошибки букв») условием в SQL не
+        # ставится: опечатку LIKE не простит. База отбирает задачи того же охвата
+        # и тех же фильтров, сопоставляет и ранжирует task_search — см. ниже,
+        # _task_search_page.
+        search_query = task_search.parse_query(search_text) if search_text else None
+        if search_query is not None and search_query.empty:
+            search_query = None  # одни однобуквенные слова — искать нечего
 
         if len(status_values) == 1:
             filtered_conditions.append("t.status = %s")
@@ -3581,20 +3568,23 @@ class TasksMixin:
                     "delegated": int(summary_row[7] or 0)
                 }
 
-            # JOIN к users нужен только поиску по имени постановщика — имена
-            # исполнителей ищет EXISTS внутри самого условия, поэтому строк
-            # по-прежнему столько же, сколько задач, и COUNT(*) честный.
-            count_joins_sql = """
-                LEFT JOIN users creator ON creator.id = t.created_by
-            """ if search_text else ""
-            cursor.execute(f"""
-                SELECT COUNT(*)::INT
-                FROM tasks t
-                {count_joins_sql}
-                {filtered_where_sql}
-            """, tuple(filtered_params))
-            total_filtered_row = cursor.fetchone()
-            total_filtered = int(total_filtered_row[0] or 0) if total_filtered_row else 0
+            # Поиск: «сколько нашлось» и порядок решает ранжирование, а не COUNT
+            # и дата. Охват и фильтры у кандидатов те же, что у списка без поиска.
+            search_hits = None
+            search_documents = {}
+            if search_query is not None:
+                search_hits, search_documents = self._task_search_hits(
+                    cursor, search_query, filtered_where_sql, filtered_params
+                )
+                total_filtered = len(search_hits)
+            else:
+                cursor.execute(f"""
+                    SELECT COUNT(*)::INT
+                    FROM tasks t
+                    {filtered_where_sql}
+                """, tuple(filtered_params))
+                total_filtered_row = cursor.fetchone()
+                total_filtered = int(total_filtered_row[0] or 0) if total_filtered_row else 0
 
             # Бэклог — упорядоченная очередь приоритезации, остальные списки — свежие сверху.
             # Порядок должен совпадать с compareBoardTasks во фронте: та же важность,
@@ -3614,6 +3604,17 @@ class TasksMixin:
                 order_by_sql = f"{importance_sql}t.created_at DESC, t.id DESC"
             else:
                 order_by_sql = "t.created_at DESC, t.id DESC"
+            # Страница поиска — уже нарезанные ранжированием находки: берём их по
+            # id, а порядок потом восстанавливаем по ранжированию, а не по дате.
+            page_hits = None
+            page_where_sql = filtered_where_sql
+            page_params = list(filtered_params)
+            if search_hits is not None:
+                page_hits = search_hits[offset_norm:offset_norm + limit_norm]
+                page_where_sql = (
+                    f"{filtered_where_sql} AND t.id = ANY(%s)" if filtered_where_sql else "WHERE t.id = ANY(%s)"
+                )
+                page_params.append([hit.id for hit in page_hits])
             task_query = f"""
                 SELECT
                     t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
@@ -3644,20 +3645,27 @@ class TasksMixin:
                 LEFT JOIN task_project_sections section ON section.id = t.section_id
                 LEFT JOIN task_action_reads action_read
                        ON action_read.task_id = t.id AND action_read.user_id = %s
-                {filtered_where_sql}
+                {page_where_sql}
                 ORDER BY {order_by_sql}
             """
             # Параметр JOIN'а идёт раньше условий WHERE — порядок плейсхолдеров важен.
-            task_query_params = [requester_id] + list(filtered_params)
-            if limit_norm is not None:
-                task_query += "\n                LIMIT %s"
-                task_query_params.append(limit_norm)
-            if offset_norm > 0:
-                task_query += "\n                OFFSET %s"
-                task_query_params.append(offset_norm)
+            task_query_params = [requester_id] + page_params
+            if page_hits is None:
+                if limit_norm is not None:
+                    task_query += "\n                LIMIT %s"
+                    task_query_params.append(limit_norm)
+                if offset_norm > 0:
+                    task_query += "\n                OFFSET %s"
+                    task_query_params.append(offset_norm)
 
-            cursor.execute(task_query, tuple(task_query_params))
-            task_rows = cursor.fetchall()
+            if page_hits is not None and not page_hits:
+                task_rows = []  # страница за концом находок — в базу не ходим
+            else:
+                cursor.execute(task_query, tuple(task_query_params))
+                task_rows = cursor.fetchall()
+            if page_hits:
+                rank_of = {hit.id: index for index, hit in enumerate(page_hits)}
+                task_rows.sort(key=lambda row: rank_of.get(row[0], len(rank_of)))
 
             history_rows = []
             attachment_rows = []
@@ -3931,12 +3939,93 @@ class TasksMixin:
                 "watchers": watcher_map.get(task_id, [])
             })
 
-        return {
+        payload = {
             "tasks": result,
             "total_all": int(summary.get("total", 0)),
             "total_filtered": int(total_filtered),
             "summary": summary
         }
+        if search_hits is not None:
+            # Что подсветить в строке и к какой ступени она относится: точное,
+            # похожее написание или совпала часть слов (см. task_search).
+            hit_of = {hit.id: hit for hit in page_hits or ()}
+            for task in result:
+                hit = hit_of.get(task["id"])
+                document = search_documents.get(task["id"])
+                if hit is not None and document is not None:
+                    task["search_match"] = task_search.describe(search_query, hit, document)
+            # Запрос нашёлся только в исправленной раскладке — экран скажет, что
+            # искал «отчет», а не «jnxtn».
+            payload["search"] = {
+                "layout": search_query.layout_text
+                if search_hits and all(hit.via_layout for hit in search_hits) else "",
+            }
+        return payload
+
+    def _task_search_hits(self, cursor, search_query, where_sql, params):
+        """Находки поиска по задачам охвата: ([task_search.Hit], {id: Document}).
+
+        Кандидаты — ровно те задачи, что список показал бы без поиска (where_sql
+        и params — его же условия: доска, проект, раздел, фильтры). Из базы
+        берутся только поля, по которым ищем: тема, начало описания, ключ и
+        прежние ключи, имена исполнителей, постановщика и поручителя. Исполнители
+        — подзапросом: джойн на состав размножил бы задачу.
+        """
+        cursor.execute(f"""
+            SELECT
+                t.id, t.subject, LEFT(COALESCE(t.description, ''), %s),
+                project.code, t.project_number,
+                COALESCE(creator.name, ''),
+                COALESCE(origin_user.name, t.requested_by_name, ''),
+                COALESCE((
+                    SELECT string_agg(COALESCE(au.name, ''), E'\\n' ORDER BY ta_s.position, ta_s.user_id)
+                    FROM task_assignees ta_s
+                    JOIN users au ON au.id = ta_s.user_id
+                    WHERE ta_s.task_id = t.id
+                ), ''),
+                COALESCE((
+                    SELECT string_agg(ka_s.code || '-' || ka_s.number::text, ' ')
+                    FROM task_key_aliases ka_s
+                    WHERE ka_s.task_id = t.id
+                ), ''),
+                t.created_at
+            FROM tasks t
+            LEFT JOIN users creator ON creator.id = t.created_by
+            LEFT JOIN users origin_user ON origin_user.id = t.requested_by_id
+            LEFT JOIN task_projects project ON project.id = t.project_id
+            {where_sql}
+            ORDER BY t.created_at DESC, t.id DESC
+            LIMIT %s
+        """, (task_search.DESCRIPTION_SEARCH_CHARS, *params, task_search.MAX_CANDIDATES))
+        rows = cursor.fetchall()
+        if len(rows) >= task_search.MAX_CANDIDATES:
+            # Не молчим: поиск прошёл только по самым свежим задачам охвата.
+            logging.warning(
+                "Task search: scope has more than %s tasks, older ones were not searched",
+                task_search.MAX_CANDIDATES,
+            )
+        documents = {}
+        for row in rows:
+            people = [name for name in str(row[7] or '').split('\n') if name]
+            for name in (row[5], row[6]):
+                if name and name not in people:
+                    people.append(name)
+            aliases = tuple(
+                key for key in (task_projects.parse_task_key(alias) for alias in str(row[8] or '').split()) if key
+            )
+            created = row[9]
+            documents[int(row[0])] = task_search.Document(
+                id=int(row[0]),
+                subject=row[1] or '',
+                description=row[2] or '',
+                people=tuple(people),
+                key_code=row[3] or '',
+                key_number=int(row[4] or 0) if row[3] else 0,
+                key_aliases=aliases,
+                created_rank=created.timestamp() if hasattr(created, 'timestamp') else float(row[0]),
+            )
+        hits = task_search.search(search_query, list(documents.values()))
+        return hits, documents
 
     def get_tasks_for_export(self, requester_id, requester_role, mine=None,
                              person_id=None, person_scope=None, department_id=None,

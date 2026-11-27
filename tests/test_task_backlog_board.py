@@ -1444,8 +1444,9 @@ class BoardPaginationTests(unittest.TestCase):
         self.assertNotIn("append: true", src)
         # В колонке всегда ровно одна порция, копить карточки в ней незачем.
         self.assertIn("BOARD_COLUMNS.forEach((column) => fetchColumn(column.id, { limit: chunkSize }));", src)
-        # Пагинатор остаётся только там, где список один.
-        self.assertIn("{!isBoardMode && (", src)
+        # Пагинатор остаётся только там, где список один. Во время поиска по
+        # доске (27.11.2026) на месте списка — выдача со своей «Показать ещё».
+        self.assertIn("{!isBoardMode && !isSearching && (", src)
         self.assertIn("const BoardPager = ({", src)
 
     def test_repeating_the_same_choice_does_not_blank_the_board(self):

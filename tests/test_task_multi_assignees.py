@@ -324,10 +324,14 @@ class SqlCopiesTests(unittest.TestCase):
         self.assertIn("LEFT JOIN users assignee ON assignee.id = t.assigned_to", block)
 
     def test_search_finds_any_assignee_without_duplicating_rows(self):
-        start = DATABASE_SOURCE.index("    def get_tasks_for_requester(")
-        block = DATABASE_SOURCE[start:DATABASE_SOURCE.index("    def get_tasks_for_export", start)]
+        """Поиск (с 27.11.2026 — с опечатками, task_search) берёт имена ВСЕХ
+        исполнителей, но подзапросом: джойн на состав размножил бы задачу."""
+        start = DATABASE_SOURCE.index("    def _task_search_hits(")
+        block = DATABASE_SOURCE[start:DATABASE_SOURCE.index("\n    def ", start + 10)]
         self.assertIn("FROM task_assignees ta_s", block)
-        self.assertIn("COALESCE(au.name, '') ILIKE %s", block)
+        self.assertIn("string_agg(COALESCE(au.name, '')", block)
+        main_from = block[block.index("            FROM tasks t"):block.index("{where_sql}")]
+        self.assertNotIn("task_assignees", main_from)
 
     def test_export_lists_every_assignee(self):
         start = DATABASE_SOURCE.index("    def get_tasks_for_export(")

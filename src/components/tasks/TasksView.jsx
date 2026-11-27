@@ -71,6 +71,8 @@ import {
 // Телефонный слой раздела: всё в нём заперто на body.mobile-shell.
 import './tasks-mobile.css';
 import { boardQueryParams, scopeQueryParams } from './boardQuery';
+import { columnOfTask } from './boardColumns';
+import { highlightSegments, isSearchResultList, withSearchSeparators } from './taskSearch';
 import { planTaskFocus, shouldOpenFetchedTask } from './taskFocus';
 import {
   TASK_MAX_ASSIGNEES,
@@ -772,6 +774,141 @@ styleTag.textContent = `
     box-shadow: 0 0 0 3px rgba(37,99,235,.15);
   }
   .tv-search-input::placeholder { color: var(--ink-3); }
+
+  /* ── Поиск по доске (27.11.2026): поле справа в панели доски, как поиск в окне
+     macOS; пока в нём текст, вместо колонок — выдача карточками «Все задачи». ── */
+  .tv-root .tb-search {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 260px;
+    min-height: 38px;
+    padding: 0 7px 0 32px;
+    border-radius: 12px;
+    background: var(--ios-fill);
+    color: var(--ink);
+    cursor: text;
+    transition: background .15s ease, box-shadow .15s ease;
+  }
+  .tv-root .tb-search:hover { background: var(--ios-fill-strong); }
+  .tv-root .tb-search:focus-within {
+    background: var(--surface);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, .18), 0 0 0 1px #93c5fd;
+  }
+  .tv-root .tb-search-icon {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    color: var(--ink-3);
+    pointer-events: none;
+  }
+  .tv-root .tb-search input {
+    flex: 1;
+    min-width: 0;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    font-size: 14px;
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  .tv-root .tb-search input::placeholder { color: var(--ink-3); }
+  /* Свой крестик вместо системного: у Safari и Chrome он разный и серый на сером. */
+  .tv-root .tb-search input::-webkit-search-cancel-button,
+  .tv-root .tb-search input::-webkit-search-decoration { -webkit-appearance: none; display: none; }
+  .tv-root .tb-search-clear {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    margin-left: 4px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--ink-3);
+    color: var(--surface);
+    cursor: pointer;
+  }
+  .tv-root .tb-search-clear:hover { background: var(--ink-2); }
+  .tv-root .tb-search-spinner {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: 2px solid var(--ios-fill-strong);
+    border-top-color: var(--accent);
+    animation: tb-search-spin .7s linear infinite;
+  }
+  @keyframes tb-search-spin { to { transform: rotate(360deg); } }
+  .tv-root .tb-search-results { display: flex; flex-direction: column; gap: 10px; }
+  .tv-root .tb-search-summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 22px;
+    padding: 0 4px 0 16px;
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+  .tv-root .tb-search-count { font-weight: 600; color: var(--ink-2); }
+  .tv-root .tb-search-error { display: flex; align-items: center; gap: 10px; margin: 0 0 0 16px; font-size: 12.5px; color: var(--rose); }
+  .tv-root .tb-search-retry {
+    padding: 4px 12px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--select-bg);
+    color: var(--select-ink);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .tv-root .tb-search-more { display: flex; justify-content: center; padding-top: 4px; }
+  .tv-root .tb-search-more button,
+  .tv-root .tb-search-widen {
+    padding: 8px 16px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--select-bg);
+    color: var(--select-ink);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .tv-root .tb-search-widen { margin-top: 14px; }
+  .tv-root .tb-search-more .tb-search-widen { margin-top: 0; }
+  .tv-root .tb-search-more button:disabled { opacity: .6; cursor: default; }
+  /* Найденное — тёплой подсветкой, как в поиске вики; текст остаётся своего
+     цвета, поэтому одна заливка читается и на белом, и на графите. */
+  .tv-root .tv-search-mark { background: rgba(250, 204, 21, .34); color: inherit; border-radius: 3px; padding: 0 1px; }
+  .tv-root .tv-task-key.is-search-match { background: rgba(250, 204, 21, .34); color: var(--ink); border-radius: 4px; padding: 0 3px; }
+  .tv-root .tv-search-layout { color: var(--ink-3); font-weight: 400; }
+  /* Отрывок описания или имя человека, по которым нашлась задача. */
+  .tv-root .tv-task-row-snippet {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    min-width: 0;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.35;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  /* Выбранная стрелками находка (Enter её откроет) — мягким голубым кольцом,
+     как выбор везде на сайте. */
+  .tv-root .tv-task-row.is-search-active,
+  body:not(.mobile-shell) .tv-root .tv-task-list .tv-task-row.is-search-active:not(.is-compact) {
+    box-shadow: 0 0 0 2px var(--select-border), 0 0 0 5px var(--select-bg);
+  }
   .tv-filter-chips {
     display: flex;
     align-items: center;
@@ -3787,6 +3924,9 @@ styleTag.textContent = `
   .tv-task-row-state.is-violet { color: var(--state-violet); }
   .tv-task-row-state.is-emerald { color: var(--state-emerald); }
   .tv-task-row-state.is-rose { color: var(--state-rose); }
+  /* Бэклог в выдаче поиска по доске — очередь, а не статус: серым, как его колонка. */
+  .tv-task-row-state.is-gray { color: var(--ink-3); }
+  .tv-task-row-check.is-gray { border-color: var(--border-strong); }
   body:not(.mobile-shell) .tv-root .tv-row-pin-btn { opacity: 0; transition: opacity .15s ease; }
   body:not(.mobile-shell) .tv-root .tv-task-row:hover .tv-row-pin-btn,
   body:not(.mobile-shell) .tv-root .tv-row-pin-btn.is-pinned,
@@ -6994,7 +7134,61 @@ const TASK_MESSAGE_SUBMIT_LABEL = {
   answer: 'Отправить ответ',
 };
 
-const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false }) => {
+/* Найденное поиском — подсвечено (task.search_match с сервера, task_search.py).
+   Без отметок поиска текст идёт как есть, без лишних обёрток. */
+const SearchMarked = ({ text, ranges }) => {
+  if (!Array.isArray(ranges) || !ranges.length) return text;
+  return highlightSegments(text, ranges).map((segment, index) => (segment.mark
+    ? <mark key={index} className="tv-search-mark">{segment.text}</mark>
+    : <React.Fragment key={index}>{segment.text}</React.Fragment>));
+};
+
+/* Строка под темой в выдаче поиска: отрывок описания или имя человека, по
+   которым нашлась задача, — только когда в самой теме этого слова нет. Иначе
+   было бы непонятно, почему задача в выдаче. */
+const SearchMatchLine = ({ match }) => {
+  const snippet = match?.snippet;
+  if (snippet?.text) {
+    return (
+      <span className="tv-task-row-snippet">
+        {snippet.cut_start && '…'}
+        <SearchMarked text={snippet.text} ranges={snippet.ranges} />
+        {snippet.cut_end && '…'}
+      </span>
+    );
+  }
+  const people = (Array.isArray(match?.people) ? match.people : []).filter((person) => person?.name);
+  if (!people.length) return null;
+  return (
+    <span className="tv-task-row-snippet">
+      {people.map((person, index) => (
+        <React.Fragment key={person.name}>
+          {index > 0 && ', '}
+          <SearchMarked text={person.name} ranges={person.ranges} />
+        </React.Fragment>
+      ))}
+    </span>
+  );
+};
+
+/* Колонка доски, где стоит найденная задача, — подписью статуса в выдаче поиска
+   по доске: там человек думает колонками («Бэклог», «На проверке»), а не
+   статусами списка. Тон — цвет колонки (бэклог — серый: это очередь, а не статус). */
+/* Подписи — названия колонок BOARD_COLUMNS (возврат — короче, для строки),
+   точки на телефоне — цвета статусов STATUS_META. */
+const BOARD_SEARCH_STATE = {
+  todo: { label: 'Новая', tone: 'indigo', dot: '#a5b4fc' },
+  backlog: { label: 'Бэклог', tone: 'gray', dot: '#cbd5e1' },
+  progress: { label: 'В работе', tone: 'amber', dot: '#fcd34d' },
+  returned: { label: 'Возвращено', tone: 'rose', dot: '#fda4af' },
+  review: { label: 'На проверке', tone: 'violet', dot: '#c4b5fd' },
+  done: { label: 'Готово', tone: 'emerald', dot: '#6ee7b7' },
+};
+const boardSearchStateOf = (task) => BOARD_SEARCH_STATE[columnOfTask(task)] || null;
+
+const TaskRow = React.memo(({
+  task, onClick, onPin, isPinned, compact = false, isActive = false, boardState = null,
+}) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
   const pm = PRIORITY_META[task.priority] || PRIORITY_META.normal;
@@ -7003,8 +7197,16 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false })
   const assigneePeople = taskAssignees(task);
   const priorityCls = task.priority === 'critical' ? 'is-critical' : task.priority === 'urgent' ? 'is-urgent' : '';
   // Тон статуса — из той же метки, что и везде: tv-badge-amber → is-amber.
-  const statusTone = String(sm.badge || '').replace(/^tv-badge-/, '') || 'gray';
+  // В выдаче поиска по доске — колонка доски (boardState), а не статус списка.
+  const statusTone = boardState?.tone || String(sm.badge || '').replace(/^tv-badge-/, '') || 'gray';
+  const stateLabel = boardState?.label || sm.label;
   const isDone = DONE_STATUSES.has(task.status);
+  const match = task?.search_match || null;
+  const subjectNode = task.subject
+    ? <SearchMarked text={task.subject} ranges={match?.subject} />
+    : 'Без темы';
+  const keyClass = `tv-task-key${match?.key ? ' is-search-match' : ''}`;
+  const activeClass = isActive ? ' is-search-active' : '';
 
   /* Телефон: тема в две строки и одна строка сути под ней. Бейджи в ряд
      съедали ширину, и от темы оставалось «Обновить и…». Цвет — только там, где
@@ -7013,10 +7215,10 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false })
   const taskKey = taskKeyOf(task);
   if (compact) {
     const facts = [
-      <span key="status" className="tv-task-row-status"><i style={{ background: sm.dot }} />{sm.label}</span>,
+      <span key="status" className="tv-task-row-status"><i style={{ background: boardState?.dot || sm.dot }} />{stateLabel}</span>,
     ];
     // Ключ задачи проекта — первым: по нему задачу называют в переписке.
-    if (taskKey) facts.unshift(<span key="key" className="tv-task-key">{taskKey}</span>);
+    if (taskKey) facts.unshift(<span key="key" className={keyClass}>{taskKey}</span>);
     if (task.priority === 'urgent' || task.priority === 'critical') {
       facts.push(<span key="priority" className={`tv-task-row-priority is-${task.priority}`}>{pm.label}</span>);
     }
@@ -7031,9 +7233,14 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false })
     }
     if (task?.info_request) facts.push(<span key="info" className="tv-clar-waiting">Ждёт ответа</span>);
     return (
-      <div className="tv-task-row is-compact" onClick={() => onClick(task)}>
+      <div
+        className={`tv-task-row is-compact${activeClass}`}
+        data-search-active={isActive ? 'true' : undefined}
+        onClick={() => onClick(task)}
+      >
         <span className="tv-task-row-main">
-          <span className="tv-task-row-subject">{task.subject || 'Без темы'}</span>
+          <span className="tv-task-row-subject">{subjectNode}</span>
+          <SearchMatchLine match={match} />
           <span className="tv-task-row-facts">
             {facts.map((fact, index) => (
               <React.Fragment key={fact.key}>
@@ -7052,14 +7259,19 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false })
      справа — срочность и тип (только не по умолчанию), статус словом, дата.
      «Задача» — тип по умолчанию и не пишется, как в строке телефона. */
   return (
-    <div className={`tv-task-row ${priorityCls}`} onClick={() => onClick(task)}>
+    <div
+      className={`tv-task-row ${priorityCls}${activeClass}`}
+      data-search-active={isActive ? 'true' : undefined}
+      onClick={() => onClick(task)}
+    >
       <span className={`tv-task-row-check is-${statusTone}`} aria-hidden="true">
         {isDone && <Check size={12} strokeWidth={3.2} />}
       </span>
       <span className="tv-task-row-main">
-        <span className="tv-task-row-subject">{task.subject || 'Без темы'}</span>
+        <span className="tv-task-row-subject">{subjectNode}</span>
+        <SearchMatchLine match={match} />
         <span className="tv-task-row-flow">
-          {taskKey && <span className="tv-task-key">{taskKey}</span>}
+          {taskKey && <span className={keyClass}>{taskKey}</span>}
           <span className="tv-task-row-flow-name" title={creatorName}>{creatorName}</span>
           <span className="tv-task-row-flow-arrow">→</span>
           <AssigneeStack people={assigneePeople} />
@@ -7072,7 +7284,7 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false })
       <span className="tv-task-row-meta">
         {task.tag && task.tag !== 'task' && <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>}
         {task?.priority && task.priority !== 'normal' && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
-        <span className={`tv-task-row-state is-${statusTone}`}>{sm.label}</span>
+        <span className={`tv-task-row-state is-${statusTone}`}>{stateLabel}</span>
         <span className="tv-task-row-date">{fmt(task.created_at)}</span>
         {typeof onPin === 'function' && (
           <button
@@ -9802,6 +10014,8 @@ const TasksView = ({
   const [allTasksPage,        setAllTasksPage]        = useState(1);
   const [allTasksTotal,       setAllTasksTotal]       = useState(0);
   const [filteredTasksTotal,  setFilteredTasksTotal]  = useState(0);
+  // Поиск нашёл задачи только в исправленной раскладке («jnxtn» → «отчет»).
+  const [pagedSearchLayout,   setPagedSearchLayout]   = useState('');
   const [personTasks,         setPersonTasks]         = useState([]);
   const [personTasksPage,     setPersonTasksPage]     = useState(1);
   const [personTasksTotal,    setPersonTasksTotal]    = useState(0);
@@ -10050,6 +10264,20 @@ const TasksView = ({
     }
   }, [apiBaseUrl, buildHeaders, notify]);
 
+  /* Поиск по доске (владелец 27.11.2026): охват — выбранная доска, проект и
+     раздел, сопоставление с опечатками и порядок — на сервере (task_search.py).
+     Ошибку показывает сама выдача: тост на каждую букву был бы шумом, а отмена
+     устаревшего запроса — не ошибка вовсе (её разбирает useTaskBoardSearch). */
+  const searchBoardTasks = useCallback(async (params, { signal } = {}) => {
+    const res = await axios.get(`${apiBaseUrl}/api/tasks`, { headers: buildHeaders(), params, signal });
+    const data = res?.data || {};
+    return {
+      tasks: Array.isArray(data.tasks) ? data.tasks : [],
+      total: Number(data?.totals?.filtered || 0),
+      layout: data?.search?.layout || '',
+    };
+  }, [apiBaseUrl, buildHeaders]);
+
   /* Выгрузка идёт blob'ом через axios: простая ссылка <a href> не несёт токен и
      упирается в 401, потому что авторизация здесь bearer, а не кука. */
   const exportBoardTasks = useCallback(async ({ scope, projectId, sectionId }) => {
@@ -10134,6 +10362,7 @@ const TasksView = ({
       const totalFiltered = Number(totals?.filtered);
 
       setPagedTasks(list);
+      setPagedSearchLayout(String(data?.search?.layout || ''));
       setTasksSummary(data?.summary || null);
       setAllTasksTotal(Number.isFinite(totalAll) ? totalAll : list.length);
       setFilteredTasksTotal(Number.isFinite(totalFiltered) ? totalFiltered : list.length);
@@ -11242,7 +11471,9 @@ const TasksView = ({
   useScreenBackGesture(isMobileShell && Boolean(drawerTask), closeDrawer);
 
   /* ── Render helpers ── */
-  const renderTaskList = (list, emptyTitle, emptySub, loading = isTasksLoading) => {
+  /* options.board — выдача поиска по доске: статус подписан колонкой доски,
+     а выбранная стрелками задача (options.activeId) обведена. */
+  const renderTaskList = (list, emptyTitle, emptySub, loading = isTasksLoading, options = {}) => {
     if (loading) return <SkeletonList />;
     if (!list.length) return (
       <div className="tv-empty">
@@ -11251,7 +11482,10 @@ const TasksView = ({
         <span className="tv-empty-sub">{emptySub}</span>
       </div>
     );
-    const rows = withDateSeparators(list);
+    // Выдача поиска ранжирована, а не по дате: вместо «Сегодня / Вчера» —
+    // подписи ступеней («Похожие по написанию»).
+    const isSearch = isSearchResultList(list);
+    const rows = isSearch ? withSearchSeparators(list) : withDateSeparators(list);
     return (
       <div className="tv-task-list">
         {rows.map((row) => {
@@ -11267,6 +11501,8 @@ const TasksView = ({
               key={row.key}
               task={row.task}
               compact={isMobileShell}
+              isActive={Boolean(options.activeId) && Number(row.task?.id || 0) === Number(options.activeId)}
+              boardState={options.board ? boardSearchStateOf(row.task) : null}
               onClick={setDrawerTask}
               /* На телефоне скрепки в строке нет: закрепляют из карточки задачи. */
               onPin={isMobileShell ? undefined : (task) => {
@@ -11616,6 +11852,9 @@ const TasksView = ({
             onMoveTask={moveBoardTask}
             onCreateBacklogItem={openBacklogCreate}
             onExport={exportBoardTasks}
+            searchTasks={searchBoardTasks}
+            renderSearchList={(list, options) => renderTaskList(list, '', '', false, { ...options, board: true })}
+            onWidenSearch={() => changeProjectFilter(TASK_PROJECT_ALL)}
             notify={notify}
           />
         </div>
@@ -11824,6 +12063,9 @@ const TasksView = ({
               {hasActiveFilters
                 ? `Найдено: ${filteredTasksTotal} из ${allTasksTotal}`
                 : `Всего: ${allTasksTotal}`}
+              {hasActiveFilters && pagedSearchLayout && (
+                <span className="tv-search-layout"> · раскладка исправлена: «{pagedSearchLayout}»</span>
+              )}
             </div>
           )}
 
