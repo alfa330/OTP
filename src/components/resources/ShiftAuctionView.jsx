@@ -92,7 +92,8 @@ import {
 import './shift-auction-mobile.css';
 
 // Аукцион идёт на нескольких направлениях — независимых прогонах одного раздела:
-// линия (СЗоВ «Основа»), чат («Чат менеджер») и две линии Тез КЦ (задача #124).
+// линия (СЗоВ «Основа»), чат («Чат менеджер»), две линии Тез КЦ (задача #124) и
+// входящая линия отдела продаж «Основа ОП» (IC-1, #470).
 // У СВ и выше вверху есть тумблер — с прогонами СВОЕГО отдела (список и правила
 // присылает сервер: available_directions / direction_rules). Оператор видит ТОЛЬКО
 // своё направление — его присылает сервер полем `direction_mode` снапшота, и
@@ -101,19 +102,28 @@ const AUCTION_DIRECTION_LINE = 'line';
 const AUCTION_DIRECTION_CHAT = 'chat';
 const AUCTION_DIRECTION_TEZ_TP = 'tez_tp';
 const AUCTION_DIRECTION_TEZ_OP = 'tez_op';
+const AUCTION_DIRECTION_OP_OSNOVA = 'op_osnova';
 const AUCTION_DIRECTION_KEYS = [
   AUCTION_DIRECTION_LINE,
   AUCTION_DIRECTION_CHAT,
   AUCTION_DIRECTION_TEZ_TP,
   AUCTION_DIRECTION_TEZ_OP,
+  AUCTION_DIRECTION_OP_OSNOVA,
 ];
 const AUCTION_DIRECTION_LABELS = {
   [AUCTION_DIRECTION_LINE]: 'Линия',
   [AUCTION_DIRECTION_CHAT]: 'Чат',
   [AUCTION_DIRECTION_TEZ_TP]: 'ТП линия',
   [AUCTION_DIRECTION_TEZ_OP]: 'ОП линия',
+  [AUCTION_DIRECTION_OP_OSNOVA]: 'Основа',
 };
-const AUCTION_DEPARTMENT_LABELS = { szov: 'СЗоВ', tez: 'Тез КЦ' };
+const AUCTION_DEPARTMENT_LABELS = { szov: 'СЗоВ', tez: 'Тез КЦ', op: 'Отдел продаж' };
+// Отдел каждого прогона — тот же, что SHIFT_AUCTION_MODE_DEPARTMENT_CODE в db/core.py.
+const auctionDirectionDepartmentCode = (key) => {
+  if (key === AUCTION_DIRECTION_TEZ_TP || key === AUCTION_DIRECTION_TEZ_OP) return 'tez';
+  if (key === AUCTION_DIRECTION_OP_OSNOVA) return 'op';
+  return 'szov';
+};
 
 const normalizeAuctionDirection = (value) => {
   const key = String(value || '').trim().toLowerCase();
@@ -126,11 +136,12 @@ const normalizeAuctionDirection = (value) => {
 const fallbackAuctionDirectionRules = (value) => {
   const key = normalizeAuctionDirection(value);
   const isTez = key === AUCTION_DIRECTION_TEZ_TP || key === AUCTION_DIRECTION_TEZ_OP;
+  const departmentCode = auctionDirectionDepartmentCode(key);
   return {
     key,
     label: AUCTION_DIRECTION_LABELS[key],
-    department_code: isTez ? 'tez' : 'szov',
-    department_label: isTez ? AUCTION_DEPARTMENT_LABELS.tez : AUCTION_DEPARTMENT_LABELS.szov,
+    department_code: departmentCode,
+    department_label: AUCTION_DEPARTMENT_LABELS[departmentCode],
     shift_source: isTez ? 'upload' : 'plan',
     partial_claims: key === AUCTION_DIRECTION_CHAT,
     several_shifts_per_day: key === AUCTION_DIRECTION_CHAT || isTez,
@@ -4641,11 +4652,12 @@ const ShiftAuctionShiftsTable = ({
 const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration, initialPeriod = null, onInitialPeriodApplied = null, onDepartmentShown = null }) => {
   const role = normalizeRole(user?.role);
   const departmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
-  // Супервайзеры СЗоВ и Тез КЦ (задача #124) управляют аукционом своего отдела
-  // наравне с главой (он — admin). Чьи прогоны — решает сервер: тумблер приходит
-  // только с направлениями отдела, а действия вне их сервер отклонит.
+  // Супервайзеры СЗоВ, Тез КЦ (задача #124) и отдела продаж (IC-1) управляют
+  // аукционом своего отдела наравне с главой (он — admin). Чьи прогоны — решает
+  // сервер: тумблер приходит только с направлениями отдела, а действия вне их сервер
+  // отклонит.
   const isAuctionDepartmentSupervisor = isSupervisorRole(role)
-    && (departmentCode === 'szov' || departmentCode === 'tez');
+    && (departmentCode === 'szov' || departmentCode === 'tez' || departmentCode === 'op');
   const canManage = isAdminLikeRole(role) || isAuctionDepartmentSupervisor;
   const canMonitor = canManage || isSupervisorRole(role);
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
@@ -4784,13 +4796,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (requestedDepartmentDirection) return requestedDepartmentDirection;
     const stored = readStoredAuctionDirection();
     const storedIsTez = stored === AUCTION_DIRECTION_TEZ_TP || stored === AUCTION_DIRECTION_TEZ_OP;
+    const storedIsOp = stored === AUCTION_DIRECTION_OP_OSNOVA;
     // Руководству Тез КЦ (#124) с «Линией» по умолчанию сразу его прогон: иначе до
-    // первого ответа сервера в заголовке мелькала бы чужая «Линия».
+    // первого ответа сервера в заголовке мелькала бы чужая «Линия». Отделу продаж —
+    // так же его «Основа» (IC-1).
     if (departmentCode === 'tez' && !storedIsTez) return AUCTION_DIRECTION_TEZ_TP;
+    if (departmentCode === 'op' && role !== 'super_admin') return AUCTION_DIRECTION_OP_OSNOVA;
     // Ключ выбора общий для браузера: после руководителя Теза на том же компьютере
     // руководитель СЗоВ до первого ответа видел бы «ТП линия» и «Загрузить смены».
     // Суперадмину выбор оставляем — ему доступны все прогоны.
-    if (storedIsTez && departmentCode !== 'tez' && role !== 'super_admin') return AUCTION_DIRECTION_LINE;
+    if ((storedIsTez || storedIsOp) && departmentCode !== 'tez' && departmentCode !== 'op'
+      && role !== 'super_admin') return AUCTION_DIRECTION_LINE;
     return stored;
   });
   // Чей прогон сейчас лежит в settings. После переключения тумблера, пока не
@@ -7714,7 +7730,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           icon={CalendarClock}
           tileClassName="bg-slate-700"
           title="Генерация графиков"
-          onClick={onOpenResourceGeneration}
+          onClick={() => onOpenResourceGeneration(direction)}
         />
       );
     }
@@ -9161,7 +9177,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             {canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function' ? (
               <button
                 type="button"
-                onClick={onOpenResourceGeneration}
+                // Прогон — чтобы «Основа ОП» вела в свой планировщик, а не в линию СЗоВ.
+                onClick={() => onOpenResourceGeneration(direction)}
                 className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-slate-800 sm:h-10 sm:flex-none sm:px-4 sm:text-sm"
               >
                 <CalendarClock size={16} />

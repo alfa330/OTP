@@ -34,6 +34,10 @@ const SALES_SUPERVISOR_VIEWS = [
     'work_schedules',
     // Учёт часов открыт СВ ОП (модели направлений ОП: часы + штрафы).
     'sv_hours',
+    // IC-1 (#470): «Расчет ресурсов → Основа ОП» и аукцион смен «Основы» — руководство
+    // отдела строит смены по расчёту и запускает аукцион само, как у СЗоВ.
+    'resource_fte_op',
+    'shift_auction',
     'trainings',
     'technical_issues',
     'surveys',
@@ -884,6 +888,16 @@ export const employeeRoleForDepartmentCode = (currentRole, code) => {
     return departmentCodeEmployeeRole(code) || 'operator';
 };
 
+/* Разделы сверх набора отдела по модели расчёта направления сотрудника (direction_model
+   сессии). «Аукцион смен» в отделе продаж — только «Основе ОП» (IC-1, #470): прогон
+   аукциона есть лишь у неё, а «Яндекс Регистрация», «Поток» и верификаторы в нём не
+   участвуют — пункт у них был бы пустым. Зеркало — каталог прогонов db/core.py:
+   оператора в прогон ставит его направление. Только рядовому оператору: выбирать смены
+   может лишь он, у стажёра в аукционе участия нет. */
+const DEPARTMENT_DIRECTION_MODEL_EXTRA_VIEWS = {
+    op: { op_osnova: ['shift_auction'] },
+};
+
 // Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).
 const allowlistFor = (user) => {
     // Глобальные админы — без ограничений по отделу; главы отделов идут по head-набору.
@@ -898,9 +912,13 @@ const allowlistFor = (user) => {
     const role = isDepartmentHead(user) ? 'head' : normalizeRole(user?.role);
     const allow = deptCfg[role];
     if (!Array.isArray(allow)) return null;
+    // Добавка по модели направления — только рядовому оператору.
+    const modelKey = String(user?.direction_model ?? user?.directionModel ?? '').trim().toLowerCase();
+    const modelExtra = role === 'operator' ? DEPARTMENT_DIRECTION_MODEL_EXTRA_VIEWS[code]?.[modelKey] : null;
+    const withModel = Array.isArray(modelExtra) ? [...allow, ...modelExtra] : allow;
     // Поимённая добавка — в хвост набора отдела (DEPARTMENT_PERSONAL_EXTRA_VIEWS).
     const extra = DEPARTMENT_PERSONAL_EXTRA_VIEWS[code]?.[Number(user?.id)];
-    return Array.isArray(extra) ? [...allow, ...extra] : allow;
+    return Array.isArray(extra) ? [...withModel, ...extra] : withModel;
 };
 
 export const departmentRestrictsViews = (user) => Array.isArray(allowlistFor(user));

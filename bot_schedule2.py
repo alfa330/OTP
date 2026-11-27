@@ -1152,14 +1152,15 @@ def _get_user_payload(user):
                     user_id=user_id)
             except Exception:
                 wiki_enabled = True
-    # Модель расчёта направления. Нужна ровно одному разделу — «Чаты водителей»,
-    # где чат-менеджеру пункт меню не показывается, — поэтому и спрашиваем её
-    # только у СЗоВ: в других отделах чат-менеджеров нет, и лишний запрос на
-    # каждый вход был бы платой ни за что. Отказ базы не должен ронять вход:
-    # без модели раздел просто останется видимым, а обязательную границу всё
-    # равно держит driver_chats/access.py на каждом роуте.
+    # Модель расчёта направления. Нужна двум местам: «Чатам водителей» СЗоВ, где
+    # чат-менеджеру пункт меню не показывается, и «Аукциону смен» отдела продаж —
+    # из рядовых его видят только операторы «Основы ОП» (модель op_osnova, IC-1, #470;
+    # departmentViews.js). Поэтому спрашиваем её только у этих двух отделов: в
+    # остальных она ничего не решает, и лишний запрос на каждый вход был бы платой
+    # ни за что. Отказ базы не должен ронять вход: без модели пункт аукциона просто
+    # не покажется, а обязательную границу держат роуты разделов.
     direction_model = None
-    if user_id is not None and str(department_code or '').strip().lower() == 'szov':
+    if user_id is not None and str(department_code or '').strip().lower() in ('szov', 'op'):
         try:
             direction_model = db.get_user_direction_model(user_id)
         except Exception:
@@ -11085,6 +11086,7 @@ def api_resource_fte_day(report_date):
 # (страж test_chat_planner_points_at_chat_endpoints ловит именно это).
 @app.route('/api/resource_fte/rate_overrides', methods=['GET', 'POST', 'OPTIONS'])
 @app.route('/api/resource_fte/chat/rate_overrides', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/api/resource_fte/op/rate_overrides', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_rate_overrides():
     """Временная ставка оператора на период — только расчёт ресурсов и аукцион.
@@ -12496,6 +12498,511 @@ def api_resource_fte_recalculate():
         return jsonify({"status": "success", **overview}), 200
     except Exception as error:
         return _resource_fte_error_response(error)
+
+
+# ── «Расчет ресурсов · Основа ОП» (IC-1, #470) ──────────────────────────────────────────
+# Входящая линия отдела продаж на том же разделе, что линия СЗоВ: та же витрина
+# (ResourceFteView, direction="op"), тот же генератор смен, тот же склад планов и тот же
+# аукцион — своим прогоном 'op_osnova'. Модель и данные — resource_fte/op_osnova.py: Erlang C
+# по входящим плюс нагрузка своих исходящих («Касания»), как в файле постановщика. Ручки
+# линии этот блок не трогает: у «Основы» свой префикс, как у чата.
+
+def _resource_fte_op_route_guard():
+    """Кому открыт расчёт «Основы ОП» — та же граница, что у пункта меню на фронте.
+
+    Суперадмин — да. Остальные (админ и СВ) — только руководство отдела продаж: свой или
+    возглавляемый отдел 'op'. Ровно этот круг ведёт и прогон аукциона «Основы»
+    (_shift_auction_staff_modes): общий админ другого отдела увидел бы в планировщике
+    вместо её аукциона аукцион своего отдела. СВ СЗоВ и Тез КЦ расчёт ресурсов видят,
+    но этот вариант им не принадлежит."""
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return requester_id, guard_response, guard_status
+    from resource_fte.op_osnova import OP_DEPARTMENT_CODE
+    requester = db.get_user(id=int(requester_id))
+    role = normalize_role_value(requester[3]) if requester else ''
+    if role == 'super_admin':
+        return requester_id, None, None
+    codes = set(_headed_department_codes(requester_id) or [])
+    try:
+        codes |= set(db.get_shift_auction_staff_department_codes(requester_id) or [])
+    except Exception:
+        pass
+    if OP_DEPARTMENT_CODE in codes:
+        return requester_id, None, None
+    return None, jsonify({"error": "Расчет «Основы ОП» открыт руководителям отдела продаж"}), 403
+
+
+def _resource_fte_op_value_error(error):
+    message = str(error)
+    if message == 'DAY_NOT_FOUND':
+        return jsonify({"error": "За этот день нет закрытых данных «Касаний»"}), 404
+    return jsonify({"error": message}), 400
+
+
+@app.route('/api/resource_fte/op/overview', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_overview():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import op_osnova
+    try:
+        payload = op_osnova.get_overview(
+            db,
+            date_from=request.args.get('date_from'),
+            date_to=request.args.get('date_to'),
+            as_of_date_value=request.args.get('as_of'),
+            forecast_week_start_value=request.args.get('forecast_week_start'),
+            forecast_date_from_value=request.args.get('forecast_date_from') or request.args.get('forecast_period_start'),
+            forecast_date_to_value=request.args.get('forecast_date_to') or request.args.get('forecast_period_end'),
+        )
+        return jsonify({"status": "success", **payload}), 200
+    except ValueError as error:
+        return _resource_fte_op_value_error(error)
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/op/day/<string:report_date>', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_day(report_date):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import op_osnova
+    try:
+        return jsonify({"status": "success", "day": op_osnova.get_day(db, report_date)}), 200
+    except ValueError as error:
+        return _resource_fte_op_value_error(error)
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/op/settings', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_settings():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import op_osnova
+    try:
+        if request.method == 'GET':
+            return jsonify({"status": "success", "settings": op_osnova.get_settings(db)}), 200
+        payload = request.get_json(silent=True) or {}
+        # Витрину ответ не несёт: календари показывают выбранный период, и фронт сам
+        # перезапрашивает обзор им — как у чата.
+        return jsonify({"status": "success", "settings": op_osnova.update_settings(db, payload, requester_id)}), 200
+    except ValueError as error:
+        return _resource_fte_op_value_error(error)
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/op/recalculate', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_recalculate():
+    """Сохранённых итогов у «Основы» нет: расчёт идёт по «Касаниям» при каждом запросе.
+    Кнопка «Пересчитать» общая с линией, и после неё витрина сама перезапрашивает обзор
+    выбранного периода, поэтому здесь считать нечего."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    return jsonify({"status": "success", "stored": False}), 200
+
+
+@app.route('/api/resource_fte/op/shift_templates', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_shift_templates():
+    """Шаблонов по умолчанию нет: их вносит руководитель (решение владельца 27.11.2026)."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import op_osnova
+    return jsonify({"status": "success", **op_osnova.get_shift_templates()}), 200
+
+
+@app.route('/api/resource_fte/op/schedule_preview', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_schedule_preview():
+    """Смены «Основы» — тем же генератором, что у линии; потребность — по модели «Основы»."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import op_osnova
+    try:
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"status": "success", "preview": op_osnova.build_schedule_preview(db, payload)}), 200
+    except ValueError as error:
+        return _resource_fte_op_value_error(error)
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/op/saved_schedule', methods=['GET', 'PUT', 'POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_saved_schedule():
+    """Тот же склад планов, что у линии и чата, со своим направлением аукциона: без
+    `direction_mode='op_osnova'` «Основа» подхватила бы график линии СЗоВ на тот же период."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte.op_osnova import OP_AUCTION_MODE
+    try:
+        if request.method == 'GET':
+            schedule = db.get_resource_saved_schedule(
+                date_from=request.args.get('date_from'),
+                date_to=request.args.get('date_to'),
+                plan_id=request.args.get('plan_id'),
+                direction_mode=OP_AUCTION_MODE,
+            )
+            return jsonify({"status": "success", "schedule": schedule}), 200
+        payload = request.get_json(silent=True) or {}
+        result = db.save_resource_saved_schedule(payload, updated_by=requester_id, direction_mode=OP_AUCTION_MODE)
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        code = str(error)
+        mapping = {
+            "RESOURCE_SCHEDULE_EMPTY": ("График пустой: нечего сохранять", 400),
+            "INVALID_RESOURCE_SCHEDULE_DATE": ("Некорректная дата графика", 400),
+            "INVALID_RESOURCE_SCHEDULE_PERIOD": ("Дата окончания графика раньше даты начала", 400),
+            "DATE_FROM_REQUIRED": ("Дата начала графика обязательна", 400),
+            "DATE_TO_REQUIRED": ("Дата окончания графика обязательна", 400)
+        }
+        message, status = mapping.get(code, ("Не удалось сохранить график", 400))
+        return jsonify({"error": message, "code": code}), status
+    except Exception as error:
+        logging.error(f"Resource op saved schedule API error: {error}", exc_info=True)
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/op/operator_availability', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_operator_availability():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    from resource_fte import op_osnova
+    try:
+        payload = op_osnova.get_operator_availability(
+            db,
+            as_of_date_value=request.args.get('as_of'),
+            forecast_week_start_value=request.args.get('forecast_week_start'),
+            forecast_date_from_value=request.args.get('forecast_date_from') or request.args.get('forecast_period_start'),
+            forecast_date_to_value=request.args.get('forecast_date_to') or request.args.get('forecast_period_end'),
+        )
+        return jsonify({"status": "success", "availability": payload}), 200
+    except ValueError as error:
+        return _resource_fte_op_value_error(error)
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+# ── «Расчет ресурсов · Основа ОП» → «Биллинг» по «Касаниям» (IC-1, #470) ────────────────
+# Те же разрезы и построители, что у «Биллинга Oktell» линии; строки собирает
+# resource_fte/op_billing.py из «Касаний» и статусов iCORE Phone. Oktell здесь не нужен.
+
+def _op_billing_parse_request_args():
+    """Период и окно времени «Биллинга» «Основы» — как у линии, но без проверки Oktell."""
+    params, error_response, error_status = _oktell_billing_parse_date_args()
+    if params is None:
+        return None, error_response, error_status
+    minute_from = _oktell_billing_parse_time(request.args.get('time_from') or '00:00')
+    minute_to = _oktell_billing_parse_time(request.args.get('time_to') or '23:59')
+    if minute_from is None or minute_to is None:
+        return None, jsonify({"error": "time_from и time_to должны быть в формате HH:MM"}), 400
+    if minute_to < minute_from:
+        return None, jsonify({"error": "time_to должен быть не раньше time_from"}), 400
+    return {**params, 'minute_from': minute_from, 'minute_to': minute_to}, None, None
+
+
+def _op_billing_now():
+    from cdr import queries as cdr_queries
+    return cdr_queries.now_almaty()
+
+
+def _op_billing_operator_report(params):
+    from resource_fte import op_billing
+    with db._get_cursor() as cursor:
+        calls_rows, states_rows = op_billing.operator_rows(
+            cursor, params['start_day'], params['end_day'], params['minute_from'], params['minute_to'],
+            _op_billing_now())
+    return _oktell_billing_build_operator_report(calls_rows, states_rows)
+
+
+def _op_billing_grouping_report(params, sl_seconds):
+    from resource_fte import op_billing, op_osnova
+    with db._get_cursor() as cursor:
+        raw_rows = op_billing.report_rows(
+            cursor, params['start_day'], params['end_day'], params['minute_from'], params['minute_to'],
+            sl_seconds, 'hour')
+        report = _oktell_billing_build_hourly_report(raw_rows, params['minute_from'], params['minute_to'])
+        if not report['days']:
+            return report
+        first_day = datetime.strptime(report['days'][0]['date'], '%Y-%m-%d').date()
+        last_day = datetime.strptime(report['days'][-1]['date'], '%Y-%m-%d').date()
+        # Смены не должны стоить звонковой части — колонки останутся прочерками, как у линии.
+        # Под SAVEPOINT: пойманная ошибка SQL без отката прерывала транзакцию, и следующее
+        # чтение комментариев роняло весь отчёт.
+        shift_rows = op_osnova.optional_tx(
+            cursor,
+            lambda: op_billing.shift_rows(
+                cursor, first_day, last_day, params['minute_from'], params['minute_to'], _op_billing_now()),
+            {}, 'смены «Группировки» биллинга недоступны')
+        comments = op_billing.hour_comments(cursor, first_day, last_day)
+    return _oktell_billing_attach_grouping(report, shift_rows, comments)
+
+
+_OP_BILLING_EXPORT_NOTE = (
+    'SL — отвечено за ≤ {sl} сек ожидания в очереди ко всем звонкам, попавшим в очередь. '
+    'Звонки — из «Касаний» отдела продаж; время разговора — сам разговор оператора, без '
+    'автоинформатора и очереди; «Общее время» — разговор и ожидание, вместе с неотвеченными')
+_OP_BILLING_EXPORT_TITLE = 'Биллинг «Основы ОП»'
+# Колонки, всегда пустые у «Основы»: оценок водителей у ОП нет, номеров ОП нет в справочнике
+# названий линий СЗоВ, постобработки и удержания у iCORE Phone нет. На экране их тоже нет.
+_OP_BILLING_EXPORT_DROP = {
+    'park': ('Ср. оценка',),
+    'line': ('Название', 'Ср. оценка'),
+    'operator': ('Постобработка', 'Удержание'),
+}
+_OP_BILLING_EXPORT_SOURCE = '«Касания» отдела продаж'
+# Подписи как на экране (OP_BILLING_GROUPING_COLUMNS): в часе — люди «Основы», а не смены.
+_OP_BILLING_GROUPING_HEADERS = {
+    'forecast': 'Прогноз людей',
+    'planned': 'По графику',
+    'fact': 'Факт на линии',
+}
+_OP_BILLING_GROUPING_EMPTY = 'В «Касаниях» нет входящих звонков «Основы» за выбранный период и окно времени'
+
+
+@app.route('/api/resource_fte/op/billing', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_billing():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    params, error_response, error_status = _op_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+    group_by = str(request.args.get('group_by') or 'park').strip().lower()
+    if group_by not in ('park', 'line'):
+        return jsonify({"error": "group_by должен быть park или line"}), 400
+    sl_seconds, sl_error = _oktell_billing_parse_sl_seconds()
+    if sl_error is not None:
+        return sl_error
+    from resource_fte import op_billing
+    try:
+        with db._get_cursor() as cursor:
+            raw_rows = op_billing.report_rows(
+                cursor, params['start_day'], params['end_day'], params['minute_from'], params['minute_to'],
+                sl_seconds, group_by)
+    except Exception:
+        logging.exception("Op billing report failed")
+        return jsonify({"error": "Не удалось собрать звонки из «Касаний», попробуйте ещё раз"}), 500
+    report = _oktell_billing_build_report(raw_rows, include_line=(group_by == 'line'))
+    return jsonify({"status": "success", "group_by": group_by, "sl_threshold_seconds": sl_seconds,
+                    **_oktell_billing_response_meta(params), **report}), 200
+
+
+@app.route('/api/resource_fte/op/billing_operators', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_billing_operators():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    params, error_response, error_status = _op_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+    try:
+        report = _op_billing_operator_report(params)
+    except Exception:
+        logging.exception("Op billing operators report failed")
+        return jsonify({"error": "Не удалось собрать отчёт по операторам, попробуйте ещё раз"}), 500
+    return jsonify({"status": "success", **_oktell_billing_response_meta(params), **report}), 200
+
+
+@app.route('/api/resource_fte/op/billing_details', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_billing_details():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    params, error_response, error_status = _op_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+    try:
+        page = int(request.args.get('page') or 1)
+        per_page = int(request.args.get('per_page') or 25)
+    except (TypeError, ValueError):
+        return jsonify({"error": "page и per_page должны быть целыми числами"}), 400
+    if page < 1 or per_page < 1 or per_page > 100:
+        return jsonify({"error": "page — от 1, per_page — от 1 до 100"}), 400
+    snapshot_raw = request.args.get('snapshot_id')
+    snapshot_id = None
+    if snapshot_raw not in (None, ''):
+        try:
+            snapshot_id = int(snapshot_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "snapshot_id должен быть целым числом"}), 400
+    from resource_fte import op_billing
+    try:
+        with db._get_cursor() as cursor:
+            detail = op_billing.detail_page(
+                cursor, params['start_day'], params['end_day'], params['minute_from'], params['minute_to'],
+                page, per_page, snapshot_id)
+    except Exception:
+        logging.exception("Op billing details failed")
+        return jsonify({"error": "Не удалось собрать детализацию, попробуйте ещё раз"}), 500
+    return jsonify({"status": "success", **_oktell_billing_response_meta(params), **detail}), 200
+
+
+@app.route('/api/resource_fte/op/billing_grouping', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_billing_grouping():
+    """«Биллинг → Группировка» «Основы»: день × час — звонки, люди (прогноз, план, факт)
+    и комментарии СВ."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    params, error_response, error_status = _op_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+    sl_seconds, sl_error = _oktell_billing_parse_sl_seconds()
+    if sl_error is not None:
+        return sl_error
+    try:
+        report = _op_billing_grouping_report(params, sl_seconds)
+    except Exception:
+        logging.exception("Op billing grouping failed")
+        return jsonify({"error": "Не удалось собрать группировку, попробуйте ещё раз"}), 500
+    return jsonify({"status": "success", "sl_threshold_seconds": sl_seconds,
+                    **_oktell_billing_response_meta(params), **report}), 200
+
+
+@app.route('/api/resource_fte/op/billing_grouping_comment', methods=['PUT', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_billing_grouping_comment():
+    """Комментарий к отрезку часов дня в «Группировке» «Основы»; пустой текст снимает его."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    payload = request.get_json(silent=True) or {}
+    report_date = _oktell_parse_date(payload.get('date'))
+    if report_date is None:
+        return jsonify({"error": "date обязателен в формате YYYY-MM-DD"}), 400
+
+    def _hour(key):
+        value = payload.get(key)
+        if value is None or value == '' or isinstance(value, bool):
+            return None
+        try:
+            hour = int(value)
+        except (TypeError, ValueError):
+            return None
+        return hour if 0 <= hour <= 23 else None
+
+    hour_from, hour_to = _hour('hour_from'), _hour('hour_to')
+    if hour_from is None or hour_to is None or hour_to < hour_from:
+        return jsonify({"error": "Часы комментария — от 0 до 23, и «по» не раньше «с»"}), 400
+    previous_from, previous_to = _hour('previous_hour_from'), _hour('previous_hour_to')
+    if (previous_from is None) != (previous_to is None) or (
+            previous_from is not None and previous_to < previous_from):
+        return jsonify({"error": "Прежний отрезок комментария задан неверно"}), 400
+    comment = str(payload.get('comment') or '').strip()
+    from resource_fte import op_billing
+    if len(comment) > op_billing.COMMENT_MAX_LENGTH:
+        return jsonify({"error": f"Комментарий длиннее {op_billing.COMMENT_MAX_LENGTH} символов"}), 400
+    try:
+        comments = op_billing.save_hour_comment(
+            db, report_date, hour_from, hour_to, comment, updated_by=requester_id,
+            previous_hour_from=previous_from, previous_hour_to=previous_to)
+    except Exception:
+        logging.exception("Op billing grouping comment save failed")
+        return jsonify({"error": "Не удалось сохранить комментарий"}), 500
+    return jsonify({"status": "success", "date": report_date.strftime('%Y-%m-%d'),
+                    "comments": {str(hour): note for hour, note in comments.items()}}), 200
+
+
+@app.route('/api/resource_fte/op/billing_export', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_op_billing_export():
+    """Выгрузка «Биллинга» «Основы» в Excel — те же книги, что у линии, со своим пояснением."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_op_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    params, error_response, error_status = _op_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+    mode = str(request.args.get('mode') or 'park').strip().lower()
+    if mode not in ('park', 'line', 'operator', 'detail', 'grouping'):
+        return jsonify({"error": "mode должен быть park, line, operator, detail или grouping"}), 400
+    direction, direction_error = _oktell_billing_parse_direction()
+    if direction_error is not None:
+        return direction_error
+    sl_seconds, sl_error = _oktell_billing_parse_sl_seconds()
+    if sl_error is not None:
+        return sl_error
+    from resource_fte import op_billing
+    try:
+        if mode == 'operator':
+            report = _oktell_billing_operator_direction_report(_op_billing_operator_report(params), direction)
+        elif mode == 'detail':
+            with db._get_cursor() as cursor:
+                report = {'rows': op_billing.detail_export_rows(
+                    cursor, params['start_day'], params['end_day'], params['minute_from'], params['minute_to'])}
+        elif mode == 'grouping':
+            report = _op_billing_grouping_report(params, sl_seconds)
+        else:
+            with db._get_cursor() as cursor:
+                raw_rows = op_billing.report_rows(
+                    cursor, params['start_day'], params['end_day'], params['minute_from'], params['minute_to'],
+                    sl_seconds, mode)
+            report = _oktell_billing_build_report(raw_rows, include_line=(mode == 'line'))
+    except Exception:
+        logging.exception("Op billing export failed")
+        return jsonify({"error": "Не удалось собрать выгрузку, попробуйте ещё раз"}), 500
+    if mode == 'grouping':
+        output = _oktell_billing_grouping_workbook(
+            report, headers=_OP_BILLING_GROUPING_HEADERS, empty_text=_OP_BILLING_GROUPING_EMPTY)
+    else:
+        note = None if mode == 'operator' else _OP_BILLING_EXPORT_NOTE.format(sl=sl_seconds)
+        output = _oktell_billing_export_workbook(
+            mode, params, report, sl_seconds, direction, note=note, title=_OP_BILLING_EXPORT_TITLE,
+            source=_OP_BILLING_EXPORT_SOURCE, generated_at=_op_billing_now(),
+            drop_columns=_OP_BILLING_EXPORT_DROP.get(mode, ()))
+    mode_part = f"{mode}_{direction}" if mode == 'operator' else mode
+    filename = (f"op_osnova_billing_{mode_part}_"
+                f"{params['start_day'].strftime('%Y-%m-%d')}_{params['end_day'].strftime('%Y-%m-%d')}.xlsx")
+    return send_file(output, as_attachment=True, download_name=filename,
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
 # ── Прогноз звонков по отделам (TimesFM в BigQuery) и люди по Erlang A ─────────────────
@@ -30157,10 +30664,27 @@ def _oktell_billing_export_values(mode, item, label=None, with_dial_wait=False):
     return [label if label is not None else _oktell_billing_park_label(item.get('park') or ''), *metrics]
 
 
-def _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction='incoming'):
+def _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction='incoming', note=None,
+                                    title='Биллинг Oktell', source='Oktell', generated_at=None,
+                                    drop_columns=()):
+    """note, title, source и generated_at — своё пояснение, заголовок, источник звонков и момент
+    выгрузки; drop_columns — заголовки колонок, которые у направления всегда пустые (кроме
+    «Детализации»). Нужны «Основе ОП» (IC-1): её звонки не из Oktell, оценок, названий номеров,
+    постобработки и удержания у неё нет. По умолчанию файл линии прежний."""
+    custom_note = note
     with_dial_wait = bool(mode == 'operator' and direction == 'outgoing'
                           and (report.get('totals') or {}).get('dial_wait_seconds'))
     headers, widths, formats = _oktell_billing_export_columns(mode, direction, with_dial_wait)
+    dropping = bool(drop_columns) and mode != 'detail'
+    keep = [index for index, header in enumerate(headers) if not dropping or header not in set(drop_columns)]
+    if dropping:
+        formats = {new + 1: formats[old + 1] for new, old in enumerate(keep) if old + 1 in formats}
+        headers = [headers[index] for index in keep]
+        widths = [widths[index] for index in keep]
+
+    def _pick(values):
+        # Без drop_columns строка идёт как есть — путь линии не меняется ни в чём.
+        return [values[index] for index in keep] if dropping else values
     operator_title = 'Операторы · исход' if direction == 'outgoing' else 'Операторы · вход'
     mode_titles = {'park': 'Таксопарки', 'line': 'Номера', 'operator': operator_title}
     period_text = (
@@ -30179,6 +30703,8 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction=
         note = (f'SL — отвечено за ≤ {sl_seconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь. '
                 'Время разговора — как в Oktell: принятые звонки целиком, с приветствием и очередью; '
                 '«Общее время» — вместе с неотвеченными')
+    if custom_note:
+        note = custom_note
     header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
     header_font = Font(color='FFFFFF', bold=True)
     bold_font = Font(bold=True)
@@ -30224,22 +30750,22 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction=
 
     ws = wb.active
     ws.title = 'Итого за период'
-    ws.append([f'Биллинг Oktell — {mode_titles.get(mode, mode)}'])
+    ws.append([f'{title} — {mode_titles.get(mode, mode)}'])
     ws.cell(row=1, column=1).font = bold_font
     ws.append([f'Период: {period_text}'])
     ws.append([note])
     source_calls = ('исходящие звонки' if mode == 'operator' and direction == 'outgoing'
                     else 'входящие звонки')
-    ws.append([f'Источник: Oktell ({source_calls}), сформировано '
-               + datetime.now().strftime('%d.%m.%Y %H:%M')])
+    stamp = (generated_at or datetime.now()).strftime('%d.%m.%Y %H:%M')
+    ws.append([f'Источник: {source} ({source_calls}), сформировано {stamp}'])
     ws.append([])
     _write_header(ws, headers)
     table_start = ws.max_row
     for item in report.get(rows_key) or []:
-        _write_row(ws, _oktell_billing_export_values(mode, item, with_dial_wait=with_dial_wait))
+        _write_row(ws, _pick(_oktell_billing_export_values(mode, item, with_dial_wait=with_dial_wait)))
     if report.get('totals') and (report.get(rows_key) or []):
-        _write_row(ws, _oktell_billing_export_values(
-            mode, report['totals'], label=total_label, with_dial_wait=with_dial_wait), bold=True)
+        _write_row(ws, _pick(_oktell_billing_export_values(
+            mode, report['totals'], label=total_label, with_dial_wait=with_dial_wait)), bold=True)
     for i, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
     ws.freeze_panes = f'A{table_start + 1}'
@@ -30252,11 +30778,11 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction=
         except ValueError:
             day_label = day.get('date') or ''
         for item in day.get(rows_key) or []:
-            _write_row(ws_days, [day_label] + _oktell_billing_export_values(
-                mode, item, with_dial_wait=with_dial_wait), date_offset=1)
+            _write_row(ws_days, [day_label] + _pick(_oktell_billing_export_values(
+                mode, item, with_dial_wait=with_dial_wait)), date_offset=1)
         if day.get('totals'):
-            _write_row(ws_days, [day_label] + _oktell_billing_export_values(
-                mode, day['totals'], label='Итого за день', with_dial_wait=with_dial_wait),
+            _write_row(ws_days, [day_label] + _pick(_oktell_billing_export_values(
+                mode, day['totals'], label='Итого за день', with_dial_wait=with_dial_wait)),
                 bold=True, date_offset=1)
     for i, width in enumerate([12] + widths, start=1):
         ws_days.column_dimensions[get_column_letter(i)].width = width
@@ -30722,10 +31248,13 @@ def _oktell_billing_grouping_values(item):
     }
 
 
-def _oktell_billing_grouping_workbook(report):
+def _oktell_billing_grouping_workbook(report, headers=None, empty_text=None):
     """Excel «Группировки» по образцу таблицы владельца: лист на день, голубая шапка, смены на
     голубой подложке, «% Неотв» выше порога залит красным, отставание от прогноза — красным
-    шрифтом, одинаковый комментарий соседних часов — одна объединённая ячейка."""
+    шрифтом, одинаковый комментарий соседних часов — одна объединённая ячейка.
+    headers — свои подписи колонок по ключу, empty_text — текст пустого периода: у «Основы ОП»
+    (IC-1) в часе люди, а не смены, и звонки из «Касаний», а не из Oktell."""
+    headers = headers or {}
     header_fill = PatternFill(start_color='B4C6E7', end_color='B4C6E7', fill_type='solid')
     shift_fill = PatternFill(start_color='DDEBF7', end_color='DDEBF7', fill_type='solid')
     alert_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
@@ -30742,7 +31271,7 @@ def _oktell_billing_grouping_workbook(report):
     if not days:
         ws = wb.active
         ws.title = 'Группировка'
-        ws.append(['Oktell не вернул входящих звонков за выбранный период и окно времени'])
+        ws.append([empty_text or 'Oktell не вернул входящих звонков за выбранный период и окно времени'])
     for index, day in enumerate(days):
         try:
             title = datetime.strptime(day.get('date') or '', '%Y-%m-%d').strftime('%d.%m.%Y')
@@ -30750,8 +31279,8 @@ def _oktell_billing_grouping_workbook(report):
             title = f'День {index + 1}'
         ws = wb.active if index == 0 else wb.create_sheet()
         ws.title = title
-        for column, (_key, header, width) in enumerate(_OKTELL_BILLING_GROUPING_COLUMNS, start=1):
-            cell = ws.cell(row=1, column=column, value=header)
+        for column, (column_key, header, width) in enumerate(_OKTELL_BILLING_GROUPING_COLUMNS, start=1):
+            cell = ws.cell(row=1, column=column, value=headers.get(column_key, header))
             cell.fill = header_fill
             cell.font = bold_font
             cell.alignment = center

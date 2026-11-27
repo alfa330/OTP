@@ -14,6 +14,7 @@ from db.core import (  # noqa: F401
     psycopg2,
     SHIFT_AUCTION_MODE_CHAT,
     SHIFT_AUCTION_MODE_LINE,
+    SHIFT_AUCTION_MODE_OP_OSNOVA,
     SHIFT_AUCTION_MODE_TEZ_OP,
     SHIFT_AUCTION_MODE_TEZ_TP,
     SHIFT_AUCTION_SETTINGS_ROW_ID,
@@ -4639,16 +4640,18 @@ class SchemaMixin:
                 "UPDATE shift_auction_test_access SET direction_mode = %s WHERE id = %s AND direction_mode <> %s;",
                 (SHIFT_AUCTION_MODE_LINE, SHIFT_AUCTION_SETTINGS_ROW_ID[SHIFT_AUCTION_MODE_LINE], SHIFT_AUCTION_MODE_LINE)
             )
-            # Строка настроек на каждый прогон: линия и чат СЗоВ, две линии Тез КЦ (#124).
+            # Строка настроек на каждый прогон: линия и чат СЗоВ, две линии Тез КЦ (#124),
+            # «Основа ОП» отдела продаж (IC-1, #470).
             cursor.execute("""
                 INSERT INTO shift_auction_test_access (id, direction_mode)
-                VALUES (%s, %s), (%s, %s), (%s, %s), (%s, %s)
+                VALUES (%s, %s), (%s, %s), (%s, %s), (%s, %s), (%s, %s)
                 ON CONFLICT (id) DO NOTHING;
             """, (
                 SHIFT_AUCTION_SETTINGS_ROW_ID[SHIFT_AUCTION_MODE_LINE], SHIFT_AUCTION_MODE_LINE,
                 SHIFT_AUCTION_SETTINGS_ROW_ID[SHIFT_AUCTION_MODE_CHAT], SHIFT_AUCTION_MODE_CHAT,
                 SHIFT_AUCTION_SETTINGS_ROW_ID[SHIFT_AUCTION_MODE_TEZ_TP], SHIFT_AUCTION_MODE_TEZ_TP,
                 SHIFT_AUCTION_SETTINGS_ROW_ID[SHIFT_AUCTION_MODE_TEZ_OP], SHIFT_AUCTION_MODE_TEZ_OP,
+                SHIFT_AUCTION_SETTINGS_ROW_ID[SHIFT_AUCTION_MODE_OP_OSNOVA], SHIFT_AUCTION_MODE_OP_OSNOVA,
             ))
             cursor.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_shift_auction_test_access_mode "

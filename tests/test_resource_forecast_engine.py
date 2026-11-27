@@ -1010,7 +1010,8 @@ class FrontendGuardTests(unittest.TestCase):
     def test_engine_cards_are_line_only(self):
         source = (ROOT / "src/components/resources/ResourceFteView.jsx").read_text(encoding="utf-8")
         self.assertIn("enabled: !isChat", source)
-        self.assertRegex(source, r"activeDashboardView === 'next_week' && !isChat && \(\s*<EngineForecastCard")
+        # С IC-1 карточка движка СЗоВ закрыта и «Основе ОП»: её прогноз — отдела 'op'.
+        self.assertRegex(source, r"activeDashboardView === 'next_week' && !isChat && !isOp && \(\s*<EngineForecastCard")
 
 
 if __name__ == "__main__":

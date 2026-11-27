@@ -10,16 +10,20 @@ export const SHIFT_AUCTION_MODE_CHAT = 'chat';
 // (SHIFT_AUCTION_MODE_DIRECTION_NAME в db/core.py).
 export const SHIFT_AUCTION_MODE_TEZ_TP = 'tez_tp';
 export const SHIFT_AUCTION_MODE_TEZ_OP = 'tez_op';
+// Входящая линия отдела продаж (IC-1, #470) — направление «Основа ОП».
+export const SHIFT_AUCTION_MODE_OP_OSNOVA = 'op_osnova';
 const SHIFT_AUCTION_MODES = [
   SHIFT_AUCTION_MODE_LINE,
   SHIFT_AUCTION_MODE_CHAT,
   SHIFT_AUCTION_MODE_TEZ_TP,
   SHIFT_AUCTION_MODE_TEZ_OP,
+  SHIFT_AUCTION_MODE_OP_OSNOVA,
 ];
 const SHIFT_AUCTION_EXACT_DIRECTION_NAMES = {
   [SHIFT_AUCTION_MODE_LINE]: SHIFT_AUCTION_DIRECTION_NAME,
   [SHIFT_AUCTION_MODE_TEZ_TP]: 'тп линия',
   [SHIFT_AUCTION_MODE_TEZ_OP]: 'оп линия',
+  [SHIFT_AUCTION_MODE_OP_OSNOVA]: 'основа оп',
 };
 
 const normalizeScopeText = (value) => (

@@ -10,6 +10,7 @@
 import {
   SHIFT_AUCTION_MODE_CHAT,
   SHIFT_AUCTION_MODE_LINE,
+  SHIFT_AUCTION_MODE_OP_OSNOVA,
   SHIFT_AUCTION_MODE_TEZ_OP,
   SHIFT_AUCTION_MODE_TEZ_TP,
   normalizeShiftAuctionDirectionMode,
@@ -23,6 +24,7 @@ export const AUCTION_DEPARTMENT_DIRECTION_STORAGE_KEY = 'otp_shift_auction_depar
 export const AUCTION_DEPARTMENTS = [
   { code: 'szov', label: 'СЗоВ', directions: [SHIFT_AUCTION_MODE_LINE, SHIFT_AUCTION_MODE_CHAT] },
   { code: 'tez', label: 'Тез КЦ', directions: [SHIFT_AUCTION_MODE_TEZ_TP, SHIFT_AUCTION_MODE_TEZ_OP] },
+  { code: 'op', label: 'Отдел продаж', directions: [SHIFT_AUCTION_MODE_OP_OSNOVA] },
 ];
 
 export const auctionDepartmentOfDirection = (direction) => {

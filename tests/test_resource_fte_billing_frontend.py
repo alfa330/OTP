@@ -197,7 +197,10 @@ class BillingGroupingFrontendTests(unittest.TestCase):
         self.assertIn("} else if (targetMode === 'park' || targetMode === 'line') {", self.source)
 
     def test_day_table_renders_hours_and_skips_period_summary(self):
-        self.assertIn("<BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} />",
+        # С IC-1 таблица получает и подписи колонок: у «Основы ОП» свои (без «как в Oktell»).
+        self.assertIn("<BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} columns={billingGroupingColumns} />",
+                      self.source)
+        self.assertIn("const billingGroupingColumns = isOp ? OP_BILLING_GROUPING_COLUMNS : BILLING_GROUPING_COLUMNS;",
                       self.source)
         self.assertIn("{billingMode !== 'grouping' && (", self.source)
 

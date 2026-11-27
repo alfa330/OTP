@@ -176,17 +176,24 @@ SHIFT_AUCTION_MODE_CHAT = 'chat'
 # отдельным прогоном — у техподдержки и продаж разные люди и разная работа.
 SHIFT_AUCTION_MODE_TEZ_TP = 'tez_tp'
 SHIFT_AUCTION_MODE_TEZ_OP = 'tez_op'
+# Отдел продаж (IC-1, #470): входящая линия «Основа ОП». Смены строит «Расчет ресурсов ·
+# Основа ОП» тем же генератором, что у линии СЗоВ, и правила те же, что у линии: смена
+# целиком, одна в день, две ночи «20*08» подряд нельзя. Запускают аукцион руководители
+# отдела сами, как у СЗоВ (решение владельца 27.11.2026).
+SHIFT_AUCTION_MODE_OP_OSNOVA = 'op_osnova'
 SHIFT_AUCTION_MODES = (
     SHIFT_AUCTION_MODE_LINE,
     SHIFT_AUCTION_MODE_CHAT,
     SHIFT_AUCTION_MODE_TEZ_TP,
     SHIFT_AUCTION_MODE_TEZ_OP,
+    SHIFT_AUCTION_MODE_OP_OSNOVA,
 )
 # Тот же отбор направлений, что в resource_fte/chat.py, НО с границей отдела: в
 # компании есть ещё «ТП чат» отдела Тез, и без dep.code его люди уехали бы в
 # аукцион СЗоВ (см. direction-rename-detaches-operators — имена направлений дублируются).
 SHIFT_AUCTION_CHAT_DIRECTION_PATTERN = '%чат%'
 SHIFT_AUCTION_TEZ_DEPARTMENT_CODE = 'tez'
+SHIFT_AUCTION_OP_DEPARTMENT_CODE = 'op'
 # Отдел каждого прогона: граница, без которой одноимённые направления разных отделов
 # смешались бы в одном аукционе.
 SHIFT_AUCTION_MODE_DEPARTMENT_CODE = {
@@ -194,25 +201,31 @@ SHIFT_AUCTION_MODE_DEPARTMENT_CODE = {
     SHIFT_AUCTION_MODE_CHAT: SHIFT_AUCTION_DEPARTMENT_CODE,
     SHIFT_AUCTION_MODE_TEZ_TP: SHIFT_AUCTION_TEZ_DEPARTMENT_CODE,
     SHIFT_AUCTION_MODE_TEZ_OP: SHIFT_AUCTION_TEZ_DEPARTMENT_CODE,
+    SHIFT_AUCTION_MODE_OP_OSNOVA: SHIFT_AUCTION_OP_DEPARTMENT_CODE,
 }
 # Точное имя направления у прогонов с одним направлением. У чата его нет: там
-# шаблон SHIFT_AUCTION_CHAT_DIRECTION_PATTERN.
+# шаблон SHIFT_AUCTION_CHAT_DIRECTION_PATTERN. «Основа ОП» — то же имя, по которому
+# людей считает resource_fte/op_osnova.py (OP_DIRECTION_NAME): участники аукциона и штат
+# расчёта обязаны совпадать.
 SHIFT_AUCTION_MODE_DIRECTION_NAME = {
     SHIFT_AUCTION_MODE_LINE: SHIFT_AUCTION_DIRECTION_NAME,
     SHIFT_AUCTION_MODE_TEZ_TP: 'ТП линия',
     SHIFT_AUCTION_MODE_TEZ_OP: 'ОП линия',
+    SHIFT_AUCTION_MODE_OP_OSNOVA: 'Основа ОП',
 }
 SHIFT_AUCTION_MODE_LABELS = {
     SHIFT_AUCTION_MODE_LINE: 'Линия',
     SHIFT_AUCTION_MODE_CHAT: 'Чат',
     SHIFT_AUCTION_MODE_TEZ_TP: 'ТП линия',
     SHIFT_AUCTION_MODE_TEZ_OP: 'ОП линия',
+    SHIFT_AUCTION_MODE_OP_OSNOVA: 'Основа',
 }
 # Где смены прогона берутся из файла руководителя, а не из «Расчёта ресурсов».
 SHIFT_AUCTION_UPLOAD_MODES = (SHIFT_AUCTION_MODE_TEZ_TP, SHIFT_AUCTION_MODE_TEZ_OP)
 SHIFT_AUCTION_DEPARTMENT_LABELS = {
     SHIFT_AUCTION_DEPARTMENT_CODE: 'СЗоВ',
     SHIFT_AUCTION_TEZ_DEPARTMENT_CODE: 'Тез КЦ',
+    SHIFT_AUCTION_OP_DEPARTMENT_CODE: 'Отдел продаж',
 }
 # Где день не запирается первой сменой: можно взять ещё смену в тот же день, если
 # она не перекрывает уже взятое (недельная норма при этом действует). Чат — решение
@@ -231,6 +244,8 @@ SHIFT_AUCTION_NIGHT_SHIFTS = {
     SHIFT_AUCTION_MODE_CHAT: (('20:00', '08:00'),),
     SHIFT_AUCTION_MODE_TEZ_TP: (('20:00', '08:00'), ('21:00', '09:00')),
     SHIFT_AUCTION_MODE_TEZ_OP: (('20:00', '08:00'), ('21:00', '09:00')),
+    # Ночь «Основы ОП» по её графикам октября–ноября 2026 — та же «20*08».
+    SHIFT_AUCTION_MODE_OP_OSNOVA: (('20:00', '08:00'),),
 }
 # Настройки каждого направления — своя строка бывшей singleton-таблицы
 # shift_auction_test_access. Строка линии остаётся первой, чат получает вторую.
@@ -239,6 +254,7 @@ SHIFT_AUCTION_SETTINGS_ROW_ID = {
     SHIFT_AUCTION_MODE_CHAT: 2,
     SHIFT_AUCTION_MODE_TEZ_TP: 3,
     SHIFT_AUCTION_MODE_TEZ_OP: 4,
+    SHIFT_AUCTION_MODE_OP_OSNOVA: 5,
 }
 
 

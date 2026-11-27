@@ -298,6 +298,7 @@ const SalaryCalculatorVerificator = lazyWithRetry(() => import('./components/sal
 const SalaryCalculatorYandexReg = lazyWithRetry(() => import('./components/salary/SalaryCalculatorYandexReg'));
 const ResourceFteView = lazyWithRetry(() => import('./components/resources/ResourceFteView'));
 const ResourceChatFteView = lazyWithRetry(() => import('./components/resources/ResourceChatFteView'));
+const ResourceOpFteView = lazyWithRetry(() => import('./components/resources/ResourceOpFteView'));
 const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/ShiftAuctionView'));
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
 const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'));
@@ -676,9 +677,10 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     // «Фронт офисы» — ради табеля фронт-офисов (06.11.2026): суперадмин берёт его
     // плиткой окна «Сформировать отчёт», и при выбранном отделе пункт нужен на месте.
     sv_hours: ['szov', 'op', 'tez', 'front_office'],
-    resource_fte: ['szov'],
+    // Отдел продаж — с IC-1 (#470): «Расчет ресурсов → Основа ОП» и свой аукцион.
+    resource_fte: ['szov', 'op'],
     // Тез КЦ — с задачи #124: смены загружает руководитель, выбирают операторы.
-    shift_auction: ['szov', 'tez'],
+    shift_auction: ['szov', 'tez', 'op'],
     technical_issues: ['szov', 'op'],
     group_late_bot: ['front_office', 'hr'],
     // Табло
@@ -1058,6 +1060,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     recruiting: 'Recruiting',
     resource_fte: 'Resource FTE',
     resource_fte_chat: 'Resource FTE (chat)',
+    resource_fte_op: 'Resource FTE (sales, Osnova)',
     salary: 'Salary calculator',
     shift_auction: 'Shift auction',
     surveys: 'Surveys',
@@ -2293,6 +2296,25 @@ const canAccessResourceFteSectionForUser = (userLike) => {
     return role === 'super_admin' || role === 'admin' || isSupervisorRole(role);
 };
 
+/* «Расчет ресурсов → Основа ОП» (IC-1, #470) — входящая линия отдела продаж. Суперадмин —
+   да; админ и СВ — только руководство отдела продаж (свой или возглавляемый отдел 'op'):
+   ровно этот круг ведёт и аукцион «Основы», а общему админу другого отдела планировщик
+   показал бы вместо него аукцион его отдела. СВ СЗоВ и Тез КЦ расчёт ресурсов открыт, но
+   этот вариант не их. Та же граница на бэкенде — _resource_fte_op_route_guard. */
+const OP_RESOURCE_DEPARTMENT_CODE = 'op';
+const canAccessOpResourceFteForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (!canAccessResourceFteSectionForUser(userLike)) return false;
+    const headedCodes = (Array.isArray(userLike?.headed_department_codes) ? userLike.headed_department_codes : [])
+        .map((code) => String(code || '').trim().toLowerCase())
+        .filter(Boolean);
+    const headedCode = String(userLike?.headed_department_code || '').trim().toLowerCase();
+    if (headedCode) headedCodes.push(headedCode);
+    const ownCode = String(userLike?.department_code ?? userLike?.departmentCode ?? '').trim().toLowerCase();
+    return ownCode === OP_RESOURCE_DEPARTMENT_CODE || headedCodes.includes(OP_RESOURCE_DEPARTMENT_CODE);
+};
+
 const canManageFourYouForUser = (userLike) => (
     FOUR_YOU_SECTION_OPEN &&
     normalizeRole(userLike?.role) === 'super_admin' &&
@@ -3101,7 +3123,8 @@ const canAccessSignLinksSectionForUser = (userLike) => {
    в «Обращениях», «Посылках» и «Ссылке на подписание».
 
    Модель направления приходит в профиле (`direction_model`) и спрашивается
-   сервером только у СЗоВ — в других отделах чат-менеджеров нет. Если поле не
+   сервером у СЗоВ и отдела продаж (там она открывает аукцион «Основе ОП»); чат-
+   менеджеры есть только в СЗоВ, поэтому проверка ниже сверяет и отдел. Если поле не
    доехало, пункт меню показывается: обязательную границу всё равно держит
    driver_chats/access.py на каждом роуте, а спрятанный пункт доступом не
    является.
@@ -45052,6 +45075,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 || (isRankAndFileRole(currentUserRole) && rankAndFileTasksAllowed(user));
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
+            const canAccessOpResourceFteSection = canAccessOpResourceFteForUser(user);
             const canAccessAiQaSection = canAccessAiQaForUser(user);
             // «Чаты ОП» открыты шире «ИИ-оценки» — см.
             // canAccessVerifierChatsForUser: в раздел допущены и глобальные админы.
@@ -48067,9 +48091,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
             }, [user?.id, withAccessTokenHeader, showToast]);
 
-            const openResourceScheduleGeneration = useCallback(() => {
+            // «Генерация графиков» из аукциона: прогон «Основы ОП» (IC-1) ведёт в свой
+            // планировщик — глава отдела продаж иначе попал бы в «Линию» СЗоВ. Линия и чат —
+            // как раньше, в планировщик линии.
+            const openResourceScheduleGeneration = useCallback((direction = 'line') => {
                 setResourceFteInitialView('schedule_planner');
-                navigateToView('resource_fte');
+                navigateToView(direction === 'op_osnova' ? 'resource_fte_op' : 'resource_fte');
             }, [navigateToView]);
 
             const openShiftAuctionSection = useCallback((period = null) => {
@@ -48078,7 +48105,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Направление приходит от того, кто открывает: планировщик чата ведёт
                 // на чатовый аукцион. Раздел применит его вместо запомненного выбора.
                 const directionRaw = String(period?.direction || '').trim().toLowerCase();
-                const direction = directionRaw === 'chat' ? 'chat' : (directionRaw === 'line' ? 'line' : '');
+                // «Основа ОП» (IC-1) — свой прогон: без него планировщик отдела продаж вёл
+                // бы на запомненное направление, то есть на аукцион СЗоВ.
+                const direction = ['chat', 'line', 'op_osnova'].includes(directionRaw) ? directionRaw : '';
                 setShiftAuctionInitialPeriod(
                     dateFrom || dateTo || direction ? { dateFrom, dateTo, direction } : null
                 );
@@ -49080,6 +49109,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     requestedViewFromUrl &&
                     (requestedViewFromUrl !== 'lms' || canAccessLmsSection) &&
                     ((requestedViewFromUrl !== 'resource_fte' && requestedViewFromUrl !== 'resource_fte_chat') || canAccessResourceFteSection) &&
+                    (requestedViewFromUrl !== 'resource_fte_op' || canAccessOpResourceFteSection) &&
                     (requestedViewFromUrl !== 'ai_qa' || canAccessAiQaSection) &&
                     (requestedViewFromUrl !== 'wazzup_chats' || canAccessVerifierChatsSection) &&
                     (requestedViewFromUrl !== 'chatapp_chats' || canAccessChatAppSection) &&
@@ -49136,7 +49166,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverActivationSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFixedAssetsSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessOpResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverActivationSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFixedAssetsSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks') return;
@@ -49212,7 +49242,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-                if ((view === 'resource_fte' || view === 'resource_fte_chat') && !canAccessResourceFteSection) {
+                if (((view === 'resource_fte' || view === 'resource_fte_chat') && !canAccessResourceFteSection)
+                    || (view === 'resource_fte_op' && !canAccessOpResourceFteSection)) {
                     if (isAdminLikeRole) redirectToView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) redirectToView('operators');
@@ -49368,7 +49399,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFixedAssetsSection, canAccessFourYouSection]);
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessOpResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFixedAssetsSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -57245,7 +57276,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     <button
                                                         onClick={stableSidebarHandleToggleResourceDropdown}
                                                         className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
-                                                            ['resource_fte', 'resource_fte_chat'].includes(view) ? 'bg-blue-700' : ''
+                                                            ['resource_fte', 'resource_fte_chat', 'resource_fte_op'].includes(view) ? 'bg-blue-700' : ''
                                                         }`}
                                                         aria-expanded={showSidebarResourceDropdown}
                                                         aria-haspopup="menu"
@@ -57261,6 +57292,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             ${showSidebarResourceDropdown && !isResourceClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                                             style={{ position: 'fixed', top: resourceDropdownPos.top, left: resourceDropdownPos.left, zIndex: 9999 }}
                                                         >
+                                                            {(!activeDeptCode || activeDeptCode === 'szov') && (
+                                                            <>
                                                             <button
                                                                 onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
                                                                 className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte' ? 'bg-gray-100 font-medium' : ''}`}
@@ -57276,6 +57309,21 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             >
                                                                 <FaIcon className="fas fa-comments mr-2"></FaIcon> Чат
                                                             </button>
+                                                            </>
+                                                            )}
+                                                            {/* «Основа ОП» — входящая линия отдела продаж (IC-1): при выбранном в
+                                                                сайдбаре отделе — только у своего, без выбора — вместе с СЗоВ. */}
+                                                            {canAccessOpResourceFteSection && (!activeDeptCode || activeDeptCode === 'op') && (
+                                                            <>
+                                                            {!activeDeptCode && <div className="border-t border-gray-200" />}
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte_op', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte_op' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-phone-volume mr-2"></FaIcon> Основа ОП
+                                                            </button>
+                                                            </>
+                                                            )}
                                                         </div>
                                                     )}
                                                 </li>
@@ -57306,7 +57354,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             ${showSidebarAuctionDropdown && !isAuctionClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                                             style={{ position: 'fixed', top: auctionDropdownPos.top, left: auctionDropdownPos.left, zIndex: 9999 }}
                                                         >
-                                                            {AUCTION_DEPARTMENTS.map((department, index) => (
+                                                            {/* Отдел выбран фильтром сайдбара — в меню только он, как у «Расчета
+                                                                ресурсов» (с IC-1 там при «Отделе продаж» одна «Основа ОП»). */}
+                                                            {AUCTION_DEPARTMENTS
+                                                                .filter((department) => !activeDeptCode || department.code === activeDeptCode)
+                                                                .map((department, index) => (
                                                                 <React.Fragment key={department.code}>
                                                                     {index > 0 ? <div className="border-t border-gray-200" /> : null}
                                                                     <button
@@ -57546,12 +57598,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </button>
                                             </li>
                                             )}
-                                            {canAccessResourceFteSection && departmentAllowsView(user, 'resource_fte') && (
+                                            {canAccessResourceFteSection && (departmentAllowsView(user, 'resource_fte') || canAccessOpResourceFteSection) && (
                                                 <li className="relative" ref={sidebarResourceRef}>
                                                     <button
                                                         onClick={stableSidebarHandleToggleResourceDropdown}
                                                         className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
-                                                            ['resource_fte', 'resource_fte_chat'].includes(view) ? 'bg-blue-700' : ''
+                                                            ['resource_fte', 'resource_fte_chat', 'resource_fte_op'].includes(view) ? 'bg-blue-700' : ''
                                                         }`}
                                                         aria-expanded={showSidebarResourceDropdown}
                                                         aria-haspopup="menu"
@@ -57567,6 +57619,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             ${showSidebarResourceDropdown && !isResourceClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                                             style={{ position: 'fixed', top: resourceDropdownPos.top, left: resourceDropdownPos.left, zIndex: 9999 }}
                                                         >
+                                                            {departmentAllowsView(user, 'resource_fte') && (
+                                                            <>
                                                             <button
                                                                 onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
                                                                 className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte' ? 'bg-gray-100 font-medium' : ''}`}
@@ -57582,6 +57636,21 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             >
                                                                 <FaIcon className="fas fa-comments mr-2"></FaIcon> Чат
                                                             </button>
+                                                            </>
+                                                            )}
+                                                            {/* «Основа ОП» (IC-1): глава и СВ отдела продаж видят только её —
+                                                                «Линии» и «Чата» СЗоВ в наборе разделов их отдела нет. */}
+                                                            {canAccessOpResourceFteSection && (
+                                                            <>
+                                                            {departmentAllowsView(user, 'resource_fte') && <div className="border-t border-gray-200" />}
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte_op', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte_op' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-phone-volume mr-2"></FaIcon> Основа ОП
+                                                            </button>
+                                                            </>
+                                                            )}
                                                         </div>
                                                     )}
                                                 </li>
@@ -58809,6 +58878,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 isSuperAdmin,
                 canAccessLmsSection,
                 canAccessResourceFteSection,
+                canAccessOpResourceFteSection,
                 canAccessAiQaSection,
                 canAccessVerifierChatsSection,
                 canAccessSzovWallboardSection,
@@ -59259,7 +59329,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     ? 'p-0 bg-white h-full min-h-0 min-w-0 overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === WORK_SCHEDULES_VIEW_ONLY_VIEW || view === 'shift_auction' || view === 'contests' || view === 'wiki' || ((view === 'resource_fte' || view === 'resource_fte_chat') && canAccessResourceFteSection))
+                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === WORK_SCHEDULES_VIEW_ONLY_VIEW || view === 'shift_auction' || view === 'contests' || view === 'wiki' || ((view === 'resource_fte' || view === 'resource_fte_chat') && canAccessResourceFteSection) || (view === 'resource_fte_op' && canAccessOpResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     /* «Оплата счетов» и «Продакшн» держат края сами
                                        (SECTION_COLUMN, как у «Задач»): общие p-8
@@ -61084,6 +61154,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         />
                                     </Suspense>
                                 ))}
+                                {( view === "resource_fte_op" && canAccessOpResourceFteSection && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <ResourceOpFteView
+                                            user={user}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                            initialDashboardView={resourceFteInitialView}
+                                            onOpenShiftAuction={openShiftAuctionSection}
+                                        />
+                                    </Suspense>
+                                ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={usersOutsideEmployeeAccounting} user={user} departments={departmentsOutsideEmployeeAccountingList} shiftRequestFocus={shiftRequestFocus}/>))}
                                 {( view === "departments" && isAdminLikeRole && (
@@ -62194,6 +62276,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             showToast={showToast}
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
+                                        />
+                                    </Suspense>
+                                ))}
+                                {( view === "resource_fte_op" && canAccessOpResourceFteSection && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <ResourceOpFteView
+                                            user={user}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                            initialDashboardView={resourceFteInitialView}
+                                            onOpenShiftAuction={openShiftAuctionSection}
                                         />
                                     </Suspense>
                                 ))}

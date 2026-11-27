@@ -111,10 +111,16 @@ const withStorage = (run, { broken = false } = {}) => {
   }
 };
 
-test('меню «Аукцион смен»: СЗоВ и Тез КЦ со своими прогонами', () => {
-  assert.deepEqual(AUCTION_DEPARTMENTS.map((item) => [item.code, item.label]), [['szov', 'СЗоВ'], ['tez', 'Тез КЦ']]);
+test('меню «Аукцион смен»: СЗоВ, Тез КЦ и отдел продаж со своими прогонами', () => {
+  // Отдел продаж — с IC-1 (#470): прогон «Основа ОП».
+  assert.deepEqual(
+    AUCTION_DEPARTMENTS.map((item) => [item.code, item.label]),
+    [['szov', 'СЗоВ'], ['tez', 'Тез КЦ'], ['op', 'Отдел продаж']],
+  );
   assert.equal(auctionDepartmentOfDirection('chat'), 'szov');
   assert.equal(auctionDepartmentOfDirection('tez_op'), 'tez');
+  assert.equal(auctionDepartmentOfDirection('op_osnova'), 'op');
+  assert.equal(auctionDirectionForDepartment('op'), 'op_osnova');
   // Неизвестное — линия, как у сервера.
   assert.equal(auctionDepartmentOfDirection('что-то'), 'szov');
 });

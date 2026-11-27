@@ -13,6 +13,7 @@ import CustomSelect from '../ui/CustomSelect';
 import useIsMobileShell from '../common/useIsMobileShell';
 import MobileActionSheet from '../common/MobileActionSheet';
 import { APPLE_FONT, IosModal, IosPager, IosSegmented, IosToggle, iosCard } from '../ui/ios';
+import InfoHint, { InfoHintLines } from '../common/InfoHint';
 import {
   RF_PHONE_AXIS_TICK,
   RF_PHONE_BUTTON,
@@ -2199,6 +2200,311 @@ const LINE_DIRECTION = {
 
 const DIRECTION_CONFIG = { line: LINE_DIRECTION, chat: CHAT_DIRECTION };
 
+// ===========================================================================
+// «Основа ОП» — входящая линия отдела продаж (IC-1, #470). Решение владельца
+// 27.11.2026: тот же раздел, что линия СЗоВ, без своей витрины. Всё, что отличается,
+// лежит здесь: ручки /api/resource_fte/op, вкладки без телефонии Oktell («Звонки» и
+// «Биллинг Oktell» — данные СЗоВ), свои вводные (OpSettingsPanel) и текст прогноза.
+// Линия этим не меняется — её конфигурация по-прежнему LINE_DIRECTION.
+// ===========================================================================
+// «Звонки» и «Биллинг» — те же вкладки, что у линии, но по «Касаниям» отдела продаж
+// (resource_fte/op_billing.py): владелец 27.11.2026 — «да сделай».
+const OP_VIEW_TAB_KEYS = ['overview', 'next_week', 'schedule_planner', 'losses', BILLING_VIEW_KEY, 'settings'];
+const VIEW_TABS_OP = VIEW_TABS
+  .filter((tab) => OP_VIEW_TAB_KEYS.includes(tab.key))
+  .map((tab) => (tab.key === BILLING_VIEW_KEY ? { ...tab, label: 'Биллинг' } : tab));
+
+// Прироста и «Принято» в модели «Основы» нет: эти показатели убраны из её отображения,
+// а не просто выключены — переключатель того, чего нет, тоже шум.
+const OP_HIDDEN_DISPLAY_KEYS = new Set([
+  'forecastKpiUplift',
+  'forecastKpiAnswerRate',
+  'forecastChartUplift',
+  'forecastChartAdjustedFte',
+  'forecastTableUplift',
+  'forecastTableAdjustedFte',
+]);
+// Карточки периода у «Основы» — те же, что у линии, но отчётов она не загружает: дни и
+// звонки приходят из «Касаний» сами, а «Факт FTE» — та же модель на звонках, что пришли.
+const OP_EMPTY_TEXT = {
+  calls: 'В периоде нет закрытых дней «Касаний» — выберите другой период.',
+  callsPhone: 'В периоде нет закрытых дней «Касаний».',
+  forecast: 'Для выбранного периода не нашлось истории звонков «Касаний». Сдвиньте период или выберите другой отрезок.',
+  forecastPhone: 'Для периода не нашлось истории звонков «Касаний». Сдвиньте период.',
+};
+const OP_PERIOD_CARD_TEXT = {
+  forecastHint: 'Сумма прогнозных FTE по закрытым дням',
+  actualHint: 'По звонкам, что пришли на деле, без смен',
+  daysLabel: 'Дни с данными',
+};
+const OP_DISPLAY_GROUPS = DISPLAY_GROUPS
+  .map((group) => ({
+    ...group,
+    items: group.items
+      .filter(([key]) => !OP_HIDDEN_DISPLAY_KEYS.has(key))
+      .map(([key, label]) => (key === 'metricHistoryWarnings' ? [key, OP_PERIOD_CARD_TEXT.daysLabel] : [key, label])),
+  }))
+  .filter((group) => group.items.length);
+const OP_DEFAULT_DISPLAY_OPTIONS = Object.fromEntries(
+  Object.entries(DEFAULT_DISPLAY_OPTIONS).map(([key, value]) => [key, OP_HIDDEN_DISPLAY_KEYS.has(key) ? false : value]),
+);
+const OP_FORECAST_PANEL_GROUPS = FORECAST_PANEL_GROUPS
+  .map((group) => ({ ...group, items: group.items.filter(([key]) => !OP_HIDDEN_DISPLAY_KEYS.has(key)) }))
+  .filter((group) => group.items.length);
+
+// Подписи биллинга «Основы»: разговор — сам разговор оператора, без автоинформатора и очереди.
+const OP_BILLING_CAPTIONS = {
+  att: 'Средняя длина разговора оператора — без автоинформатора и очереди',
+  talk: 'Разговоры операторов по принятым звонкам — без автоинформатора и очереди',
+  total: 'Разговор и ожидание в очереди по всем звонкам, вместе с неотвеченными',
+  detailTalk: 'Разговор оператора — без автоинформатора и очереди',
+  tileTalk: 'Разговоры операторов — без автоинформатора и очереди',
+  groupingDelta: 'факт на линии минус прогноз людей',
+  ahtTitle: 'Average Handling Time — у входящих разговор и ожидание в очереди, у исходящих звонок целиком, с гудками',
+  ahtIncoming: 'Разговор и ожидание в очереди',
+  ahtOutgoing: 'Звонок целиком, с гудками',
+  dialWaitTitle: 'Статус «Соединение» в iCORE Phone — набор номера и гудки до ответа',
+  operatorHint: 'OCC и UTZ — по оператору за день целиком: ожидание звонка и паузы на направления не делятся',
+};
+const OP_BILLING_GROUPING_COLUMNS = BILLING_GROUPING_COLUMNS.map((column) => {
+  if (column.key === 'talk') return { ...column, hint: 'Средняя длина разговора оператора по принятым звонкам' };
+  if (column.key === 'wait') return { ...column, hint: 'Среднее ожидание в очереди принятых звонков плюс среднее ожидание неотвеченных' };
+  if (column.key === 'forecast') return { ...column, label: 'Прогноз людей', hint: 'Сколько людей нужно в час по расчёту «Основы»' };
+  if (column.key === 'planned') return { ...column, label: 'По графику', hint: 'Людей «Основы» со сменой в «Графиках работы» хотя бы минуту часа' };
+  if (column.key === 'fact') return { ...column, label: 'Факт на линии', hint: 'Людей «Основы» на линии по статусам iCORE Phone хотя бы минуту часа' };
+  if (column.key === 'delta') return { ...column, hint: 'Факт на линии минус прогноз людей' };
+  return column;
+});
+const OpBillingTable = (props) => <BillingTable {...props} captions={OP_BILLING_CAPTIONS} showRating={false} />;
+const OpBillingOperatorTable = (props) => (
+  <BillingOperatorTable
+    {...props}
+    showPostproc={false}
+    ahtTitle={OP_BILLING_CAPTIONS.ahtTitle}
+    dialWaitTitle={OP_BILLING_CAPTIONS.dialWaitTitle}
+  />
+);
+const OpBillingDetailTable = (props) => <BillingDetailTable {...props} talkTitle={OP_BILLING_CAPTIONS.detailTalk} />;
+
+const OP_BILLING = {
+  ...LINE_DIRECTION.billing,
+  // Ручки: `${apiPrefix}/billing`, `_operators`, `_details`, `_grouping`, `_grouping_comment`, `_export`.
+  endpoint: 'billing',
+  title: 'Биллинг',
+  text: 'Входящие звонки «Основы» из «Касаний»: детализация по дням за выбранный период и окно времени.',
+  outgoingText: 'Исходящие звонки операторов «Основы» из «Касаний»: детализация по дням за выбранный период и окно времени.',
+  loadingText: 'Собираем звонки из «Касаний»...',
+  errorText: 'Не удалось собрать звонки из «Касаний»',
+  detailNote: 'IVR — не дошли до очереди; очередь — не дождались оператора; время разговора — сам разговор оператора, без автоинформатора и очереди.',
+  emptyText: 'В «Касаниях» нет звонков за указанный период и окно времени.',
+  exportFileName: (mode, applied, park, direction) => {
+    const part = mode === 'operator' ? `${mode}_${direction === 'outgoing' ? 'outgoing' : 'incoming'}` : mode;
+    return `op_osnova_billing_${part}_${applied.from}_${applied.to}.xlsx`;
+  },
+};
+
+const OP_DIRECTION = {
+  ...LINE_DIRECTION,
+  apiPrefix: '/api/resource_fte/op',
+  // Отчётов «Основа» не загружает: точка в календаре — день, за который есть звонки.
+  historyPickerHint: 'точка = есть звонки',
+  storageKey: 'otp_resource_op_display_v1',
+  displayGroups: OP_DISPLAY_GROUPS,
+  defaultDisplayOptions: OP_DEFAULT_DISPLAY_OPTIONS,
+  forecastPanelGroups: OP_FORECAST_PANEL_GROUPS,
+  chartLegend: FORECAST_CHART_LEGEND_ITEMS.filter((item) => !OP_HIDDEN_DISPLAY_KEYS.has(item.key)),
+  tabs: VIEW_TABS_OP,
+  title: 'Расчет ресурсов · Основа ОП',
+  forecastText: 'Входящие — Erlang C под цель SL, исходящие «Основы» — нагрузкой в общий пул.',
+  billing: OP_BILLING,
+  hasAnswerRate: false,
+  hasLosses: true,
+  hasUpload: false,
+  hasOktellSync: false,
+  hasDirectionPicker: false,
+  hasBilling: true,
+  hasBillingTalkTime: true,
+  // Выгрузок «эффективность операторов» и «ежедневный отчёт СЗоВ» у «Основы» нет.
+  hasBillingExportTypes: false,
+  hasHistoryPairs: false,
+  hasUpliftProjection: false,
+  // Выбор недели линии сам выводит «историю для расчета» парами −21/−14 дней, а у «Основы»
+  // окно другое — те же дни недели за несколько недель. Поэтому, как у чата, обычный
+  // календарь периода: без подписи, которая врала бы про источник.
+  hasWeekPicker: false,
+  // Даты из локальных компонент: toISOString в Asia/Almaty с полуночи до пяти утра — вчера.
+  localDates: true,
+};
+
+// Вводные «Основы ОП» — те же, что в файле постановщика («Erlang_C_.xlsx»). Числа —
+// тем же полем, что вводные линии; выбор из двух вариантов — сегментами с «i».
+const OP_SETTINGS_NUMBER_GROUPS = [
+  {
+    title: 'Входящие',
+    fields: [
+      ['history_weeks', 'Недель истории', '1'],
+      ['aht_in_seconds', 'AHT входа, сек', '1'],
+      ['sl_target', 'Цель SL', '0.01'],
+      ['sl_seconds', 'SL, сек', '1'],
+    ],
+  },
+  {
+    title: 'Исходящие',
+    fields: [
+      ['aht_out_seconds', 'AHT исхода, сек', '1'],
+      ['noanswer_seconds', 'Недозвон, сек', '1'],
+    ],
+  },
+  {
+    title: 'Штат',
+    fields: [
+      ['occ', 'Предел занятости', '0.01'],
+      ['ur', 'UR', '0.01'],
+      ['shrinkage_coeff', 'Усушка', '0.01'],
+      ['weekly_hours_per_operator', 'Час/нед', '1'],
+      ['min_agents_per_hour', 'Минимум в час', '1'],
+    ],
+  },
+];
+const OP_SETTINGS_KEYS = [
+  ...OP_SETTINGS_NUMBER_GROUPS.flatMap((group) => group.fields.map(([key]) => key)),
+  'inbound_source',
+  'include_outbound',
+  'fte_rounding',
+  'shift_rounding',
+];
+const OP_INBOUND_SOURCE_OPTIONS = [
+  { value: 'timesfm', label: 'Прогноз ОП' },
+  { value: 'history', label: 'Среднее за недели' },
+];
+const OP_INBOUND_SOURCE_HINT = [
+  'Прогноз ОП — ночной прогноз звонков отдела (TimesFM); раскладка дня по часам — из тех же дней недели прошлых недель',
+  'Среднее за недели — среднее тех же дней недели за «Недель истории», как в файле расчёта',
+];
+const OP_OUTBOUND_OPTIONS = [
+  { value: 'on', label: 'Учитывать' },
+  { value: 'off', label: 'Не учитывать' },
+];
+const OP_OUTBOUND_HINT = [
+  'Учитывать — соединённые звонки и недозвоны «Основы» добавляют нагрузку в общий пул; людей в час не меньше, чем нужно входящим',
+  'Не учитывать — люди только под входящие по Erlang C',
+];
+
+// Текст под заголовком прогноза: откуда звонки и как считаются люди — по фактическим
+// дням периода, а не по умолчанию.
+const describeOpForecast = (opModel = {}, settings = {}) => {
+  const weeks = Number(settings.history_weeks || opModel.history_weeks || 4);
+  const days = Number(opModel.days || 0);
+  const engineDays = Number(opModel.engine_days || 0);
+  let calls = `Звонки — среднее тех же дней недели за ${weeks} нед.`;
+  if (engineDays > 0 && engineDays >= days) calls = `Звонки — прогноз ОП (TimesFM), раскладка по часам — за ${weeks} нед.`;
+  else if (engineDays > 0) calls = `Звонки — прогноз ОП (TimesFM) у ${engineDays} из ${days} дн., у остальных — среднее за ${weeks} нед.`;
+  const sl = Math.round(Number(settings.sl_target || 0.8) * 100);
+  const slSeconds = Math.round(Number(settings.sl_seconds || 20));
+  const occ = Math.round(Number(settings.occ || 0.85) * 100);
+  const people = settings.include_outbound === false
+    ? `Люди по часам — Erlang C под SL ${sl}/${slSeconds}.`
+    : `Люди по часам — Erlang C под SL ${sl}/${slSeconds} и исходящие «Основы» при занятости до ${occ} %.`;
+  return `${calls} ${people}`;
+};
+
+const OpChoice = ({ label, hintTitle, hintLines, value, options, onChange }) => {
+  const words = String(label).split(' ');
+  const last = words.pop();
+  return (
+    <div>
+      <div className="mb-1.5 text-xs font-medium text-slate-500">
+        {words.length ? `${words.join(' ')} ` : ''}
+        <span className="whitespace-nowrap">
+          {last}
+          <InfoHint side="left" className="ml-1.5 align-middle" title={hintTitle}>
+            <InfoHintLines lines={hintLines} />
+          </InfoHint>
+        </span>
+      </div>
+      <IosSegmented value={value} onChange={onChange} options={options} stretch ariaLabel={label} />
+    </div>
+  );
+};
+
+const OpSettingsPanel = ({ draft, setDraft, onSave, inputClass }) => {
+  if (!draft) return null;
+  const setValue = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
+        <Settings size={16} />
+        Настройки расчета
+      </div>
+      <div className="space-y-4">
+        <OpChoice
+          label="Прогноз входящих"
+          hintTitle="Откуда берётся число звонков на день"
+          hintLines={OP_INBOUND_SOURCE_HINT}
+          value={draft.inbound_source || 'timesfm'}
+          options={OP_INBOUND_SOURCE_OPTIONS}
+          onChange={(value) => setValue('inbound_source', value)}
+        />
+        <OpChoice
+          label="Исходящие в расчёте"
+          hintTitle="Нужны ли людям часы на исходящие"
+          hintLines={OP_OUTBOUND_HINT}
+          value={draft.include_outbound === false ? 'off' : 'on'}
+          options={OP_OUTBOUND_OPTIONS}
+          onChange={(value) => setValue('include_outbound', value === 'on')}
+        />
+        {OP_SETTINGS_NUMBER_GROUPS.map((group) => (
+          <div key={group.title}>
+            <div className="mb-1.5 text-xs font-semibold text-slate-700">{group.title}</div>
+            <div className="grid grid-cols-2 gap-3">
+              {group.fields.map(([key, label, step]) => (
+                <label key={key} className="block">
+                  <span className="text-xs font-medium text-slate-500">{label}</span>
+                  <input
+                    type="number"
+                    step={step}
+                    value={draft[key] ?? ''}
+                    onChange={(event) => setValue(key, event.target.value)}
+                    className={`${inputClass} mt-1 w-full tabular-nums`}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+        ))}
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className="text-xs font-medium text-slate-500">FTE</span>
+            <select value={draft.fte_rounding || 'none'} onChange={(event) => setValue('fte_rounding', event.target.value)} className={`${inputClass} mt-1 w-full`}>
+              <option value="none">без округл.</option>
+              <option value="ceil">вверх</option>
+              <option value="round">матем.</option>
+              <option value="floor">вниз</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-slate-500">Смены</span>
+            <select value={draft.shift_rounding || 'ceil'} onChange={(event) => setValue('shift_rounding', event.target.value)} className={`${inputClass} mt-1 w-full`}>
+              <option value="ceil">вверх</option>
+              <option value="none">без округл.</option>
+              <option value="round">матем.</option>
+              <option value="floor">вниз</option>
+            </select>
+          </label>
+        </div>
+        <button type="button" onClick={onSave} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800">
+          <Save size={16} />
+          Сохранить
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// Каталог направлений пополняется ниже объявления: участок линии (LINE_DIRECTION →
+// DIRECTION_CONFIG) остаётся ровно прежним, его сверяет страж прода.
+DIRECTION_CONFIG.op = OP_DIRECTION;
+
 const OverviewTrendTooltip = ({ active, label, payload, config = OVERVIEW_TREND_TOOLTIP_CONFIG }) => {
   if (!active || !payload?.length) return null;
 
@@ -2642,7 +2948,16 @@ const TimeRangePicker = ({ label, startValue, endValue, onRangeChange }) => {
   );
 };
 
-const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' }) => {
+// Подписи колонок биллинга линии — дословно прежние; «Основа ОП» (IC-1) передаёт свои:
+// её звонки не из Oktell, и «как в Oktell: приветствие, очередь» там было бы неправдой.
+const BILLING_LINE_CAPTIONS = {
+  att: 'Средняя длина принятого звонка, как в Oktell: приветствие, очередь и разговор',
+  talk: 'Принятые звонки целиком, как в Oktell: приветствие, очередь и разговор',
+  total: 'Все звонки целиком, вместе с неотвеченными: приветствие, очередь и разговор',
+  detailTalk: 'Принятый звонок целиком, как в Oktell: приветствие, очередь и разговор',
+};
+
+const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park', captions = BILLING_LINE_CAPTIONS, showRating = true }) => {
   const renderMetricsCells = (item) => {
     const arRatio = safeRatio(item.lost, item.arrived);
     // SL: отвеченные за порог ожидания ко ВСЕМ попавшим в очередь (обслуженные + потерянные)
@@ -2669,12 +2984,14 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
         <td className="px-3 py-2.5 text-right text-slate-900">{formatDurationHms(item.talk_seconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.total_seconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-500">{formatInt(item.greet_drop)}</td>
+        {showRating ? (
         <td
           className="px-3 py-2.5 text-right text-slate-700"
           title={Number(item.rating_count) > 0 ? `Оценок водителей: ${formatInt(item.rating_count)}` : 'Водители не оценили ни одного разговора'}
         >
           {ratingAvg === null ? '—' : formatNumber(ratingAvg, 2)}
         </td>
+        ) : null}
       </>
     );
   };
@@ -2690,15 +3007,15 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
             <th className="px-3 py-2.5 text-right font-semibold">Потеряно</th>
             <th className="px-3 py-2.5 text-right font-semibold">AR</th>
             <th className="px-3 py-2.5 text-right font-semibold">SL</th>
-            <th className="px-3 py-2.5 text-right font-semibold" title="Средняя длина принятого звонка, как в Oktell: приветствие, очередь и разговор">Ср. разговор</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title={captions.att}>Ср. разговор</th>
             {/* Отчётность СЗоВ ведётся в секундах (задача #298), поэтому рядом с
                 ч:мм:сс — то же среднее целым числом секунд. */}
             <th className="px-3 py-2.5 text-right font-semibold" title="Среднее время разговора (ATT) в секундах">Ср. разговор, сек</th>
             <th className="px-3 py-2.5 text-right font-semibold" title="Среднее ожидание в очереди у принятых звонков">Ср. ожидание</th>
-            <th className="px-3 py-2.5 text-right font-semibold" title="Принятые звонки целиком, как в Oktell: приветствие, очередь и разговор">Время разговора</th>
-            <th className="px-3 py-2.5 text-right font-semibold" title="Все звонки целиком, вместе с неотвеченными: приветствие, очередь и разговор">Общее время</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title={captions.talk}>Время разговора</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title={captions.total}>Общее время</th>
             <th className="px-3 py-2.5 text-right font-semibold">Сброс на приветствии</th>
-            <th className="px-3 py-2.5 text-right font-semibold" title="Средний балл 1–5, который водитель ставит в IVR после разговора с оператором. Разговоры без оценки в среднее не входят.">Ср. оценка</th>
+            {showRating ? (<th className="px-3 py-2.5 text-right font-semibold" title="Средний балл 1–5, который водитель ставит в IVR после разговора с оператором. Разговоры без оценки в среднее не входят.">Ср. оценка</th>) : null}
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -2710,7 +3027,7 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
                     {billingLineLabel(item.line) || billingLineDisplayNumber(item.line) || 'Номер не определён'}
                   </div>
                   <div className="text-xs text-slate-400">
-                    {billingLineDisplayNumber(item.line) ? `${billingLineDisplayNumber(item.line)} · ${billingParkLabel(item.park)}` : billingParkLabel(item.park)}
+                    {billingLineLabel(item.line) && billingLineDisplayNumber(item.line) ? `${billingLineDisplayNumber(item.line)} · ${billingParkLabel(item.park)}` : billingParkLabel(item.park)}
                   </div>
                 </td>
               ) : (
@@ -2738,7 +3055,7 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
 const BILLING_GROUPING_NUMBER_CELL = 'px-3 py-2 text-right';
 const BILLING_GROUPING_SHIFT_CELL = 'bg-sky-50/70';
 
-const BillingGroupingTable = ({ date, hours, onEditComment }) => {
+const BillingGroupingTable = ({ date, hours, onEditComment, columns = BILLING_GROUPING_COLUMNS }) => {
   const rows = useMemo(() => (hours || []).map((item) => billingGroupingRow(item)), [hours]);
   const blocks = useMemo(
     () => new Map(billingGroupingCommentBlocks(rows).map((block) => [block.index, block])),
@@ -2752,7 +3069,7 @@ const BillingGroupingTable = ({ date, hours, onEditComment }) => {
       <table className="w-full min-w-[1180px] text-sm tabular-nums">
         <thead className="text-[11px] uppercase tracking-wide text-slate-500">
           <tr className="border-b border-slate-200">
-            {BILLING_GROUPING_COLUMNS.map((column) => (
+            {columns.map((column) => (
               <th
                 key={column.key}
                 scope="col"
@@ -3048,7 +3365,7 @@ const BillingGroupingCommentEditor = ({ editor, hours, saving, onSave, onClose }
   );
 };
 
-const BillingDetailTable = ({ rows }) => (
+const BillingDetailTable = ({ rows, talkTitle = BILLING_LINE_CAPTIONS.detailTalk }) => (
   <div className="overflow-x-auto">
     <table className="w-full min-w-[1180px] divide-y divide-slate-200 text-sm tabular-nums">
       <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
@@ -3059,7 +3376,7 @@ const BillingDetailTable = ({ rows }) => (
           <th className="px-3 py-2.5 text-left font-semibold">Номер водителя</th>
           <th className="px-3 py-2.5 text-right font-semibold" title="Звонки, которые не дошли до очереди после IVR">Сброс на IVR</th>
           <th className="px-3 py-2.5 text-right font-semibold" title="Оператор не принял звонок, водитель сбросил">Сброс в очереди/пропущенные</th>
-          <th className="px-3 py-2.5 text-right font-semibold" title="Принятый звонок целиком, как в Oktell: приветствие, очередь и разговор">Время разговора</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title={talkTitle}>Время разговора</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-slate-100">
@@ -3095,8 +3412,12 @@ const billingOperatorActivity = (item) => {
   };
 };
 
+const BILLING_OPERATOR_AHT_TITLE = 'Average Handling Time — звонок целиком (с IVR и очередью) плюс удержание и постобработка';
+const BILLING_OPERATOR_DIAL_WAIT_TITLE = 'Ожидание ответа абонента — от набора до ответа водителя';
+
 const BillingOperatorTable = ({
   rows, totals, totalsLabel = 'Итого', direction = 'incoming', showDialWait = false,
+  showPostproc = true, ahtTitle = BILLING_OPERATOR_AHT_TITLE, dialWaitTitle = BILLING_OPERATOR_DIAL_WAIT_TITLE,
 }) => {
   const isOutgoing = direction === 'outgoing';
   const renderMetricsCells = (item) => {
@@ -3118,7 +3439,9 @@ const BillingOperatorTable = ({
           <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.dial_wait_seconds)}</td>
         ) : null}
         <td className="px-3 py-2.5 text-right text-slate-900">{formatDurationHms(item.talk_state_seconds)}</td>
-        <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.postproc_seconds)}</td>
+        {showPostproc ? (
+          <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.postproc_seconds)}</td>
+        ) : null}
         <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.wait_seconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.pause_seconds)}</td>
         <td className={`px-3 py-2.5 text-right font-semibold ${occ === null ? 'text-slate-400' : 'text-slate-900'}`}>
@@ -3147,12 +3470,12 @@ const BillingOperatorTable = ({
                 подряд не читает никто, кроме их автора. */}
             <th className="px-3 py-2.5 text-right font-semibold" title="Average Talk Time — среднее время разговора">ATT</th>
             <th className="px-3 py-2.5 text-right font-semibold" title="Average Talk Time в секундах">ATT, сек</th>
-            <th className="px-3 py-2.5 text-right font-semibold" title="Average Handling Time — звонок целиком (с IVR и очередью) плюс удержание и постобработка">AHT</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title={ahtTitle}>AHT</th>
             {showDialWait ? (
-              <th className="px-3 py-2.5 text-right font-semibold" title="Ожидание ответа абонента — от набора до ответа водителя">Дозвон</th>
+              <th className="px-3 py-2.5 text-right font-semibold" title={dialWaitTitle}>Дозвон</th>
             ) : null}
             <th className="px-3 py-2.5 text-right font-semibold">Разговоры</th>
-            <th className="px-3 py-2.5 text-right font-semibold">Постобработка</th>
+            {showPostproc ? (<th className="px-3 py-2.5 text-right font-semibold">Постобработка</th>) : null}
             <th className="px-3 py-2.5 text-right font-semibold">Ожидание</th>
             <th className="px-3 py-2.5 text-right font-semibold">Пауза</th>
             <th className="px-3 py-2.5 text-right font-semibold" title="Occupancy — разговоры и обработка ко всему времени в системе">OCC</th>
@@ -3456,6 +3779,8 @@ const ResourceFteView = ({
 }) => {
   const cfg = DIRECTION_CONFIG[direction] || DIRECTION_CONFIG.line;
   const isChat = cfg === DIRECTION_CONFIG.chat;
+  // «Основа ОП» (IC-1): ветки линии, завязанные на Oktell и движок СЗоВ, ей не нужны.
+  const isOp = cfg === DIRECTION_CONFIG.op;
   // Даты собираем из локальных компонент там, где направление это требует:
   // toISOString в Asia/Almaty (UTC+5) с полуночи до пяти утра отдаёт ВЧЕРА.
   const readToday = () => (cfg.localDates ? toIsoDate(new Date()) : todayIso());
@@ -3686,7 +4011,8 @@ const ResourceFteView = ({
   // После пересчёта обновляется обзор текущего периода; несохранённые правки настроек
   // при этом остаются.
   const forecastEngine = useForecastEngine({
-    enabled: !isChat,
+    // Движок СЗоВ (его ручки и поправки — отдела szov): «Основе ОП» он не принадлежит.
+    enabled: !isChat && !isOp,
     apiRoot,
     apiPrefix: cfg.apiPrefix,
     buildHeaders,
@@ -3939,12 +4265,16 @@ const ResourceFteView = ({
   // Колонка «Дозвон» появляется только когда станция её пишет (предиктивный обзвон):
   // в нынешнем режиме «Таксопарк исходящая» она была бы вечным нулём.
   const billingShowDialWait = billingIsOutgoing && billingOperatorHasDialWait(billingReport);
-  const billingOperatorHint = 'OCC и UTZ — по оператору за день целиком: «Готов» и «Перерыв» на направления не делятся';
+  const billingOperatorHint = isOp
+    ? OP_BILLING_CAPTIONS.operatorHint
+    : 'OCC и UTZ — по оператору за день целиком: «Готов» и «Перерыв» на направления не делятся';
   // Про гудки внутри разговора молчать нельзя — иначе цифра читается как чистый
   // разговор. Но это свойство одного показателя, а не всего разреза, поэтому
   // оговорка стоит подписью у него же, а не третьей строкой подсказок.
+  // Итоги берём из отчёта, а не из billingTotals: тот объявлен ниже, и обращение к нему
+  // здесь роняло экран (TDZ), как только в отчёте появлялись гудки — у «Основы» они есть.
   const billingTalkHint = billingShowDialWait
-    ? `Дозвон ${formatDurationHms(billingTotals?.dial_wait_seconds)}`
+    ? `Дозвон ${formatDurationHms(billingReport?.totals?.dial_wait_seconds)}`
     : billingIsOutgoing ? 'С гудками до ответа водителя' : 'Состояние «Разговор» у операторов';
   const billingError = billingErrors[billingMode] || '';
   const billingDays = billingReport?.days || [];
@@ -3992,9 +4322,12 @@ const ResourceFteView = ({
   }, [billingGroupingPark, billingGroupingParks]);
   const billingSlSeconds = billingReport?.sl_threshold_seconds ?? cfg.billing.slDefaultSeconds;
   // Таблицы биллинга у направлений свои: у чата в них нет колонок о длительности.
-  const BillingSummaryTable = cfg.hasBillingTalkTime ? BillingTable : ChatBillingTable;
-  const BillingPeopleTable = cfg.hasBillingTalkTime ? BillingOperatorTable : ChatBillingOperatorTable;
-  const BillingRowsTable = cfg.hasBillingTalkTime ? BillingDetailTable : ChatBillingDetailTable;
+  const BillingSummaryTable = cfg.hasBillingTalkTime ? (isOp ? OpBillingTable : BillingTable) : ChatBillingTable;
+  const BillingPeopleTable = cfg.hasBillingTalkTime
+    ? (isOp ? OpBillingOperatorTable : BillingOperatorTable)
+    : ChatBillingOperatorTable;
+  const BillingRowsTable = cfg.hasBillingTalkTime ? (isOp ? OpBillingDetailTable : BillingDetailTable) : ChatBillingDetailTable;
+  const billingGroupingColumns = isOp ? OP_BILLING_GROUPING_COLUMNS : BILLING_GROUPING_COLUMNS;
   const billingAllExpanded = billingDays.length > 0 && billingDays.every((day) => billingExpandedDays.has(day.date));
   const toggleBillingDay = (date) => {
     setBillingExpandedDays((current) => {
@@ -4681,14 +5014,18 @@ const ResourceFteView = ({
         base_weeks: settingsDraft?.base_weeks,
         fte_rounding: settingsDraft?.fte_rounding,
         week_start: selectedForecastWeekStart || undefined,
-      } : settingsDraft;
+      } : isOp
+        // У «Основы ОП» свои вводные: служебные поля настроек (направления, отдел)
+        // сервер выводит сам и из запроса их не берёт.
+        ? Object.fromEntries(OP_SETTINGS_KEYS.map((key) => [key, settingsDraft?.[key]]))
+        : settingsDraft;
       const response = await axios.put(`${apiRoot}${cfg.apiPrefix}/settings`, body, {
         headers: buildHeaders({
           'Content-Type': 'application/json',
         }),
       });
       notify('Настройки сохранены');
-      if (isChat) {
+      if (isChat || isOp) {
         // Витрину из ответа брать нельзя: PUT считает свои 7 дней, а календари
         // показывают выбранный период — цифры одного отрезка встали бы под
         // датами другого. Перезапрашиваем витрину выбранными периодами.
@@ -4761,9 +5098,11 @@ const ResourceFteView = ({
   const forecastPeriodEnd = selectedForecastPeriodEnd || nextWeekForecast.period_end || nextWeekForecast.week_end;
   const forecastPeriodComplete = Boolean(nextWeekForecast.historyComplete) ||
     isForecastPeriodHistoryComplete(forecastPeriodStart, forecastPeriodEnd, loadedReportDateSet);
-  const engineSummary = isChat ? null : nextWeekForecast.forecastEngine;
+  const engineSummary = isChat || isOp ? null : nextWeekForecast.forecastEngine;
   let lineForecastText = cfg.forecastText;
-  if (engineSummary) {
+  if (isOp) {
+    lineForecastText = describeOpForecast(nextWeekForecast.opModel || {}, overview?.settings || {});
+  } else if (engineSummary) {
     lineForecastText = Number(engineSummary.days) < Number(engineSummary.period_days)
       ? `Дни с прогнозом ${engineSummary.method === 'calendar' ? 'календарной модели' : 'TimesFM'}: люди по часам — Erlang A под цели SL и AR. Остальные дни — по двум историческим датам (−21 и −14 дней).`
       : `Звонки — ${engineSummary.method_label}, люди по часам — Erlang A под цели SL и AR.`;
@@ -5002,7 +5341,7 @@ const ResourceFteView = ({
       <div className="flex flex-col gap-3">
         <RfPhoneHeader
           title="Расчет ресурсов"
-          caption={isChat ? 'Чат' : 'Линия'}
+          caption={isChat ? 'Чат' : (isOp ? 'Основа ОП' : 'Линия')}
           action={hasMenu ? (
             <RfPhoneRoundButton icon={MoreHorizontal} onClick={() => setPhoneSheet('actions')} ariaLabel="Действия раздела" />
           ) : (
@@ -5093,7 +5432,7 @@ const ResourceFteView = ({
         value: formatSignedNumber(overviewPeriodSummary.fteDelta, 1),
         tone: overviewPeriodSummary.fteDelta < -0.5 ? 'rose' : 'slate',
       } : null,
-      displayOptions.metricHistoryWarnings ? { key: 'days', label: 'Дни с отчетами', value: formatInt(overviewPeriodSummary.days) } : null,
+      displayOptions.metricHistoryWarnings ? { key: 'days', label: isOp ? OP_PERIOD_CARD_TEXT.daysLabel : 'Дни с отчетами', value: formatInt(overviewPeriodSummary.days) } : null,
       displayOptions.metricLostCalls ? { key: 'lost', label: 'Потерянные звонки', value: formatInt(periodLossSummary.totalLost), hint: `принято ${formatInt(periodLossSummary.totalAccepted)}` } : null,
       displayOptions.metricLossRate ? {
         key: 'loss-rate',
@@ -5179,6 +5518,7 @@ const ResourceFteView = ({
           </RfPhoneGroup>
         ) : null}
 
+        {!isOp ? (
         <RfPhoneSection
           label="Прирост и выдержка прогноза"
           hint={incidentRiskProfile.source_start
@@ -5247,8 +5587,9 @@ const ResourceFteView = ({
             </RfPhoneCard>
           ) : null}
         </RfPhoneSection>
+        ) : null}
 
-        {incidentRiskDailyData.length ? (
+        {incidentRiskDailyData.length && !isOp ? (
           <RfPhoneGroup label="Дни, которые сформировали риск" hint="В строке — прогноз / факт и вес дня: ближайшие дни весят больше.">
             {[...incidentRiskDailyData].reverse().map((row) => (
               <RfPhoneRow
@@ -5261,6 +5602,8 @@ const ResourceFteView = ({
             ))}
           </RfPhoneGroup>
         ) : null}
+        {/* Прироста у «Основы ОП» нет — ни дней риска, ни часов прироста. */}
+        {!isOp ? (
         <RfPhoneGroup
           label="Часы прироста"
           hint={incidentRiskTopHours.length ? null : 'За последние 6 дней нет часов, где факт был выше прогноза.'}
@@ -5276,6 +5619,7 @@ const ResourceFteView = ({
             />
           ))}
         </RfPhoneGroup>
+        ) : null}
       </>
     );
   };
@@ -5416,7 +5760,7 @@ const ResourceFteView = ({
           nextLabel="Неделя вперёд"
         />
 
-        {!isChat ? (
+        {!isChat && !isOp ? (
           <EnginePhoneForecast
             summary={engineSummary}
             engine={forecastEngine.info}
@@ -5482,7 +5826,7 @@ const ResourceFteView = ({
               ariaLabel="Дни периода"
               onSelect={(item) => setSelectedForecastDate(item.key)}
               days={days.map((profile) => {
-                const enoughSources = cfg.hasHistoryPairs
+                const enoughSources = cfg.hasHistoryPairs || isOp
                   ? !profile.insufficient_history
                   : Number(profile.used_source_count || 0) > 1;
                 return {
@@ -5523,9 +5867,12 @@ const ResourceFteView = ({
                 <>
                   <RfPhoneRow
                     title="Звонки"
-                    subtitle={actualOn
-                      ? `факт ${formatInt(day.actual_received_calls)} · прирост +${formatInt(day.incident_uplift_calls)}`
-                      : `+${formatInt(day.incident_uplift_calls)} возможный прирост · вес ${formatPercent(day.incident_future_weight ?? 1, 0)}`}
+                    subtitle={isOp
+                      // У «Основы ОП» прироста нет — подпись про него была бы шумом из нулей.
+                      ? (actualOn ? `факт ${formatInt(day.actual_received_calls)}` : null)
+                      : actualOn
+                        ? `факт ${formatInt(day.actual_received_calls)} · прирост +${formatInt(day.incident_uplift_calls)}`
+                        : `+${formatInt(day.incident_uplift_calls)} возможный прирост · вес ${formatPercent(day.incident_future_weight ?? 1, 0)}`}
                     value={formatInt(day.forecast_calls)}
                     valueClassName="font-semibold text-slate-900"
                   />
@@ -5683,7 +6030,7 @@ const ResourceFteView = ({
             title="Нет прогноза"
             text={cfg.hasUpload
               ? 'Загрузите исторические отчеты, чтобы построить прогноз периода.'
-              : 'Для периода не нашлось базовых недель с чатами. Сдвиньте период.'}
+              : (isOp ? OP_EMPTY_TEXT.forecastPhone : 'Для периода не нашлось базовых недель с чатами. Сдвиньте период.')}
             action={cfg.hasUpload ? (
               <button type="button" onClick={() => setIsUploadModalOpen(true)} className={RF_PHONE_BUTTON.blue}>
                 Загрузить отчёт
@@ -5830,7 +6177,7 @@ const ResourceFteView = ({
               />
             </>
           ) : (
-            <p className="py-6 text-center text-[14px] text-slate-500">Загрузите ежедневные отчеты, чтобы увидеть динамику.</p>
+            <p className="py-6 text-center text-[14px] text-slate-500">{isOp ? OP_EMPTY_TEXT.callsPhone : 'Загрузите ежедневные отчеты, чтобы увидеть динамику.'}</p>
           )}
         </RfPhoneCard>
 
@@ -6091,7 +6438,7 @@ const ResourceFteView = ({
     if (billingMode === 'grouping' && !cfg.hasBillingTalkTime) {
       return <ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" mode={billingReport?.park ? 'groupingPark' : 'grouping'} />;
     }
-    if (billingMode === 'grouping') return <BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} />;
+    if (billingMode === 'grouping') return <BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} columns={billingGroupingColumns} />;
     return <BillingSummaryTable rows={day.parks || []} totals={day.totals} totalsLabel="Итого за день" mode={billingMode} />;
   };
 
@@ -6104,7 +6451,7 @@ const ResourceFteView = ({
     if (cfg.billing.modeHint) modeHint = cfg.billing.modeHint(billingMode, billingSlSeconds);
     else if (billingMode === 'operator') modeHint = billingOperatorHint;
     else if (billingMode === 'detail') modeHint = 'Одна строка — один звонок; на странице 25 звонков';
-    else if (billingMode === 'grouping') modeHint = 'Разница — факт смен минус прогноз; комментарий к часу — нажатие на его ячейку';
+    else if (billingMode === 'grouping') modeHint = `Разница — ${isOp ? OP_BILLING_CAPTIONS.groupingDelta : 'факт смен минус прогноз'}; комментарий к часу — нажатие на его ячейку`;
     else modeHint = `SL — отвечено за ≤ ${billingSlSeconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь`;
 
     let tiles = [];
@@ -6139,7 +6486,7 @@ const ResourceFteView = ({
           { key: 'lost', label: 'Потеряно', value: formatInt(billingTotals.lost), tone: Number(billingTotals.lost || 0) > 0 ? 'rose' : 'slate' },
           { key: 'ar', label: 'AR', value: billingArRatio === null ? '—' : formatPercent(billingArRatio, 1), tone: phoneArTone(billingArRatio) },
           { key: 'sl', label: 'SL', value: billingSlRatio === null ? '—' : formatPercent(billingSlRatio, 1), hint: `ответ ≤ ${billingSlSeconds} сек`, tone: phoneSlTone(billingSlRatio) },
-          { key: 'talk', label: 'Время разговора', value: formatDurationHms(billingTotals.talk_seconds), hint: 'как в Oktell: с приветствием и очередью' },
+          { key: 'talk', label: 'Время разговора', value: formatDurationHms(billingTotals.talk_seconds), hint: isOp ? 'сам разговор, без очереди' : 'как в Oktell: с приветствием и очередью' },
         ];
       }
     }
@@ -6417,7 +6764,49 @@ const ResourceFteView = ({
         </>
       ) : null}
 
-      {!isChat && settingsDraft ? (
+      {isOp && settingsDraft ? (
+        <>
+          <RfPhoneGroup label="Прогноз входящих" hint={OP_INBOUND_SOURCE_HINT.join('. ')}>
+            <div className="px-4 py-3">
+              <IosSegmented
+                value={settingsDraft.inbound_source || 'timesfm'}
+                onChange={(value) => setSettingsDraft((current) => ({ ...current, inbound_source: value }))}
+                options={OP_INBOUND_SOURCE_OPTIONS}
+                stretch
+                ariaLabel="Прогноз входящих"
+              />
+            </div>
+          </RfPhoneGroup>
+          <RfPhoneGroup label="Исходящие в расчёте" hint={OP_OUTBOUND_HINT.join('. ')}>
+            <div className="px-4 py-3">
+              <IosSegmented
+                value={settingsDraft.include_outbound === false ? 'off' : 'on'}
+                onChange={(value) => setSettingsDraft((current) => ({ ...current, include_outbound: value === 'on' }))}
+                options={OP_OUTBOUND_OPTIONS}
+                stretch
+                ariaLabel="Исходящие в расчёте"
+              />
+            </div>
+          </RfPhoneGroup>
+          {OP_SETTINGS_NUMBER_GROUPS.map((group) => (
+            <RfPhoneGroup key={group.title} label={group.title}>
+              {group.fields.map(([key, label]) => (
+                <RfPhoneInputRow
+                  key={key}
+                  label={label}
+                  value={settingsDraft[key]}
+                  onChange={(value) => setSettingsDraft((current) => ({ ...current, [key]: value }))}
+                />
+              ))}
+            </RfPhoneGroup>
+          ))}
+          <button type="button" onClick={handleSaveSettings} className={RF_PHONE_BUTTON.blue}>
+            Сохранить
+          </button>
+        </>
+      ) : null}
+
+      {!isChat && !isOp && settingsDraft ? (
         <>
           <EnginePhoneSettings draft={settingsDraft} setDraft={setSettingsDraft} engine={forecastEngine.info} />
           <RfPhoneGroup label="Настройки расчета">
@@ -6680,7 +7069,7 @@ const ResourceFteView = ({
           open={phoneScreen === 'forecast-period'}
           onClose={closePhoneScreen}
           title="Период прогноза"
-          subtitle={cfg.hasHistoryPairs ? 'зелёный день — истории хватает' : 'точка — есть чаты'}
+          subtitle={cfg.hasHistoryPairs ? 'зелёный день — истории хватает' : (isOp ? 'точка — есть звонки' : 'точка — есть чаты')}
         >
           <RfPhoneCalendar
             startValue={forecastPeriodStart}
@@ -7311,12 +7700,12 @@ const ResourceFteView = ({
                 icon={TrendingUp}
                 label="Прогноз FTE периода"
                 value={formatNumber(overviewPeriodSummary.forecastFteTotal, 1)}
-                hint="Сумма прогнозных FTE по загруженным дням"
+                hint={isOp ? OP_PERIOD_CARD_TEXT.forecastHint : 'Сумма прогнозных FTE по загруженным дням'}
                 tone="blue"
               />
             )}
             {!isChat && displayOptions.metricWeeklyFte && (
-              <StatCard icon={Users} label="Факт FTE периода" value={formatNumber(overviewPeriodSummary.actualFteTotal, 1)} hint="Из разговорной нагрузки отчетов, без смен" tone="emerald" />
+              <StatCard icon={Users} label="Факт FTE периода" value={formatNumber(overviewPeriodSummary.actualFteTotal, 1)} hint={isOp ? OP_PERIOD_CARD_TEXT.actualHint : 'Из разговорной нагрузки отчетов, без смен'} tone="emerald" />
             )}
             {!isChat && displayOptions.metricBaseOperators && (
               <StatCard
@@ -7328,7 +7717,7 @@ const ResourceFteView = ({
               />
             )}
             {!isChat && displayOptions.metricHistoryWarnings && (
-              <StatCard icon={CalendarDays} label="Дни с отчетами" value={overviewPeriodSummary.days} hint="В выбранном периоде анализа" tone="slate" />
+              <StatCard icon={CalendarDays} label={isOp ? OP_PERIOD_CARD_TEXT.daysLabel : 'Дни с отчетами'} value={overviewPeriodSummary.days} hint="В выбранном периоде анализа" tone="slate" />
             )}
             {!isChat && displayOptions.metricLostCalls && (
               <StatCard icon={PhoneMissed} label="Потерянные звонки" value={formatInt(periodLossSummary.totalLost)} hint={`Принято: ${formatInt(periodLossSummary.totalAccepted)}`} tone="rose" />
@@ -7376,7 +7765,9 @@ const ResourceFteView = ({
           </section>
         )}
 
-        {activeDashboardView === 'overview' && (
+        {/* Прироста у «Основы ОП» нет: её прогноз — движок ОП и история, модели наплыва
+            под неё не строили, и блок из нулей был бы шумом. */}
+        {activeDashboardView === 'overview' && !isOp && (
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
               <div>
@@ -7758,7 +8149,7 @@ const ResourceFteView = ({
                     </ResponsiveContainer>
                   </div>
                 ) : (
-                  <EmptyState title="Нет данных по звонкам" text="Загрузите ежедневные отчеты, чтобы увидеть динамику звонков." />
+                  <EmptyState title="Нет данных по звонкам" text={isOp ? OP_EMPTY_TEXT.calls : 'Загрузите ежедневные отчеты, чтобы увидеть динамику звонков.'} />
                 )}
               </div>
 
@@ -8321,7 +8712,7 @@ const ResourceFteView = ({
                   ) : billingMode === 'detail' ? (
                     <span>Одна строка — один звонок; на странице 25 звонков</span>
                   ) : billingMode === 'grouping' ? (
-                    <span>Разница — факт смен минус прогноз; комментарий к часу — щелчок по ячейке</span>
+                    <span>Разница — {isOp ? OP_BILLING_CAPTIONS.groupingDelta : 'факт смен минус прогноз'}; комментарий к часу — щелчок по ячейке</span>
                   ) : (
                     <span>SL — отвечено за ≤ {billingSlSeconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь</span>
                   )}
@@ -8408,7 +8799,7 @@ const ResourceFteView = ({
                       tone="blue"
                     />
                     <StatCard icon={PhoneCall} label="ATT" value={billingAttSeconds === null ? '—' : formatDurationHms(billingAttSeconds)} hint={billingAttSeconds === null ? 'Ср. время разговора' : `Ср. время разговора · ${formatInt(billingAttSeconds)} сек`} tone="slate" />
-                    <StatCard icon={ListChecks} label="AHT" value={billingAhtSeconds === null ? '—' : formatDurationHms(billingAhtSeconds)} hint="Звонок целиком + удержание и постобработка" tone="slate" />
+                    <StatCard icon={ListChecks} label="AHT" value={billingAhtSeconds === null ? '—' : formatDurationHms(billingAhtSeconds)} hint={isOp ? (billingIsOutgoing ? OP_BILLING_CAPTIONS.ahtOutgoing : OP_BILLING_CAPTIONS.ahtIncoming) : 'Звонок целиком + удержание и постобработка'} tone="slate" />
                     <StatCard
                       icon={TrendingUp}
                       label="OCC"
@@ -8443,7 +8834,7 @@ const ResourceFteView = ({
                       hint={`Ответ за ≤ ${billingSlSeconds} сек от поступивших`}
                       tone={billingSlRatio !== null && billingSlRatio >= 0.8 ? 'emerald' : billingSlRatio !== null && billingSlRatio >= 0.6 ? 'amber' : 'rose'}
                     />
-                    <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_seconds)} hint="Как в Oktell: с приветствием и очередью" tone="slate" />
+                    <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_seconds)} hint={isOp ? OP_BILLING_CAPTIONS.tileTalk : 'Как в Oktell: с приветствием и очередью'} tone="slate" />
                   </div>
                 ))}
 
@@ -8585,7 +8976,7 @@ const ResourceFteView = ({
                                 ) : billingMode === 'grouping' && !cfg.hasBillingTalkTime ? (
                                   <ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" mode={billingReport.park ? 'groupingPark' : 'grouping'} />
                                 ) : billingMode === 'grouping' ? (
-                                  <BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} />
+                                  <BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} columns={billingGroupingColumns} />
                                 ) : (
                                   <BillingSummaryTable rows={day.parks || []} totals={day.totals} totalsLabel="Итого за день" mode={billingMode} />
                                 )}
@@ -8894,7 +9285,12 @@ const ResourceFteView = ({
             </section>
           </aside>
           )}
-          {activeDashboardView === 'settings' && !isChat && (
+          {activeDashboardView === 'settings' && isOp && (
+          <aside className="space-y-4">
+            <OpSettingsPanel draft={settingsDraft} setDraft={setSettingsDraft} onSave={handleSaveSettings} inputClass={inputClass} />
+          </aside>
+          )}
+          {activeDashboardView === 'settings' && !isChat && !isOp && (
           <aside className="space-y-4">
             <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -9024,7 +9420,7 @@ const ResourceFteView = ({
               </section>
             )}
 
-            {activeDashboardView === 'next_week' && !isChat && (
+            {activeDashboardView === 'next_week' && !isChat && !isOp && (
               <EngineForecastCard
                 summary={nextWeekForecast.forecastEngine}
                 engine={forecastEngine.info}
@@ -9263,7 +9659,8 @@ const ResourceFteView = ({
                           const factDelta = hasActual ? actualFte - forecastFte : null;
                           const hasUplift = Number(profile.incident_uplift_calls || 0) > 0.01;
                           const callShare = Math.min(100, (Number(profile.forecast_calls || 0) / maxDailyCalls) * 100);
-                          const enoughSources = cfg.hasHistoryPairs
+                          // «Основа ОП» отдаёт свой признак — хватило ли тех же дней недели.
+                          const enoughSources = cfg.hasHistoryPairs || isOp
                             ? !profile.insufficient_history
                             : Number(profile.used_source_count || 0) > 1;
                           const accentClass = enoughSources ? 'bg-emerald-500' : 'bg-amber-400';
@@ -9400,6 +9797,8 @@ const ResourceFteView = ({
                               <p className="text-sm text-slate-500">
                                 {isChat
                                   ? `Час считается как чаты часа ÷ ${formatNumber(chatCapacityPerHourValue, 1)} чатов в час на человека.`
+                                  : isOp
+                                    ? `Люди по часам — Erlang C под SL ${Math.round(Number(overview?.settings?.sl_target || 0.8) * 100)}/${Math.round(Number(overview?.settings?.sl_seconds || 20))}${overview?.settings?.include_outbound === false ? '' : ' и исходящие «Основы»'}, AHT входа ${formatSeconds(selectedForecastDay.forecast_aht_seconds)}.`
                                   : selectedForecastDay.engine
                                     ? `Звонки — ${selectedForecastDay.engine.method_label}; люди по часам — Erlang A под цели SL и AR, AHT ${formatSeconds(selectedForecastDay.engine.aht_seconds)}.`
                                     : `Разбивка использует AHT дня ${formatSeconds(selectedForecastDay.forecast_aht_seconds)} и единые коэффициенты.`}
@@ -9466,7 +9865,7 @@ const ResourceFteView = ({
                                   <div><span className="block text-[11px] text-blue-700">Прогноз</span><b>{formatInt(selectedForecastDay.forecast_calls)}</b></div>
                                   <div><span className="block text-[11px] text-emerald-700">Факт</span><b>{formatInt(selectedForecastDay.actual_received_calls)}</b></div>
                                 </div>
-                                <div className="mt-1 text-[11px] font-semibold text-emerald-700">+{formatInt(selectedForecastDay.incident_uplift_calls)} возможный прирост · вес {formatPercent(selectedForecastDay.incident_future_weight ?? 1, 0)}</div>
+                                {!isOp && (<div className="mt-1 text-[11px] font-semibold text-emerald-700">+{formatInt(selectedForecastDay.incident_uplift_calls)} возможный прирост · вес {formatPercent(selectedForecastDay.incident_future_weight ?? 1, 0)}</div>)}
                               </div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2">
                                 <div className="text-xs text-slate-500">Минуты нагрузки</div>
@@ -9481,7 +9880,7 @@ const ResourceFteView = ({
                                   <div><span className="block text-[11px] text-blue-700">Прогноз</span><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b></div>
                                   <div><span className="block text-[11px] text-emerald-700">Факт</span><b>{formatNumber(selectedForecastDay.actual_report_fte, 2)}</b></div>
                                 </div>
-                                <div className="mt-1 text-[11px] font-semibold text-emerald-700">с приростом {formatNumber(selectedForecastDay.incident_adjusted_daily_fte ?? selectedForecastDay.forecast_daily_fte, 2)}</div>
+                                {!isOp && (<div className="mt-1 text-[11px] font-semibold text-emerald-700">с приростом {formatNumber(selectedForecastDay.incident_adjusted_daily_fte ?? selectedForecastDay.forecast_daily_fte, 2)}</div>)}
                               </div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2">
                                 <div className="text-xs text-slate-500">Пиковый час</div>
@@ -9493,9 +9892,9 @@ const ResourceFteView = ({
                             </div>
                           ) : (
                             <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b><div className="mt-1 text-[11px] font-semibold text-emerald-700">+{formatInt(selectedForecastDay.incident_uplift_calls)} возможный прирост · вес {formatPercent(selectedForecastDay.incident_future_weight ?? 1, 0)}</div></div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Звонки</div><b>{formatInt(selectedForecastDay.forecast_calls)}</b>{!isOp && (<div className="mt-1 text-[11px] font-semibold text-emerald-700">+{formatInt(selectedForecastDay.incident_uplift_calls)} возможный прирост · вес {formatPercent(selectedForecastDay.incident_future_weight ?? 1, 0)}</div>)}</div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Минут нагрузки</div><b>{formatNumber(selectedForecastDay.forecast_workload_minutes, 1)}</b></div>
-                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">FTE дня</div><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b><div className="mt-1 text-[11px] font-semibold text-emerald-700">с приростом {formatNumber(selectedForecastDay.incident_adjusted_daily_fte ?? selectedForecastDay.forecast_daily_fte, 2)}</div></div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">FTE дня</div><b>{formatNumber(selectedForecastDay.forecast_daily_fte, 2)}</b>{!isOp && (<div className="mt-1 text-[11px] font-semibold text-emerald-700">с приростом {formatNumber(selectedForecastDay.incident_adjusted_daily_fte ?? selectedForecastDay.forecast_daily_fte, 2)}</div>)}</div>
                               <div className="rounded-lg bg-slate-50 px-3 py-2"><div className="text-xs text-slate-500">Пиковый час</div><b>{selectedForecastPeakHours[0] ? `${String(selectedForecastPeakHours[0].hour).padStart(2, '0')}:00` : '-'}</b></div>
                             </div>
                           )}
@@ -9860,7 +10259,7 @@ const ResourceFteView = ({
                         title="Нет прогноза"
                         text={cfg.hasUpload
                           ? 'Загрузите исторические отчеты, чтобы построить прогноз выбранного периода.'
-                          : 'Для выбранного периода не нашлось базовых недель с чатами. Сдвиньте период или выберите другой отрезок.'}
+                          : (isOp ? OP_EMPTY_TEXT.forecast : 'Для выбранного периода не нашлось базовых недель с чатами. Сдвиньте период или выберите другой отрезок.')}
                         action={cfg.hasUpload ? (
                           <button
                             type="button"

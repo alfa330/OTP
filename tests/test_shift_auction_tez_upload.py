@@ -152,9 +152,11 @@ _REGISTRY_CONSTANTS = (
     "SHIFT_AUCTION_MODE_CHAT",
     "SHIFT_AUCTION_MODE_TEZ_TP",
     "SHIFT_AUCTION_MODE_TEZ_OP",
+    "SHIFT_AUCTION_MODE_OP_OSNOVA",
     "SHIFT_AUCTION_MODES",
     "SHIFT_AUCTION_CHAT_DIRECTION_PATTERN",
     "SHIFT_AUCTION_TEZ_DEPARTMENT_CODE",
+    "SHIFT_AUCTION_OP_DEPARTMENT_CODE",
     "SHIFT_AUCTION_MODE_DEPARTMENT_CODE",
     "SHIFT_AUCTION_MODE_DIRECTION_NAME",
     "SHIFT_AUCTION_MODE_LABELS",
@@ -208,7 +210,9 @@ class DirectionRegistryTests(unittest.TestCase):
         self.assertEqual(modes(["tez"]), ("tez_tp", "tez_op"))
         self.assertEqual(modes(["SZOV"]), ("line", "chat"))
         self.assertEqual(modes(["szov", "tez"]), ("line", "chat", "tez_tp", "tez_op"))
-        self.assertEqual(modes(["op", "", None]), ())
+        # С IC-1 (#470) у отдела продаж свой прогон — «Основа ОП»; отдел без прогонов — пусто.
+        self.assertEqual(modes(["op", "", None]), ("op_osnova",))
+        self.assertEqual(modes(["it", "", None]), ())
 
 
 def _night_helpers():
@@ -416,8 +420,9 @@ class FrontendWiringTests(unittest.TestCase):
         manager = manager[:manager.index("];")]
         self.assertIn("'work_schedules', 'shift_auction',", operator)
         self.assertIn("'shift_auction'", manager)
-        # Суперадмину с выбранным в меню «Тез КЦ» пункт нужен на месте.
-        self.assertIn("shift_auction: ['szov', 'tez'],", APP_SOURCE)
+        # Суперадмину с выбранным в меню «Тез КЦ» пункт нужен на месте (с IC-1 — и отделу
+        # продаж: у «Основы ОП» свой прогон).
+        self.assertIn("shift_auction: ['szov', 'tez', 'op'],", APP_SOURCE)
 
 
 
@@ -666,7 +671,8 @@ class TezOpenedAndDepartmentSelectorTests(unittest.TestCase):
         # Оператору руководительских прогонов нет — его прогон по карточке.
         self.assertEqual(tuple(staff_modes(6, "operator")), ())
         self.assertEqual(tuple(staff_modes(7, "admin")), szov + tez)
-        self.assertEqual(tuple(staff_modes(99, "super_admin")), szov + tez)
+        # Суперадмину — все прогоны, с IC-1 и «Основа ОП» отдела продаж.
+        self.assertEqual(tuple(staff_modes(99, "super_admin")), szov + tez + ("op_osnova",))
         for mode in tez:
             with self.subTest(mode=mode):
                 self.assertTrue(is_manager(1, "admin", mode))
@@ -706,7 +712,11 @@ class TezOpenedAndDepartmentSelectorTests(unittest.TestCase):
         self.assertIn("{isSuperAdmin ? (", item)
         self.assertIn("aria-expanded={showSidebarAuctionDropdown}", item)
         self.assertIn('aria-label="Отдел аукциона"', item)
-        self.assertIn("{AUCTION_DEPARTMENTS.map((department, index) => (", item)
+        self.assertIn("{AUCTION_DEPARTMENTS", item)
+        self.assertIn(".map((department, index) => (", item)
+        # Отдел выбран фильтром сайдбара — в меню только он, как у «Расчета ресурсов» (IC-1):
+        # при «Отделе продаж» суперадмин не видит в меню аукционы СЗоВ и Тез КЦ.
+        self.assertIn(".filter((department) => !activeDeptCode || department.code === activeDeptCode)", item)
         self.assertIn("openShiftAuctionDepartment(e, department.code);", item)
         self.assertIn("onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}", item)
         # Ветки СВ, оператора и главы отдела меню не получили.

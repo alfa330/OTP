@@ -296,13 +296,24 @@ const normalizeTemplateForLocalUse = (template) => {
   };
 };
 
+// Направление планировщика выводим из apiPrefix: чат, «Основа ОП» отдела продаж
+// (IC-1, #470) или линия СЗоВ. Отдельного пропа нет намеренно — его новая витрина
+// может забыть проставить, и планировщик молча сел бы на шаблоны и аукцион линии.
+const plannerDirectionFor = (apiPrefix) => {
+  const prefix = String(apiPrefix || '');
+  if (prefix.includes('/chat')) return 'chat';
+  if (prefix.includes('/resource_fte/op')) return 'op';
+  return 'line';
+};
+
 // Ключ хранилища — СВОЙ на каждое направление. Наборы смен разные (в чате нет 7*16
 // и 9*18, зато есть 12*21), и на общем ключе чат читал шаблоны линии, до своей ручки
-// не доходил вовсе и предлагал ставку 0,5, которой в чате не существует.
+// не доходил вовсе и предлагал ставку 0,5, которой в чате не существует. У линии ключ
+// прежний, без суффикса: иначе её сохранённые шаблоны пропали бы у всех.
 const templateStorageKey = (apiPrefix) => (
-  String(apiPrefix || '').includes('/chat')
-    ? `${TEMPLATE_STORAGE_KEY}_chat`
-    : TEMPLATE_STORAGE_KEY
+  plannerDirectionFor(apiPrefix) === 'line'
+    ? TEMPLATE_STORAGE_KEY
+    : `${TEMPLATE_STORAGE_KEY}_${plannerDirectionFor(apiPrefix)}`
 );
 
 // Ставки — тоже СВОИ на каждое направление: у линии есть половинная, в чате её нет
@@ -313,17 +324,21 @@ const LINE_TEMPLATE_RATES = [1, 0.75, 0.5];
 const CHAT_TEMPLATE_RATES = [1, 0.75];
 
 const templateRatesFor = (apiPrefix) => (
-  String(apiPrefix || '').includes('/chat')
+  plannerDirectionFor(apiPrefix) === 'chat'
     ? CHAT_TEMPLATE_RATES
     : LINE_TEMPLATE_RATES
 );
 
-// Аукцион смен идёт на двух направлениях, и планировщик обязан спрашивать СВОЁ:
-// иначе покрытие недели чата считалось бы по взятым сменам линии. Направление
-// выводим из apiPrefix тем же приёмом, что ключ хранилища и ставки выше.
-const auctionDirectionFor = (apiPrefix) => (
-  String(apiPrefix || '').includes('/chat') ? 'chat' : 'line'
-);
+// Аукцион смен идёт на нескольких направлениях, и планировщик обязан спрашивать СВОЁ:
+// иначе покрытие недели чата считалось бы по взятым сменам линии, а «Основы ОП» — по
+// сменам линии СЗоВ. Направление выводим из apiPrefix тем же приёмом, что ключ
+// хранилища и ставки выше; коды — прогоны аукциона (db/core.py).
+const auctionDirectionFor = (apiPrefix) => {
+  const direction = plannerDirectionFor(apiPrefix);
+  if (direction === 'chat') return 'chat';
+  if (direction === 'op') return 'op_osnova';
+  return 'line';
+};
 
 // Телефонные смены (постановка #304, Сабыр Азана). Чат-операторы отдельно
 // закрывают телефон, поэтому такие смены ставятся руками поверх сгенерированного
@@ -1691,6 +1706,12 @@ const ResourceSchedulePlanner = ({
     setSelectedTemplateId((current) => (normalized.some((item) => item.id === current) ? current : normalized[0]?.id || ''));
   }, [apiPrefix]);
 
+  // Направление, чей сервер ответил ПУСТЫМ набором умолчаний. У «Основы ОП» так и
+  // задумано — шаблоны вносит руководитель (решение владельца 27.11.2026), и без этой
+  // метки пустой ответ заново запускал бы загрузку умолчаний по кругу. У линии и чата
+  // умолчания не пустые, и для них всё как было.
+  const emptyDefaultTemplatesRef = useRef('');
+
   const loadDefaultTemplates = useCallback(async () => {
     if (!apiRoot) return;
     setIsTemplatesLoading(true);
@@ -1699,7 +1720,9 @@ const ResourceSchedulePlanner = ({
       const response = await axios.get(`${apiRoot}${apiPrefix}/shift_templates`, {
         headers: buildHeaders(),
       });
-      applyTemplates(response.data?.templates || []);
+      const defaults = response.data?.templates || [];
+      emptyDefaultTemplatesRef.current = defaults.length ? '' : apiPrefix;
+      applyTemplates(defaults);
     } catch (error) {
       setErrorText(error?.response?.data?.error || 'Не удалось загрузить шаблоны смен');
     } finally {
@@ -1709,11 +1732,12 @@ const ResourceSchedulePlanner = ({
 
   useEffect(() => {
     if (!templates.length) {
+      if (emptyDefaultTemplatesRef.current === apiPrefix) return;
       loadDefaultTemplates();
     } else if (!selectedTemplateId) {
       setSelectedTemplateId(templates[0]?.id || '');
     }
-  }, [loadDefaultTemplates, selectedTemplateId, templates]);
+  }, [apiPrefix, loadDefaultTemplates, selectedTemplateId, templates]);
 
   const normalizePreviewDays = useCallback((days) =>
     (days || []).map((day) => ({
@@ -1948,7 +1972,12 @@ const ResourceSchedulePlanner = ({
         headers: typeof buildHeaders === 'function' ? buildHeaders() : {}
       });
       const snapshot = response?.data?.snapshot || {};
-      const lots = Array.isArray(snapshot.lots) ? snapshot.lots : [];
+      // Сервер отдаёт прогон из доступных человеку и чужой молча подменяет своим: лоты
+      // другого прогона здесь не показываем — покрытие «Основы ОП» иначе считалось бы по
+      // сменам линии СЗоВ. Ответ без direction_mode (старый сервер) принимаем как раньше.
+      const sameDirection = !snapshot.direction_mode
+        || String(snapshot.direction_mode) === auctionDirectionFor(apiPrefix);
+      const lots = sameDirection && Array.isArray(snapshot.lots) ? snapshot.lots : [];
       setAuctionLots(lots);
       setAuctionLoadedAt(new Date());
     } catch (error) {
