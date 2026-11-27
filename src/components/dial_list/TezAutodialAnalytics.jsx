@@ -6,6 +6,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { Bar, Metric, PagedTable, Td, Th } from '../wiki/reportKit';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 import { formatSeconds } from './tezAutodial';
+import { reachedGoalLabel } from './driverActivation';
 import TezFunnelPanel from './TezFunnelPanel';
 
 /*
@@ -77,14 +78,14 @@ const TEZ_WORDS = {
 
 export const activationWords = (goal) => ({
     goalTitle: 'Поездки',
-    goal: `Добрали ${goal} поездок`,
+    goal: reachedGoalLabel(goal),
     goalShort: 'Добрали',
     successRow: 'Добрали после разговора — успешки',
     selfRow: 'Добрали сами, без разговора',
     uploadRow: 'Уже добрали при загрузке',
     promisedRow: 'Обещали ездить и не добрали',
     agreementHelp: 'Водители с итогом «будет ездить» — итог с датой, когда начнёт.',
-    successHint: `Успешка — водитель добрал ${goal} завершённых поездок (по CRM) после разговора с оператором не короче 10 секунд; засчитывается тому, кто говорил с ним последним до этого. Добрал без такого разговора — «добрал сам», успешки нет.`,
+    successHint: `Успешка — водитель добрал цель по поездкам (${goal} завершённых по CRM) после разговора с оператором не короче 10 секунд; засчитывается тому, кто говорил с ним последним до этого. Добрал без такого разговора — «добрал сам», успешки нет.`,
     byDayHint: 'Звонки, разговоры и согласия — по дню звонка; добрали поездки — по дню, когда это увидела проверка. Всё — по водителям базы выбранного месяца.',
     remainingHelp: 'Ещё в обзвоне: новые и те, кому уже звонили, — пока не добрали поездки.',
     processedHelp: 'Обзвон по водителю закончен: добрал поездки, дозвонились без перезвона, кончились попытки или руководитель исключил.',

@@ -37,3 +37,11 @@ test('итог переключения словами', () => {
     assert.match(busy.text, /^Не переключены \(идёт звонок или не поставлен итог\): Айгерим/);
     assert.equal(modeResultToast({ mode: MODE_HOST, changed: 0, skipped: [] }, MODES).text, 'Уже в режиме «Удаленный КЦ»');
 });
+
+test('часть переключили, часть пропустили — тост зелёный и называет пропущенных (разбор 27.11)', () => {
+    const skipped = ['Айгерим', 'Бекзат', 'Вера', 'Гульназ'].map((name, i) => ({ user_id: i + 1, name }));
+    const toast = modeResultToast({ mode: MODE_ACTIVATION, changed: 2, skipped }, MODES);
+    assert.equal(toast.kind, 'success');
+    assert.equal(toast.text, 'Линий переведено: 2 в режим «Активация водителей». '
+        + 'Не переключены (идёт звонок или не поставлен итог): Айгерим, Бекзат, Вера…');
+});

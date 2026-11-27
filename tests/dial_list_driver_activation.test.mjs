@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
     ACTIVATION_STAGES, activationStageLabel, activationUploadSummary, checkWarning, providerLabel, providerShort,
-    providerTone, saparText, tripsLabel, tripsLeft, tripsProgress, tripsWord, validateTripsGoal,
+    providerTone, reachedGoalLabel, saparText, tripsLabel, tripsLeft, tripsProgress, tripsWord, validateTripsGoal,
 } from '../src/components/dial_list/driverActivation.js';
 import { isAutodialProfile, normalizeProfile } from '../src/components/dial_list/tezAutodial.js';
 
@@ -62,10 +62,23 @@ test('этапы журнала — как у Тез, цель «Добрали 
 test('итог загрузки и пределы цели', () => {
     assert.equal(activationUploadSummary({ rows_new: 3, rows_duplicate: 1, rows_goal_reached: 2, trips_goal: 50,
         rows_bad_id: 1, bad_id_rows: [5] }, 'Ноябрь 2026'),
-    'Ноябрь 2026: новых 3, повторов 1, уже 50+ поездок — не загружены: 2, без ID водителя 1 (строка 5)');
+    'Ноябрь 2026: новых 3, повторов 1, уже добрали цель (50) — не загружены: 2, без ID водителя 1 (строка 5)');
+    // Файл с несколькими листами (разбор 27.11): строка — с именем листа, как её отдал сервер.
+    assert.equal(activationUploadSummary({ rows_new: 1, rows_bad_id: 2, bad_id_rows: ['«Более 50»: 3', '«Более 50»: 7'] }),
+        'новых 1, без ID водителя 2 (строки «Более 50»: 3, «Более 50»: 7)');
     assert.equal(validateTripsGoal('50'), '');
     assert.match(validateTripsGoal('0'), /от 1 до 1000/);
+    assert.match(validateTripsGoal('1001'), /от 1 до 1000/);
+    assert.equal(validateTripsGoal('1000'), '');
     assert.match(validateTripsGoal('abc'), /целое число/);
+});
+
+test('цель «Добрали N поездок» склоняется по числу (разбор 27.11: «Добрали 21 поездок»)', () => {
+    assert.equal(reachedGoalLabel(50), 'Добрали 50 поездок');
+    assert.equal(reachedGoalLabel(21), 'Добрали 21 поездку');
+    assert.equal(reachedGoalLabel(3), 'Добрали 3 поездки');
+    assert.equal(reachedGoalLabel(11), 'Добрали 11 поездок');
+    assert.equal(reachedGoalLabel(undefined), 'Добрали 50 поездок');
 });
 
 test('предупреждение о проверках', () => {

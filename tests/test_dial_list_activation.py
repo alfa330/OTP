@@ -70,6 +70,23 @@ class ParseFileTests(unittest.TestCase):
         self.assertEqual(rows[1][5], 'Алматы')
         self.assertEqual(rows[0][4], '950101300123')
 
+    def test_goal_boundary_and_row_numbers_on_their_own_sheet(self):
+        """Разбор 27.11: ровно цель в файле — не грузится; номер строки — строка Excel на своём листе (пустые строки
+        тоже считаются), а листов с данными несколько — с именем листа (раньше счёт шёл сквозь листы)."""
+        raw = _xlsx([
+            ('До 50 поездок', [_row(ID1, '77001110001', 50, 'Sapar'), _row(ID2, '77001110002', 49, 'Sapar')]),
+            ('Более 50', [_row('bad', '77001110003', 3, 'Sapar'), [''] * len(HEADER),
+                          _row('bad-again', '77001110004', 3, 'Sapar')]),
+        ])
+        rows, _extras, counts = activation.parse_activation_file(raw, '.xlsx', goal=50)
+        self.assertEqual(counts['rows_goal_reached'], 1)
+        self.assertEqual([r[0] for r in rows], ['«До 50 поездок»: 3'])
+        self.assertEqual(counts['bad_id_rows'], ['«Более 50»: 2', '«Более 50»: 4'])
+        # Один лист с данными — просто номер строки Excel.
+        raw = _xlsx([('Лист1', [[''] * len(HEADER), _row(ID1, '77001110001', 10, 'Sapar')])])
+        rows, _extras, _counts = activation.parse_activation_file(raw, '.xlsx', goal=50)
+        self.assertEqual([r[0] for r in rows], [3])
+
     def test_higher_goal_takes_drivers_of_the_second_sheet(self):
         raw = _xlsx([('Более 50 поездок', [_row(ID3, '77013334455', 64, 'Sapar')])])
         rows, _extras, counts = activation.parse_activation_file(raw, '.xlsx', goal=70)
@@ -114,6 +131,8 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(activation.trips_label(3, 21), '3 из 21 поездки')
         self.assertEqual(activation.trips_label(None, 50), 'Поездки не проверены')
         self.assertEqual(activation.trips_label(52, 50), 'Добрал 52 поездки')
+        self.assertEqual(activation.trips_label(50, 50), 'Добрал 50 поездок')
+        self.assertEqual(activation.trips_label(49, 50), '49 из 50 поездок')
         self.assertEqual(activation.trips_label(51, 50, reached_at=datetime.now(timezone.utc)), 'Добрал 51 поездку')
         self.assertEqual([activation.trips_word(n) for n in (1, 2, 5, 11, 12, 21, 104)],
                          ['поездка', 'поездки', 'поездок', 'поездок', 'поездок', 'поездка', 'поездки'])
@@ -297,6 +316,33 @@ class ProfileTests(unittest.TestCase):
             svc.operator_progress(7)
             progress = next(p for p in cur.params if isinstance(p, dict) and 'any_talk' in p)
             self.assertIs(progress["any_talk"], any_talk, profile)
+
+    def test_phone_distribution_skips_activation_on_borrowed_lines(self):
+        """Разбор 27.11: отдел «Активации» без своих линий (СЗоВ на линиях удалённого КЦ) дистрибутив iCORE Phone всему
+        отделу не открывает — телефон получают те, кто сидит на линиях. Исполняется НАСТОЯЩАЯ функция монолита."""
+        import ast
+        import logging
+
+        from tests import source_cache
+        node = source_cache.function_copy(source_cache.monolith_flat_path(), '_dial_list_department_allowed')
+        namespace = {"logging": logging}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), 'bot_schedule2', 'exec'),
+             namespace)
+        allowed = namespace['_dial_list_department_allowed']
+
+        class Svc:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def list_departments(self, ids):
+                return self.rows
+
+        namespace['_dial_list_service'] = Svc([{"department_id": 1, "host_department_id": 1954}])
+        self.assertIs(allowed(1), False)
+        namespace['_dial_list_service'] = Svc([{"department_id": 1954, "host_department_id": None}])
+        self.assertIs(allowed(1954), True)
+        namespace['_dial_list_service'] = Svc([])
+        self.assertIs(allowed(2200), False)
 
     def test_activation_outcomes_seed(self):
         names = [o[0] for o in dial_service.DEFAULT_ACTIVATION_OUTCOMES]

@@ -10,6 +10,8 @@ import contextlib
 import json
 import os
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -21,6 +23,7 @@ from dial_list import activation  # noqa: E402
 from dial_list import schema as dial_schema  # noqa: E402
 from dial_list import service as dial_service  # noqa: E402
 from dial_list.activation_check import ActivationChecker  # noqa: E402
+from dial_list.activation_sources import SourceError  # noqa: E402
 from dial_list.sign_check import SignChecker  # noqa: E402
 
 PORT = os.environ.get('DIAL_LIST_TEST_PORT')
@@ -106,36 +109,44 @@ class _Binotel:
 
 
 class _Crm:
-    """CRM без сети: counts — ID → поездок (/partners/orders); cards — ID → карточка driver-info."""
+    """CRM без сети: counts — ID → поездок (/partners/orders); cards — ID → карточка driver-info; down — исключение
+    вместо ответа (CRM лежит)."""
 
     def __init__(self):
-        self.counts, self.cards, self.asked = {}, {}, []
+        self.counts, self.cards, self.asked, self.down = {}, {}, [], None
 
     def configured(self):
         return True
 
     def orders(self, account_ids, date_from, date_to, timeout=None):
         self.asked.append(('orders', sorted(account_ids), date_from, date_to))
+        if self.down:
+            raise self.down
         return {i: {'count': self.counts[i], 'last_order_at': None} for i in account_ids if i in self.counts}
 
     def driver(self, account_id, timeout=None):
         self.asked.append(('driver', account_id))
+        if self.down:
+            raise self.down
         return self.cards.get(account_id)
 
 
 class _Fleet:
-    """Кабинет Fleet без сети: providers — ID → (имя, есть ли карточка в парке)."""
+    """Кабинет Fleet без сети: providers — ID → (имя, есть ли карточка в парке); down — исключение вместо ответа
+    (кабинет лежит)."""
 
     last_error = ''
 
     def __init__(self):
-        self.providers, self.asked = {}, []
+        self.providers, self.asked, self.down = {}, [], None
 
     def configured(self):
         return True
 
     def provider(self, park_id, driver_id):
         self.asked.append((park_id, driver_id))
+        if self.down:
+            raise self.down
         return self.providers.get(driver_id, ('', False))
 
 
@@ -456,6 +467,205 @@ def test_journal_card_and_refresh_buttons(env):
     assert env.refused(env.svc.check_lead_activation, lead_id, 'nope')[1] == 400
 
 
+# ── разбор 27.11: успешка за Sapar, повторная загрузка, цель, сбои источников ─────────────────────────────────
+
+SECOND = 531
+
+
+def _talk_row(env, lead_id, operator_id, billsec, at, state='finished', disposition='ANSWER'):
+    """Звонок водителю прямо в базу: кто, сколько секунд разговора, когда начат."""
+    portion = env.one("INSERT INTO dial_list_portions (operator_id, department_id, size) VALUES (%s, %s, 1) "
+                      "RETURNING id", (operator_id, ACT))[0]
+    assignment = env.one("INSERT INTO dial_list_assignments (portion_id, lead_id, operator_id, position, state) "
+                         "VALUES (%s, %s, %s, 1, 'done') RETURNING id", (portion, lead_id, operator_id))[0]
+    return str(env.one("INSERT INTO dial_list_attempts (assignment_id, operator_id, requested_at, state, disposition, "
+                       "billsec) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                       (assignment, operator_id, at, state, disposition, billsec))[0])
+
+
+def _second_operator(env):
+    env.q("INSERT INTO users (id, name, login, role, status, department_id, sip_number) "
+          "VALUES (%s, 'Второй оператор', 'second', 'operator', 'working', %s, '912')", (SECOND, ACT))
+
+
+def test_sapar_success_goes_to_the_last_talk_of_10_seconds_before_the_switch(env):
+    env.enroll()
+    env.upload([_row(D1, '77001110001', 10, 'Бумажный документооборот'),
+                _row(D2, '77001110002', 10, 'Бумажный документооборот'),
+                _row(D3, '77001110003', 10, 'Бумажный документооборот'),
+                _row(D4, '77001110004', 10, 'Бумажный документооборот')])
+    _second_operator(env)
+    now = _now()
+    l1, l2, l3, l4 = (env.lead(d) for d in (D1, D2, D3, D4))
+    # D1: говорили оба — успешка последнему разговору до перехода.
+    _talk_row(env, l1, OPERATOR, 30, now - timedelta(hours=3))
+    last = _talk_row(env, l1, SECOND, 30, now - timedelta(hours=2, minutes=30))
+    # D2: только разговор в 5 секунд — не в счёт.
+    _talk_row(env, l2, OPERATOR, 5, now - timedelta(hours=3))
+    # D3: разговор после перехода — не в счёт.
+    _talk_row(env, l3, OPERATOR, 30, now - timedelta(hours=1))
+    # D4: звонок, начатый до перехода, ещё идёт — решение ждёт его конца.
+    _talk_row(env, l4, OPERATOR, 0, now - timedelta(minutes=5), state='leg_answered', disposition='')
+    env.q("UPDATE dial_list_leads SET edm_provider = 'Sapar', sapar_at = %s WHERE id = ANY(%s::uuid[])",
+          (now - timedelta(hours=2), [l1, l2, l3]))
+    env.q("UPDATE dial_list_leads SET edm_provider = 'Sapar', sapar_at = %s WHERE id = %s",
+          (now - timedelta(minutes=2), l4))
+    assert env.svc.activation_checker.resolve_sapar_successes(now=now) == 1
+    got = {r[0]: tuple(r[1:]) for r in env.q(
+        "SELECT id::text, sapar_operator_id, sapar_attempt_id::text, sapar_resolved_at IS NOT NULL "
+        "FROM dial_list_leads WHERE department_id = %s", (ACT,))}
+    assert got == {l1: (SECOND, last, True), l2: (None, None, True), l3: (None, None, True), l4: (None, None, False)}
+    # Повторное решение не двоит.
+    assert env.svc.activation_checker.resolve_sapar_successes(now=now) == 0
+
+
+def test_sapar_switch_counts_only_from_a_known_provider_or_from_none(env):
+    env.enroll()
+    env.upload([_row(D1, '77001110001', 10, 'Не найден'), _row(D2, '77001110002', 10, 'Бумажный документооборот')])
+    l1, l2 = env.lead(D1), env.lead(D2)
+    checker, now = env.svc.activation_checker, _now()
+    # Провайдер не был известен — Sapar в карточке не переход.
+    assert env.one("SELECT edm_provider FROM dial_list_leads WHERE id = %s", (l1,)) == ('',)
+    assert checker._write_provider(l1, 'Sapar', now) is False
+    # Карточка сказала «ЭДО нет», потом Sapar — переход.
+    assert checker._write_provider(l2, '', now) is False
+    assert env.one("SELECT edm_source FROM dial_list_leads WHERE id = %s", (l2,)) == ('none',)
+    assert checker._write_provider(l2, 'Sapar', now + timedelta(minutes=1)) is True
+
+
+def test_reupload_with_sapar_counts_as_the_switch(env):
+    """Разбор 27.11: файл перевёл «Бумажный» на Sapar — переход, как у карточки (раньше терялся: водителей на Sapar
+    больше не проверяют)."""
+    env.enroll()
+    env.upload([_row(D1, '77001110001', 10, 'Бумажный документооборот')])
+    lead = env.lead(D1)
+    _talk_row(env, lead, OPERATOR, 30, _now() - timedelta(hours=1))
+    env.upload([_row(D1, '77001110001', 12, 'Sapar')])
+    assert env.one("SELECT edm_provider, edm_source, sapar_at IS NOT NULL FROM dial_list_leads WHERE id = %s",
+                   (lead,)) == ('Sapar', 'file', True)
+    assert env.svc.activation_checker.resolve_sapar_successes() == 1
+    assert env.one("SELECT sapar_operator_id FROM dial_list_leads WHERE id = %s", (lead,)) == (OPERATOR,)
+    sapar_at = env.one("SELECT sapar_at FROM dial_list_leads WHERE id = %s", (lead,))[0]
+    env.upload([_row(D1, '77001110001', 13, 'Sapar')])
+    assert env.one("SELECT sapar_at FROM dial_list_leads WHERE id = %s", (lead,)) == (sapar_at,)
+    # Новый водитель, сразу на Sapar по файлу, — не переход.
+    env.upload([_row(D2, '77001110002', 3, 'Sapar')])
+    assert env.one("SELECT sapar_at FROM dial_list_leads WHERE driver_id = %s", (D2,)) == (None,)
+
+
+def test_new_driver_on_the_same_phone_starts_with_his_own_fields(env):
+    """Разбор 27.11: у номера другой ID водителя — поездки и провайдер прежнего к нему не переходят (иначе его Sapar
+    читался как перевод с «Бумажного» прежнего — ложная успешка)."""
+    env.enroll()
+    env.upload([_row(D1, '77001110001', 34, 'Бумажный документооборот')])
+    lead = env.lead(D1)
+    env.q("UPDATE dial_list_leads SET trips_total = 34, trip_checked_at = now(), edm_source = 'card', "
+          "edm_checked_at = now(), fleet_park_id = %s WHERE id = %s", (PARK, lead))
+    env.upload([_row(D4, '77001110001', 5, 'Sapar')])
+    assert env.one("SELECT driver_id, trips_total, trip_checked_at, edm_provider, edm_source, fleet_park_id, sapar_at "
+                   "FROM dial_list_leads WHERE id = %s", (lead,)) == (D4, 5, None, 'Sapar', 'file', '', None)
+    # Карточка нового водителя — Sapar: он и по файлу на Sapar, перехода нет.
+    assert env.svc.activation_checker._write_provider(lead, 'Sapar', _now()) is False
+    # Тот же водитель повторно — проверенные поля не трогаются (CRM главнее файла).
+    env.q("UPDATE dial_list_leads SET trips_total = 41, trip_checked_at = now() WHERE id = %s", (lead,))
+    env.upload([_row(D4, '77001110001', 6, 'Sapar')])
+    assert env.one("SELECT trips_total, trip_checked_at IS NOT NULL FROM dial_list_leads WHERE id = %s",
+                   (lead,)) == (41, True)
+
+
+def test_lowered_goal_sends_drivers_above_it_to_recheck(env, monkeypatch):
+    """Разбор 27.11: цель снижена до 30 — водитель с 34 поездками больше не выдаётся и закрыт как добравший."""
+    env.enroll(portion_size=5)
+    env.upload([_row(D1, '77001110001', 34, 'Бумажный документооборот'),
+                _row(D2, '77001110002', 12, 'Бумажный документооборот')])
+    env.crm.counts = {D1: 34, D2: 12}
+    env.svc.activation_checker.run(reason='тест')
+    asked = []
+    monkeypatch.setattr(env.svc, 'request_activation_check', lambda reason='': asked.append(reason))
+    env.svc.save_department_settings(ACT, {"trips_goal": 30}, changed_by=1)
+    assert asked == ['цель по поездкам снижена']
+    env.crm.asked.clear()
+    items = env.svc.issue_next_portion(OPERATOR, phone_version=GUARDED)["portion"]["items"]
+    assert [i["lead_id"] for i in items] == [env.lead(D2)]
+    assert env.crm.asked[0][1] == [D1], 'спрошен только тот, кто выше новой цели'
+    assert env.one("SELECT signed_at IS NOT NULL, sign_status FROM dial_list_leads WHERE driver_id = %s",
+                   (D1,)) == (True, 'trips')
+    # Цель поднята — перепроверять некого.
+    asked.clear()
+    env.svc.save_department_settings(ACT, {"trips_goal": 60}, changed_by=1)
+    assert asked == []
+
+
+def test_fleet_failure_before_a_call_does_not_hide_the_driver_for_a_day(env):
+    """Разбор 27.11: сбой кабинета перед звонком в лид не пишется — после разговора провайдера спросят следующим
+    прогоном (раньше ошибка вместе со временем загрузки файла выключала водителя на сутки)."""
+    env.enroll()
+    env.upload([_row(D1, '77001110001', 34, 'Бумажный документооборот')])
+    env.crm.counts = {D1: 34}
+    item = env.svc.issue_next_portion(OPERATOR, phone_version=GUARDED)["portion"]["items"][0]
+    env.crm.cards = {D1: {'park_id': PARK, 'total': 34, 'created_date': None}}
+    env.fleet.down = SourceError('Кабинет Fleet не ответил: 502')
+    env.talk(item["assignment_id"])
+    assert env.one("SELECT edm_error, edm_source FROM dial_list_leads WHERE driver_id = %s", (D1,)) == ('', 'file')
+    env.fleet.down = None
+    env.fleet.providers = {D1: ('Sapar', True)}
+    summary = env.svc.activation_checker.run(reason='тест', now=_now() + timedelta(minutes=61))
+    assert (summary["provider_checked"], summary["sapar"], summary["sapar_successes"]) == (1, 1, 1)
+    # Ошибка по самому водителю (нет в парке) — в лид, и прогон не спросит его снова раньше суток.
+    env.upload([_row(D2, '77001110002', 3, 'Бумажный документооборот')])
+    env.q("UPDATE dial_list_leads SET fleet_park_id = %s WHERE driver_id = %s", (PARK, D2))
+    env.svc.activation_checker.run(reason='тест', now=_now() + timedelta(minutes=62))
+    assert env.one("SELECT edm_error <> '' FROM dial_list_leads WHERE driver_id = %s", (D2,)) == (True,)
+    env.fleet.asked.clear()
+    env.svc.activation_checker.run(reason='тест', now=_now() + timedelta(minutes=63))
+    assert D2 not in {d for _p, d in env.fleet.asked}
+
+
+def test_refresh_button_takes_the_driver_who_did_the_goal_off_the_list(env):
+    env.enroll()
+    env.upload([_row(D1, '77001110001', 48, 'Бумажный документооборот')])
+    env.crm.counts = {D1: 48}
+    item = env.svc.issue_next_portion(OPERATOR, phone_version=GUARDED)["portion"]["items"][0]
+    env.crm.cards = {D1: {'park_id': PARK, 'total': 50, 'created_date': None}}
+    env.svc.check_lead_activation(env.lead(D1), 'trips')
+    assert env.one("SELECT state FROM dial_list_assignments WHERE id = %s", (item["assignment_id"],)) == ('done',)
+
+
+def test_crm_trips_win_over_the_file_and_crm_errors_are_retried(env):
+    env.enroll()
+    env.upload([_row(D1, '77001110001', 30, 'Бумажный документооборот')])
+    env.crm.counts = {D1: 41}
+    env.svc.activation_checker.run(reason='тест')
+    env.upload([_row(D1, '77001110001', 34, 'Бумажный документооборот')])
+    assert env.one("SELECT trips_total FROM dial_list_leads WHERE driver_id = %s", (D1,)) == (41,)
+    # CRM лежит: ошибка — в лид, время проверки не двигается, следующий прогон спрашивает снова.
+    env.upload([_row(D2, '77001110002', 7, 'Бумажный документооборот')])
+    env.crm.down = SourceError('CRM: 503')
+    env.svc.activation_checker.run(reason='тест')
+    assert env.one("SELECT trip_checked_at, trip_error <> '' FROM dial_list_leads WHERE driver_id = %s",
+                   (D2,)) == (None, True)
+    env.crm.down = None
+    env.crm.counts = {D1: 41, D2: 8}
+    env.svc.activation_checker.run(reason='тест')
+    assert env.one("SELECT trips_total, trip_checked_at IS NOT NULL, trip_error FROM dial_list_leads "
+                   "WHERE driver_id = %s", (D2,)) == (8, True, '')
+
+
+def test_refresh_button_says_why_it_did_not_refresh(env):
+    """Разбор 27.11: пауза после сбоя и занятые проверки — отказ словами, а не прежняя карточка с 200."""
+    env.enroll()
+    env.upload([_row(D1, '77001110001', 10, 'Бумажный документооборот')])
+    lead = env.lead(D1)
+    checker = env.svc.activation_checker
+    checker._now_backoff_until = time.monotonic() + 30
+    message, status, _kind = env.refused(env.svc.check_lead_activation, lead, 'trips')
+    assert status == 503 and 'после сбоя' in message
+    checker._now_backoff_until = 0.0
+    env.crm.down = SourceError('CRM: 503')
+    message, status, _kind = env.refused(env.svc.check_lead_activation, lead, 'trips')
+    assert status == 502 and message.startswith('Проверка не ответила: ')
+
+
 # ── режим линий: «Активация» на линиях удалённого КЦ (владелец 26.11.2026) ─────────────────────────────────
 
 SZOV, RCC_OWN, SZOV_GUEST = 1, 540, 541
@@ -484,6 +694,12 @@ class _SipDb(_Db):
         if not r:
             return None
         return {"id": r[0], "name": r[1], "department_id": r[2], "department_provider": r[3], "sip_number": r[4]}
+
+    def save_user_sip_settings(self, user_id, settings, changed_by=None):
+        """Как db.save_user_sip_settings для снятия своего сотрудника с линии: номер очищается."""
+        with self._get_cursor() as cur:
+            cur.execute("UPDATE users SET sip_number = %s WHERE id = %s",
+                        (settings.get("sip_number") or None, int(user_id)))
 
 
 @pytest.fixture
@@ -612,20 +828,26 @@ def test_release_from_the_line_clears_the_mode(hosted):
     assert svc.work_operator(RCC_OWN)["department_id"] == RCC
 
 
-def _talk_with_outcome(env, user_id, assignment_id, department_id, outcome_name):
-    """Разговор 30 с и итог outcome_name из справочника отдела department_id."""
+def _talk(env, user_id, assignment_id, billsec=30):
+    """Разговор billsec секунд до финала Binotel, без итога. Возвращает попытку."""
     svc = env.svc
     attempt = svc.start_call(user_id, assignment_id, operator_status='outbound')
     svc.phone_event(user_id, attempt["attempt_id"], 'ringing', phone_version=GUARDED)
     svc.phone_event(user_id, attempt["attempt_id"], 'answered', phone_version=GUARDED)
-    svc.phone_event(user_id, attempt["attempt_id"], 'ended', by_operator=False, leg_sec=30, talk_detected=True,
+    svc.phone_event(user_id, attempt["attempt_id"], 'ended', by_operator=False, leg_sec=billsec, talk_detected=True,
                     phone_version=GUARDED)
-    env.binotel.live[attempt["general_call_id"]] = {"disposition": 'ANSWER', "billsec": 30, "waitsec": 5}
+    env.binotel.live[attempt["general_call_id"]] = {"disposition": 'ANSWER', "billsec": billsec, "waitsec": 5}
     env.poll_now()
     svc.get_state(user_id, phone_version=GUARDED)
+    return attempt
+
+
+def _talk_with_outcome(env, user_id, assignment_id, department_id, outcome_name):
+    """Разговор 30 с и итог outcome_name из справочника отдела department_id."""
+    attempt = _talk(env, user_id, assignment_id)
     outcome = str(env.one("SELECT id FROM dial_list_outcomes WHERE department_id = %s AND name = %s",
                           (department_id, outcome_name))[0])
-    svc.set_attempt_outcome(user_id, attempt["attempt_id"], outcome)
+    env.svc.set_attempt_outcome(user_id, attempt["attempt_id"], outcome)
 
 
 def test_phone_tabs_and_progress_show_only_the_current_mode(hosted):
@@ -664,3 +886,116 @@ def test_phone_tabs_and_progress_show_only_the_current_mode(hosted):
     with hosted.db._get_cursor() as cur:
         assert svc._other_mode_departments(cur, {"department_id": RCC}) == []
     assert len(svc.operator_worked(RCC_OWN)["items"]) == 2
+
+
+def _rcc_driver(env):
+    env.q("INSERT INTO dial_list_outcomes (department_id, name, position) VALUES (%s, 'Отказ РКЦ', 1)", (RCC,))
+    env.svc.import_leads(RCC, 1, 'rcc.xlsx', [(2, 'Водитель РКЦ', '77009990001', '77009990001', '')],
+                         require_iin=False)
+
+
+def test_long_call_and_its_missing_outcome_hold_the_mode(hosted):
+    """Разбор 27.11: разговор дольше 3 минут (окно «Позвонить») режим держит, как и неставленный итог."""
+    svc = hosted.svc
+    _enroll_szov(hosted)
+    _rcc_driver(hosted)
+    item = svc.issue_next_portion(RCC_OWN, phone_version=GUARDED)["portion"]["items"][0]
+    attempt = svc.start_call(RCC_OWN, item["assignment_id"], operator_status='outbound')
+    svc.phone_event(RCC_OWN, attempt["attempt_id"], 'ringing', phone_version=GUARDED)
+    svc.phone_event(RCC_OWN, attempt["attempt_id"], 'answered', phone_version=GUARDED)
+    hosted.q("UPDATE dial_list_attempts SET requested_at = requested_at - interval '4 minutes' WHERE id = %s",
+             (attempt["attempt_id"],))
+    res = svc.set_line_modes(RCC, 'activation', user_ids=[RCC_OWN], changed_by=1)
+    assert (res["changed"], [s["user_id"] for s in res["skipped"]]) == (0, [RCC_OWN])
+    # Разговор кончился, итога нет — тоже занят.
+    svc.phone_event(RCC_OWN, attempt["attempt_id"], 'ended', by_operator=False, leg_sec=300, talk_detected=True,
+                    phone_version=GUARDED)
+    hosted.binotel.live[attempt["general_call_id"]] = {"disposition": 'ANSWER', "billsec": 300, "waitsec": 5}
+    hosted.poll_now()
+    svc.get_state(RCC_OWN, phone_version=GUARDED)
+    assert svc.set_line_modes(RCC, 'activation', user_ids=[RCC_OWN], changed_by=1)["changed"] == 0
+    outcome = str(hosted.one("SELECT id FROM dial_list_outcomes WHERE department_id = %s", (RCC,))[0])
+    svc.set_attempt_outcome(RCC_OWN, attempt["attempt_id"], outcome)
+    assert svc.set_line_modes(RCC, 'activation', user_ids=[RCC_OWN], changed_by=1)["changed"] == 1
+
+
+def test_release_and_reseat_keep_the_mode_while_the_outcome_is_owed(hosted):
+    """Разбор 27.11: снятие и посадка режим снимают, но не с того, кто должен итог: итог «Активации» ставят из её
+    справочника, а не удалённого КЦ."""
+    svc = hosted.svc
+    _enroll_szov(hosted)
+    svc.set_line_modes(RCC, 'activation', user_ids=[SZOV_GUEST], changed_by=1)
+    hosted.crm.counts = {D1: 34, D2: 12}
+    item = svc.issue_next_portion(SZOV_GUEST, phone_version=GUARDED)["portion"]["items"][0]
+    attempt = _talk(hosted, SZOV_GUEST, item["assignment_id"])
+    svc.release_line(RCC, SZOV_GUEST, changed_by=1, seat_anyone=True)
+    assert svc.operator_mode(SZOV_GUEST) == (SZOV, RCC)
+    svc._binotel_employees = lambda dep: [{"endpointData": {"internalNumber": '903', "login": 'l903',
+                                                            "password": 'p'}}]
+    svc.assign_line(RCC, SZOV_GUEST, '903', changed_by=1, seat_anyone=True)
+    assert svc.operator_mode(SZOV_GUEST) == (SZOV, RCC)
+    state = svc.get_state(SZOV_GUEST, phone_version=GUARDED)
+    assert (state["profile"], state["pending_outcome"]["attempt_id"]) == ('tez', attempt["attempt_id"])
+    assert 'Перейдёт на Sapar' in [o["name"] for o in state["outcomes"]]
+    outcome = str(hosted.one("SELECT id FROM dial_list_outcomes WHERE department_id = %s AND name = %s",
+                             (SZOV, 'Перейдёт на Sapar'))[0])
+    svc.set_attempt_outcome(SZOV_GUEST, attempt["attempt_id"], outcome)
+    # Итог поставлен — снятие режим снимает.
+    svc.release_line(RCC, SZOV_GUEST, changed_by=1, seat_anyone=True)
+    assert svc.operator_mode(SZOV_GUEST) is None
+    # Свой сотрудник удалённого КЦ (снятие — очисткой его SIP-настроек) — тоже.
+    svc.set_line_modes(RCC, 'activation', user_ids=[RCC_OWN], changed_by=1)
+    svc.release_line(RCC, RCC_OWN, changed_by=1)
+    assert svc.operator_mode(RCC_OWN) is None
+
+
+def test_mode_switch_waits_for_a_call_being_placed(hosted):
+    """Разбор 27.11: «Позвонить» держит замок оператора — переключение ждёт, видит звонок и оператора пропускает
+    (раньше уводило его в «Активацию» посреди набора водителя удалённого КЦ)."""
+    svc = hosted.svc
+    _enroll_szov(hosted)
+    _rcc_driver(hosted)
+    item = svc.issue_next_portion(RCC_OWN, phone_version=GUARDED)["portion"]["items"][0]
+    inside, release = threading.Event(), threading.Event()
+    original = svc._require_outcome_done
+
+    def held(cur, ctx):
+        original(cur, ctx)
+        inside.set()
+        release.wait(10)
+
+    svc._require_outcome_done = held
+    results = {}
+    call = threading.Thread(target=lambda: results.setdefault(
+        "call", svc.start_call(RCC_OWN, item["assignment_id"], operator_status='outbound')))
+    switch = threading.Thread(target=lambda: results.setdefault(
+        "switch", svc.set_line_modes(RCC, 'activation', user_ids=[RCC_OWN], changed_by=1)))
+    call.start()
+    try:
+        assert inside.wait(10)
+        svc._require_outcome_done = original
+        switch.start()
+        switch.join(1.0)
+        assert switch.is_alive(), 'переключение ждёт, пока звонок записывается'
+    finally:
+        # Звонок отпускаем при любом исходе: иначе его транзакция держала бы соединение до конца теста.
+        release.set()
+        call.join(10)
+        if switch.ident is not None:
+            switch.join(10)
+    assert results["call"]["attempt_id"]
+    assert (results["switch"]["changed"], [s["user_id"] for s in results["switch"]["skipped"]]) == (0, [RCC_OWN])
+    assert svc.operator_mode(RCC_OWN) is None
+
+
+def test_line_settings_follow_the_line_in_activation_mode(hosted):
+    """Разбор 27.11: гудки до сброса — настройка линии удалённого КЦ и в режиме «Активация» (у СЗоВ своя телефония)."""
+    svc = hosted.svc
+    _enroll_szov(hosted)
+    hosted.q("UPDATE sip_department_config SET ring_timeout_rings = 0 WHERE department_id = %s", (RCC,))
+    hosted.q("UPDATE sip_department_config SET ring_timeout_rings = 7 WHERE department_id = %s", (SZOV,))
+    assert svc.get_state(RCC_OWN, phone_version=GUARDED)["ring_timeout_sec"] == 0
+    svc.set_line_modes(RCC, 'activation', user_ids=[RCC_OWN], changed_by=1)
+    assert svc.get_state(RCC_OWN, phone_version=GUARDED)["ring_timeout_sec"] == 0
+    ctx = svc.operator_context(RCC_OWN)
+    assert (ctx["department_id"], svc._line_department(ctx)) == (SZOV, RCC)

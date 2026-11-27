@@ -147,7 +147,7 @@ from . import pay
 from . import pins
 from . import sign_report
 from . import signing
-from .activation_check import ActivationChecker
+from .activation_check import TRIPS_RECHECK_MINUTES, ActivationChecker
 from .sign_check import IN_FLIGHT_STATES, SignChecker
 from .trips_check import TripChecker
 
@@ -888,6 +888,17 @@ ACTIVATION_PRECHECK_BUDGET_SEC = 8
 ACTIVATION_CALL_BUDGET_SEC = 5
 ACTIVATION_CALL_PROVIDER_FRESH_HOURS = 6
 ACTIVATION_MANAGER_BUDGET_SEC = 25
+# Кнопки «Обновить» журнала (check_lead_activation, разбор 27.11): почему проверка не обновила водителя — словами.
+# Не запущена (503) — пауза после сбоя (NOW_BACKOFF_SEC) или заняты все проверки; не ответила (502) — источник.
+ACTIVATION_CHECK_BUSY = {
+    "backoff": "после сбоя проверка ждёт полминуты — повторите чуть позже",
+    "busy": "сейчас идут другие проверки — повторите через несколько секунд",
+}
+ACTIVATION_CHECK_FAILED = {
+    "budget": f"не уложилась в {ACTIVATION_MANAGER_BUDGET_SEC} секунд — повторите через минуту",
+    "unavailable": "CRM не отвечает — повторите через минуту",
+    "fleet_unavailable": "кабинет Fleet не отвечает — повторите позже",
+}
 # Метка водителя: последний заказ до месяца базы старше стольких дней — отток (то же правило
 # 30 дней, что у «Базы лидов ОП TEZ»).
 CHURN_DAYS = 30
@@ -1840,6 +1851,12 @@ def _sid(value):
     return None if value is None else str(value)
 
 
+def _row_label(row_number):
+    """Номер строки файла для руководителя: число — строка Excel; текст — уже с именем листа («Более 50»: 3 —
+    activation.parse_activation_file, файл с несколькими листами)."""
+    return row_number if isinstance(row_number, str) else int(row_number)
+
+
 def _subtypes_from_json(value):
     """Типы итога из json_agg-колонки (_outcome_rows) → список словарей.
     psycopg2 сам разбирает json; строка — если драйвер отдал текст."""
@@ -2753,7 +2770,7 @@ class DialListService:
                               AND EXISTS (SELECT 1 FROM live WHERE live.user_id = m.user_id)
                             ORDER BY m.released_at DESC LIMIT 1)
                 """, (PHONE_USER_AGENT_PREFIX + "%", LINE_PHONE_LIVE_MINUTES, ctx["user_id"], ctx["user_id"],
-                      ctx["department_id"], ctx["internal_number"], ctx["user_id"], LINE_PREVIOUS_HOLDER_HOURS))
+                      self._line_department(ctx), ctx["internal_number"], ctx["user_id"], LINE_PREVIOUS_HOLDER_HOURS))
                 row = cur.fetchone() or (0, None)
         except Exception as exc:
             log.warning("dial_list: кто держит линию %s, узнать не удалось: %s", ctx.get("internal_number"), exc)
@@ -3046,10 +3063,22 @@ class DialListService:
                 "modes": {str(k): v for k, v in self.line_modes(host, container).items()}}
 
     def clear_operator_mode(self, user_id):
-        """Снять режим оператора (посадка на линию, снятие с неё). Сбой — в журнал: режим без линии и так не
-        действует (work_operator сверяет отдел линии)."""
+        """Снять режим оператора (посадка на линию, снятие с неё). Пока у него звонок или не поставлен итог
+        (_operator_busy), режим остаётся (разбор 27.11): иначе итог разговора «Активации» ставили бы из справочника
+        удалённого КЦ. Без линии режим и так не действует (work_operator сверяет отдел линии), а посаженный на линию
+        того же отдела закроет итог в своём обзвоне; снимут режим со следующей посадкой или переключателем.
+        Сбой — в журнал."""
         try:
             with self.db._get_cursor() as cur:
+                self._lock_operator(cur, user_id)
+                if self._operator_busy(cur, user_id):
+                    cur.execute("SELECT department_id FROM dial_list_operator_modes WHERE user_id = %s",
+                                (int(user_id),))
+                    row = cur.fetchone()
+                    if row:
+                        log.info("dial_list: у сотрудника %s режим линии (обзвон отдела %s) оставлен: идёт звонок "
+                                 "или не поставлен итог", user_id, row[0])
+                    return
                 cur.execute("DELETE FROM dial_list_operator_modes WHERE user_id = %s RETURNING department_id",
                             (int(user_id),))
                 row = cur.fetchone()
@@ -3060,8 +3089,16 @@ class DialListService:
 
     def _operator_busy(self, cur, user_id):
         """Идёт звонок или не поставлен итог разговора: такому оператору режим не переключаем — его итог
-        принадлежит обзвону прежнего режима, а справочник итогов у нового свой."""
-        return bool(self._active_attempt(cur, user_id, include_ended=True) or self._pending_outcome(cur, user_id))
+        принадлежит обзвону прежнего режима, а справочник итогов у нового свой. Звонок — любая живая попытка
+        (LIVE_STATES) моложе ATTEMPT_STALE_MINUTES (разбор 27.11): _active_attempt держит «Позвонить» лишь
+        ACTIVE_ATTEMPT_WINDOW_MINUTES, а разговор бывает дольше — и режим переключался посреди него."""
+        cur.execute("""
+            SELECT 1 FROM dial_list_attempts
+            WHERE operator_id = %s AND state IN %s
+              AND requested_at > CURRENT_TIMESTAMP - make_interval(mins => %s)
+            LIMIT 1
+        """, (int(user_id), LIVE_STATES, ATTEMPT_STALE_MINUTES))
+        return bool(cur.fetchone() or self._pending_outcome(cur, user_id))
 
     # Строки оператора в базе отдела, который он покидает: выданы, звонок по ним не идёт. Как у строки без обработки
     # (release_idle_rows): без звонков — удаляется (будто не выдавали), со звонками — закрывается без результата.
@@ -3347,6 +3384,22 @@ class DialListService:
                   caller_id, company, active_period, changed_by,
                   profile, auto_dial, call_interval_sec, wrapup_sec, json.dumps(retry_schedule),
                   callback_own_minutes, followup_after_min, wa_license_id, repeat_share, trips_goal))
+            # Цель «Активации» снижена (разбор 27.11): у кого по последней проверке CRM поездок уже не меньше новой
+            # цели — проверка «давно»: проверка перед пачкой и перед звонком спросит CRM сразу и закроет добравших
+            # обычным путём (момент — последний заказ, успешка — по правилу), фоновый прогон — следом. Иначе они
+            # оставались в обзвоне до часового перепроса, и им звонили с «Добрал 34 поездки» в строке. Число из
+            # файла (проверки не было) и так спросится первым.
+            goal_lowered = (profile == PROFILE_ACTIVATION
+                            and trips_goal < activation.clean_goal(current.get("trips_goal")))
+            if goal_lowered:
+                cur.execute("""
+                    UPDATE dial_list_leads
+                    SET trip_checked_at = LEAST(trip_checked_at, CURRENT_TIMESTAMP - make_interval(mins => %s))
+                    WHERE department_id = %s AND signed_at IS NULL AND trip_checked_at IS NOT NULL
+                      AND trips_total >= %s
+                """, (TRIPS_RECHECK_MINUTES + 1, int(department_id), trips_goal))
+                log.info("dial_list: отдел %s — цель по поездкам снижена до %s, на перепроверку водителей: %s",
+                         department_id, trips_goal, cur.rowcount)
             # Точечная обработка (ревью 17.11.2026): сменился обзваниваемый месяц — отметки файлов отдела снимаются
             # все. Иначе отметки прежнего месяца при возврате к нему ожили бы сами, а снять их, пока месяц не
             # обзванивается, нельзя. Новый месяц начинается со всей базы.
@@ -3370,6 +3423,9 @@ class DialListService:
                      changed_by)
         with self._clients_lock:
             self._clients.pop(int(department_id), None)
+        if goal_lowered:
+            # Добравших по новой цели закроет прогон, не дожидаясь :18/:48 (выдача и звонок проверят своих и сами).
+            self.request_activation_check("цель по поездкам снижена")
         return self.department_settings(department_id)
 
     @staticmethod
@@ -3689,23 +3745,41 @@ class DialListService:
     # «Активация водителей» (26.11.2026): поля водителя из файла — по номеру строки базы месяца. ID водителя —
     # всегда из файла; число поездок из файла — пока CRM его не проверяла; провайдер из файла — пока его не
     # проверила карточка Fleet. Сменился ID — парк во Fleet спросим заново.
+    # Разбор 27.11: у номера ДРУГОЙ водитель (ID был и сменился) — поля водителя из файла заново: поездки и провайдер
+    # прежнего водителя к новому не переходят (иначе его Sapar читался как перевод с «Бумажного» прежнего — ложная
+    # успешка); история звонков, цель и успешки строки — прежние. Файл перевёл известного провайдера (не Sapar) на
+    # Sapar — переход, как у проверки карточкой (_write_provider): sapar_at, успешку решит прогон. Иначе он терялся:
+    # водителей на Sapar больше не проверяют.
+    _ACTIVATION_DRIVER_CHANGED_SQL = "(l.driver_id <> '' AND l.driver_id <> v.driver_id)"
     _ACTIVATION_EXTRAS_SQL = """
         UPDATE dial_list_leads l
         SET driver_id = v.driver_id,
             park_name = CASE WHEN v.park <> '' THEN v.park ELSE l.park_name END,
-            trips_total = CASE WHEN l.trip_checked_at IS NULL THEN COALESCE(v.trips, l.trips_total)
+            trips_total = CASE WHEN {changed} THEN v.trips
+                               WHEN l.trip_checked_at IS NULL THEN COALESCE(v.trips, l.trips_total)
                                ELSE l.trips_total END,
-            edm_provider = CASE WHEN l.edm_source IN ('', 'file') AND v.provider <> '' THEN v.provider
+            trip_checked_at = CASE WHEN {changed} THEN NULL ELSE l.trip_checked_at END,
+            trip_error = CASE WHEN {changed} THEN '' ELSE l.trip_error END,
+            sapar_at = CASE WHEN NOT {changed} AND l.sapar_at IS NULL AND l.edm_source IN ('', 'file')
+                                 AND l.edm_provider <> '' AND lower(l.edm_provider) <> '{sapar}'
+                                 AND lower(v.provider) = '{sapar}'
+                            THEN v.now ELSE l.sapar_at END,
+            edm_provider = CASE WHEN {changed} THEN v.provider
+                                WHEN l.edm_source IN ('', 'file') AND v.provider <> '' THEN v.provider
                                 ELSE l.edm_provider END,
-            edm_checked_at = CASE WHEN l.edm_source IN ('', 'file') AND v.provider <> '' THEN v.now
+            edm_checked_at = CASE WHEN {changed} THEN CASE WHEN v.provider <> '' THEN v.now END
+                                  WHEN l.edm_source IN ('', 'file') AND v.provider <> '' THEN v.now
                                   ELSE l.edm_checked_at END,
-            edm_source = CASE WHEN l.edm_source IN ('', 'file') AND v.provider <> '' THEN 'file'
+            edm_source = CASE WHEN {changed} THEN CASE WHEN v.provider <> '' THEN 'file' ELSE '' END
+                              WHEN l.edm_source IN ('', 'file') AND v.provider <> '' THEN 'file'
                               ELSE l.edm_source END,
-            account_registered_at = COALESCE(v.registered, l.account_registered_at),
+            edm_error = CASE WHEN {changed} THEN '' ELSE l.edm_error END,
+            account_registered_at = CASE WHEN {changed} THEN v.registered
+                                         ELSE COALESCE(v.registered, l.account_registered_at) END,
             fleet_park_id = CASE WHEN l.driver_id <> v.driver_id THEN '' ELSE l.fleet_park_id END
         FROM (VALUES %s) AS v(department_id, period, phone, driver_id, park, trips, provider, registered, now)
         WHERE l.department_id = v.department_id AND l.period = v.period AND l.phone_norm = v.phone
-    """
+    """.replace("{changed}", _ACTIVATION_DRIVER_CHANGED_SQL).replace("{sapar}", activation.SAPAR.lower())
 
     def import_leads(self, department_id, uploaded_by, file_name, rows, period=None, require_iin=True,
                      keep_iin=False, extras=None):
@@ -3751,7 +3825,7 @@ class DialListService:
                 if not phone_norm:
                     counts["rows_invalid"] += 1
                     if len(counts["invalid_rows"]) < ROW_SAMPLE_MAX:
-                        counts["invalid_rows"].append(int(row_number))
+                        counts["invalid_rows"].append(_row_label(row_number))
                     continue
                 if extras:
                     # Тот же водитель (ID) уже в базе месяца под другим номером — повтор.
@@ -3763,7 +3837,7 @@ class DialListService:
                 if require_iin and not iin:
                     counts["rows_bad_iin"] += 1
                     if len(counts["bad_iin_rows"]) < ROW_SAMPLE_MAX:
-                        counts["bad_iin_rows"].append(int(row_number))
+                        counts["bad_iin_rows"].append(_row_label(row_number))
                     continue
                 owner = iin_owner.get(iin) if iin else None
                 city = sign_report.clean_city(row[5]) if len(row) > 5 else ""
@@ -5989,6 +6063,14 @@ class DialListService:
             "mode_host_department_id": operator.get("mode_host_department_id"),
         }
 
+    @staticmethod
+    def _line_department(ctx):
+        """Отдел ЛИНИИ оператора — для настроек самой линии (гудки до сброса, кто ещё держит линию). В режиме
+        «Активация» отдел работы — «Активация» (СЗоВ, телефония не Binotel), а линия и её настройки — удалённого КЦ
+        (разбор 27.11: «линия, провайдер и номер — прежние»)."""
+        host = ctx.get("mode_host_department_id")
+        return int(host) if host is not None else int(ctx["department_id"])
+
     def _other_mode_departments(self, cur, ctx):
         """Отделы другой стороны режима линии (владелец 26.11.2026: «что отображается в iCORE Phone, зависит от
         включённого режима»): в «Активации» — отдел линии, в обзвоне своей линии — «Активация» на линиях этого отдела.
@@ -6356,7 +6438,7 @@ class DialListService:
         # на вопрос «класть ли плечо» всего пять секунд, а молчание и ошибку понимают как «класть» —
         # так рвались разговоры (12.10.2026). Настройку отдела для них даже не читаем.
         # Прямой звонок считает срок сам от первых гудков — без поправки на сообщение АТС.
-        ring_timeout_sec = (self._ring_timeout_sec(ctx["department_id"],
+        ring_timeout_sec = (self._ring_timeout_sec(self._line_department(ctx),
                                                    lead_in=DIRECT_RING_LEAD_IN_SEC if direct else RING_LEAD_IN_SEC)
                             if phone_has_ring_timer(phone_version) else 0)
         state = {
@@ -7600,6 +7682,10 @@ class DialListService:
             log.exception("dial_list: проверка водителя перед звонком (строка %s) упала — звоним без неё",
                           assignment_id)
         with self.db._get_cursor() as cur:
+            # Замок оператора — как у «Ещё» и переключения режима линии (разбор 27.11): без него переключение,
+            # пришедшее, пока звонок ещё не записан, не видело его и уводило оператора в другой обзвон посреди
+            # набора. Порядок замков у всех один: оператор, потом строки.
+            self._lock_operator(cur, ctx["user_id"])
             cur.execute("""
                 SELECT a.id, a.state, a.attempts, l.phone_norm, l.full_name, l.id,
                        (l.signed_at IS NOT NULL OR l.sign_status = 'processing'), l.period
@@ -7835,7 +7921,7 @@ class DialListService:
                                                 "телефон без простого таймера")
         ctx = self.operator_context(user_id)
         if event == "ring_timeout":
-            if self._ring_timeout_sec(ctx["department_id"]) <= 0:
+            if self._ring_timeout_sec(self._line_department(ctx)) <= 0:
                 return self._ring_timeout_unguarded(user_id, attempt_id, ring_sec, phone_version,
                                                     "у отдела автосброс выключен")
             return self._ring_timeout_event(ctx, attempt_id, ring_sec)
@@ -10484,13 +10570,18 @@ class DialListService:
                                         provider_fresh_hours=(0 if what in ("", "provider")
                                                               and checker.fleet_configured() else None),
                                         per_driver=True)
+            stopped = summary.get("stopped") or ""
             if summary.get("reached"):
                 self.sign_checker.close_signed_rows(summary["reached"])
-            elif summary.get("stopped") in ("budget", "unavailable", "fleet_unavailable") and not summary.get(
-                    "checked"):
+            elif stopped in ACTIVATION_CHECK_BUSY:
+                # Пауза после сбоя или заняты все проверки (разбор 27.11): раньше — 200 и прежняя карточка, будто
+                # данные обновились.
+                raise DialListError(f"Проверка не запущена: {ACTIVATION_CHECK_BUSY[stopped]}", 503)
+            elif stopped in ACTIVATION_CHECK_FAILED and not summary.get("checked"):
                 card = self.lead_card(lead_id)
                 block = card.get("activation") or {}
-                why = block.get("trips_error") or block.get("provider_error") or "повторите через минуту"
+                why = (block.get("trips_error") or block.get("provider_error")
+                       or ACTIVATION_CHECK_FAILED[stopped])
                 raise DialListError(f"Проверка не ответила: {why}", 502)
         return self.lead_card(lead_id)
 

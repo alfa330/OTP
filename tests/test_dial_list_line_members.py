@@ -759,6 +759,22 @@ class LinesRoutesTests(unittest.TestCase):
             self.assertIn(('release', LINE_DEPARTMENT, 77, 5, True), svc.calls)
             self.assertIn(('right', role == 'super_admin', heads), svc.calls)
 
+    def test_hosted_activation_tab_cannot_seat_or_release_on_borrowed_lines(self):
+        """Разбор 27.11: у «Активации» на линиях удалённого КЦ сажают и снимают только в удалённом КЦ — отказ даёт
+        сервер, а не только спрятанные кнопки вкладки."""
+        svc = self.Svc()
+        svc.department_settings = lambda dep: {"profile": "activation", "host_department_id": 1954}
+        client = self._client('super_admin', [], svc)
+        for path, body in (('/assign', {"user_id": 77, "internal_number": "906"}), ('/release', {"user_id": 77})):
+            response = client.post(self.URL + path, json=body)
+            self.assertEqual(response.status_code, 409, path)
+            self.assertIn('сажают на них и снимают в разделе «Удаленный КЦ»', response.get_json()["error"])
+        self.assertFalse([c for c in svc.calls if c[0] in ('assign', 'release')], 'сервис посадки не вызывался')
+        # Свой отдел линий — как всегда.
+        svc.department_settings = lambda dep: {"profile": "remote_cc", "host_department_id": None}
+        self.assertEqual(client.post(self.URL + '/assign', json={"user_id": 77, "internal_number": "906"}).status_code,
+                         200)
+
     def test_role_admin_alone_is_not_super_admin(self):
         """Суперадмином считает переданное правило, а не «любой админ»; без правила — никто."""
         svc = self.Svc()

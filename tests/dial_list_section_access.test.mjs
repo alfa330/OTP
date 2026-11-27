@@ -188,3 +188,29 @@ test('пункт меню, страж маршрута и экран держа�
     assert.ok(appSource.includes("if (view === 'dial_list' && canAccessDialListSection) return;"));
     assert.ok(appSource.includes('{( view === "dial_list" && canAccessDialListSection && ('));
 });
+
+// «Активация водителей» (26.11.2026): админы, глава и супервайзеры СЗоВ. Разбор 27.11 — правило не было покрыто:
+// пункт меню у главы любого отдела или вне пилота тесты не заметили бы. Исполняем то же НАСТОЯЩЕЕ объявление.
+const evaluateActivation = new Function(
+    'user', 'normalizeRole', 'isDepartmentHead', 'headedDepartmentId', 'isAdminLikeRoleFn', 'isSupervisorRole',
+    `${[...MODULE_NAMES, ...FLAG_NAMES, 'canAccessDriverActivationSection'].map(declarationOf).join('\n')}
+     return canAccessDriverActivationSection;`,
+);
+const canOpenActivation = (user) => evaluateActivation(user, normalizeRole, isDepartmentHead, headedDepartmentId,
+    isAdminLikeRole, isSupervisorRole);
+
+test('«Активация водителей»: админы, глава и супервайзеры СЗоВ — и только они', () => {
+    assert.equal(canOpenActivation(profile({ role: 'admin', department_id: null, department_code: null })), true);
+    assert.equal(canOpenActivation(profile({ role: 'super_admin' })), true);
+    assert.equal(canOpenActivation(head(SZOV, 'szov')), true);
+    assert.equal(canOpenActivation(profile()), true);                                    // СВ СЗоВ
+    assert.equal(canOpenActivation(profile({ department_code: ' SZOV ' })), true);
+    assert.equal(canOpenActivation(head(1954, 'remote_cc')), false);                     // глава удалённого КЦ
+    assert.equal(canOpenActivation(head(367, 'op')), false);                             // глава другого отдела
+    assert.equal(canOpenActivation(profile({ department_id: 1954, department_code: 'remote_cc' })), false);
+    for (const role of ['operator', 'trainee', 'trainer']) {
+        assert.equal(canOpenActivation(profile({ role })), false, role);
+    }
+    // Меню и страж маршрута — по этому флагу.
+    assert.ok(appSource.includes("if (view === 'driver_activation' && canAccessDriverActivationSection) return;"));
+});

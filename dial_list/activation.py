@@ -155,19 +155,24 @@ def _moment(value):
 
 
 def _sheets(raw_bytes, file_ext):
-    """Листы файла → [[строки]]. CSV — один «лист»."""
+    """Листы файла → [(имя листа, [строки])]. CSV — один «лист» без имени."""
     ext = str(file_ext or "").lower()
     if ext in (".xlsx", ".xlsm"):
         from openpyxl import load_workbook
         wb = load_workbook(io.BytesIO(raw_bytes), read_only=True, data_only=True)
         try:
-            return [[list(row) for row in ws.iter_rows(values_only=True)] for ws in wb.worksheets]
+            return [(str(ws.title or ""), [list(row) for row in ws.iter_rows(values_only=True)])
+                    for ws in wb.worksheets]
         finally:
             wb.close()
     if ext == ".csv":
         from common.leads_file import _rows_from_csv
-        return [_rows_from_csv(raw_bytes)]
+        return [("", _rows_from_csv(raw_bytes))]
     raise ValueError("Поддерживаются только .csv, .xlsx и .xlsm")
+
+
+def _filled(row):
+    return any(str(c or "").strip() for c in row)
 
 
 def _columns(header):
@@ -201,12 +206,15 @@ def parse_activation_file(raw_bytes, file_ext, goal=TRIPS_GOAL_DEFAULT, max_rows
     counts = {"rows_goal_reached": 0, "rows_bad_id": 0, "bad_id_rows": [], "duplicate_ids": 0, "sheets": 0}
     seen_ids = set()
     saw_id_column = saw_phone_column = False
-    row_number = 0
-    for sheet in sheets:
-        sheet = [r for r in sheet if any(str(c or "").strip() for c in r)]
-        if not sheet:
-            continue
-        cols = _columns(sheet[0])
+    # Номер строки для руководителя — строка Excel на своём листе (пустые строки тоже считаются); листов с данными
+    # больше одного — с именем листа: «Более 50»: 3 (разбор 27.11: сквозной счёт по листам указывал не туда).
+    numbered_sheets = []
+    for name, sheet in sheets:
+        numbered = [(index, row) for index, row in enumerate(sheet, start=1) if _filled(row)]
+        if numbered:
+            numbered_sheets.append((name, numbered, _columns(numbered[0][1])))
+    data_sheets = sum(1 for _name, _rows, cols in numbered_sheets if "driver_id" in cols and "phone" in cols)
+    for name, numbered, cols in numbered_sheets:
         saw_id_column = saw_id_column or "driver_id" in cols
         saw_phone_column = saw_phone_column or "phone" in cols
         if "driver_id" not in cols or "phone" not in cols:
@@ -217,15 +225,15 @@ def parse_activation_file(raw_bytes, file_ext, goal=TRIPS_GOAL_DEFAULT, max_rows
             idx = cols.get(key)
             return raw[idx] if idx is not None and idx < len(raw) else None
 
-        for raw in sheet[1:]:
-            row_number += 1
+        for excel_row, raw in numbered[1:]:
+            row_label = f"«{name}»: {excel_row}" if data_sheets > 1 and name else excel_row
             if len(rows) >= limit:
                 raise ValueError(f"В файле больше {limit} строк с данными. Разделите его на несколько файлов.")
             driver_id = clean_account_id(cell(raw, "driver_id"))
             if not driver_id:
                 counts["rows_bad_id"] += 1
                 if len(counts["bad_id_rows"]) < 20:
-                    counts["bad_id_rows"].append(row_number + 1)
+                    counts["bad_id_rows"].append(row_label)
                 continue
             trips = clean_trips(cell(raw, "trips"))
             if trips is not None and trips >= goal:
@@ -243,7 +251,7 @@ def parse_activation_file(raw_bytes, file_ext, goal=TRIPS_GOAL_DEFAULT, max_rows
             park = " ".join(str(cell(raw, "park") or "").split())[:128]
             city = " ".join(str(cell(raw, "city") or "").split())[:64] or city_from_park(park)
             iin_raw = _iin_cell(cell(raw, "iin")) if "iin" in cols else ""
-            rows.append((row_number + 1, str(cell(raw, "fio") or "").strip(), phone_raw, phone_norm, iin_raw, city))
+            rows.append((row_label, str(cell(raw, "fio") or "").strip(), phone_raw, phone_norm, iin_raw, city))
             if phone_norm and phone_norm not in extras:
                 extras[phone_norm] = {
                     "driver_id": driver_id,

@@ -575,7 +575,10 @@ class ActivationChecker:
         return len(values), self._write_trips(values)
 
     def _trips_per_driver(self, trip_rows, now):
-        """Поездки по карточке CRM (driver-info) — заодно парк и дата регистрации."""
+        """Поездки по карточке CRM (driver-info) — заодно парк и дата регистрации. Её orders.total — окно ~полгода,
+        у пачки (_trips_batch) — заказы с месяца регистрации: сверено на живой CRM 27.11.2026 — 12 из 12 водителей
+        файла совпали (новички, все зарегистрированы в ноябре). Разойтись могут лишь у зарегистрированных больше
+        полугода назад. На чужой ID карточка отвечает честным 404, пачка — нулём, поэтому для одного водителя — она."""
         checked, reached = 0, []
         for lead_id, driver_id, _registered in trip_rows:
             info = self.crm.driver(driver_id, timeout=CRM_NOW_TIMEOUT_SEC)
@@ -658,8 +661,15 @@ class ActivationChecker:
         return bool(row and row[0])
 
     def _write_provider_error(self, lead_id, error, now, advance=True, drop_park=False):
-        """Провайдера не узнали. advance — по водителю (нет в CRM, нет в парке): отметка времени ставится, чтобы
-        прогон не спрашивал его снова раньше суток; сбой кабинета (advance=False) — время не двигаем."""
+        """Провайдера не узнали. advance — по водителю (нет в CRM, нет в парке): ошибка и отметка времени — в лид,
+        прогон не спросит его снова раньше суток (_PROVIDER_DUE_SQL). Сбой кабинета или CRM (advance=False) в лид не
+        пишется (разбор 27.11): суточный пропуск сверяет ошибку с edm_checked_at, а у провайдера из файла это время
+        загрузки — сбой перед звонком выключал водителя из проверки после разговора на сутки. Такой сбой руководитель
+        видит в сводке базы (fleet_error) и ответом кнопки «Обновить провайдера»."""
+        if not advance:
+            log.info("dial_list: активация — провайдер водителя %s не проверен (сбой источника): %s", lead_id,
+                     str(error or "")[:200])
+            return
         with self.db._get_cursor() as cur:
             cur.execute("""
                 UPDATE dial_list_leads

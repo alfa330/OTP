@@ -17,7 +17,8 @@ import {
     tezSettingsForm, tezSettingsPayload, tezUploadSummary, validateTezSettings, whenText, wrapupText,
 } from '../dial_list/tezAutodial';
 import {
-    TRIPS_GOAL_DEFAULT, TRIPS_GOAL_MAX, TRIPS_GOAL_MIN, activationUploadSummary, checkWarning, validateTripsGoal,
+    TRIPS_GOAL_DEFAULT, TRIPS_GOAL_MAX, TRIPS_GOAL_MIN, activationUploadSummary, checkWarning, reachedGoalLabel,
+    validateTripsGoal,
 } from '../dial_list/driverActivation';
 
 /*
@@ -559,8 +560,8 @@ const activationLeadTiles = (summary) => {
     return [
         { label: 'Всего', value: summary?.total ?? 0, tone: 'text-slate-900',
             info: 'Водители базы выбранного месяца.' },
-        { label: `Добрали ${goal} поездок`, value: dash('reached'), tone: 'text-emerald-600',
-            info: `Водители базы, у которых по CRM уже ${goal} завершённых поездок и больше. Такой водитель уходит из обзвона; успешка — оператору, который последним поговорил с ним не меньше 10 секунд до этого.` },
+        { label: reachedGoalLabel(goal), value: dash('reached'), tone: 'text-emerald-600',
+            info: `Водители базы, у которых по CRM завершённых поездок уже не меньше цели (${goal}). Такой водитель уходит из обзвона; успешка — оператору, который последним поговорил с ним не меньше 10 секунд до этого.` },
         { label: 'В обзвоне', value: (Number(status.new) || 0) + (Number(status.in_progress) || 0), tone: 'text-slate-900',
             info: 'Ещё не добрали поездки и не закрыты: новые и те, кому уже звонили.' },
         { label: 'На Sapar сейчас', value: dash('on_sapar'), tone: 'text-blue-600',
@@ -591,7 +592,7 @@ const ActivationCheckCard = ({ summary }) => {
         <section className="space-y-1.5">
             <div className="flex items-center gap-1.5">
                 <span className={iosGroupLabel}>Поездки и провайдер ЭДО</span>
-                <IosHint text="Раз в 30 минут и сразу после загрузки базы сервер спрашивает CRM, сколько у водителя завершённых поездок за всё время, и по одной проверяет провайдера ЭДО в карточке кабинета Fleet (около 20 карточек в минуту): сначала тех, с кем говорили после прошлой проверки, потом тех, о ком известно только из файла, остальных — раз в сутки. Кто уже на Sapar, не перепроверяется. Перед звонком сервер освежает поездки этого водителя, а провайдера — если ему больше 6 часов." />
+                <IosHint text="Сервер проверяет базу каждые 30 минут и сразу после загрузки: поездки каждого водителя (завершённые за всё время) спрашивает в CRM раз в час, провайдера ЭДО — по одной карточке кабинета Fleet (около 20 карточек в минуту): сначала тех, с кем говорили после прошлой проверки, потом тех, о ком известно только из файла, остальных — раз в сутки. Кто уже на Sapar, не перепроверяется. Перед звонком сервер освежает поездки этого водителя, а провайдера — если ему больше 6 часов." />
             </div>
             <div className={`${iosCard} flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3`}>
                 <div className={`flex min-w-0 items-center gap-2 text-[13px] ${check.configured === false ? 'text-amber-700' : 'text-slate-700'}`}>

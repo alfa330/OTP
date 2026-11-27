@@ -41,8 +41,14 @@ export const tripsWord = (n) => {
     return 'поездок';
 };
 
-/* «добрал 51 поездку / 52 поездки / 50 поездок»: после глагола — винительный падеж. */
-const tripsWordAcc = (n) => (tripsWord(n) === 'поездка' ? 'поездку' : tripsWord(n));
+/** «добрал 51 поездку / 52 поездки / 50 поездок»: после глагола — винительный падеж. */
+export const tripsWordAcc = (n) => (tripsWord(n) === 'поездка' ? 'поездку' : tripsWord(n));
+
+/** Подпись цели во множественном числе — плитки базы и аналитики: «Добрали 21 поездку», «Добрали 50 поездок». */
+export const reachedGoalLabel = (goal) => {
+    const n = Number(goal) || TRIPS_GOAL_DEFAULT;
+    return `Добрали ${n} ${tripsWordAcc(n)}`;
+};
 
 const ofGoalWord = (goal) => {
     const v = Math.abs(Math.trunc(Number(goal) || 0));
@@ -144,7 +150,7 @@ export const activationUploadSummary = (data, periodText = '') => {
     const parts = [`новых ${data?.rows_new ?? 0}`];
     if (data?.rows_duplicate) parts.push(`повторов ${data.rows_duplicate}`);
     if (data?.rows_goal_reached) {
-        parts.push(`уже ${data.trips_goal ?? TRIPS_GOAL_DEFAULT}+ поездок — не загружены: ${data.rows_goal_reached}`);
+        parts.push(`уже добрали цель (${data.trips_goal ?? TRIPS_GOAL_DEFAULT}) — не загружены: ${data.rows_goal_reached}`);
     }
     if (data?.rows_bad_id) {
         const where = rowsText(data.bad_id_rows, data.rows_bad_id);

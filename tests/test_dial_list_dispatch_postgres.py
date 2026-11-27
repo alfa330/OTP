@@ -687,6 +687,8 @@ def test_next_locks_carried_rows_before_the_portion(env, monkeypatch):
         except Exception as exc:   # noqa: BLE001 — тест смотрит, что именно
             result['error'] = exc
 
+    # «Позвонить» выше тоже брал замок оператора (разбор 27.11, режим линий) — считаем только «Ещё».
+    claims.clear()
     worker = threading.Thread(target=run_next)
     worker.start()
     time.sleep(0.7)
