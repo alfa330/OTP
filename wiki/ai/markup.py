@@ -613,3 +613,218 @@ IMAGE_GUIDE = """
 [[КАРТИНКА-1 убрать]]. Просто выбросить маркер нельзя — картинка вернётся в
 конец статьи отдельным разделом.
 """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ТАБЛИЦЫ: ПОЛОЖЕНИЕ, РАЗМЕРЫ И НАСТАВЛЕНИЕ
+#
+# С 26.11.2026 таблицу в редакторе настраивает человек: ширины колонок
+# (colwidth у клетки, <colgroup> и width у таблицы), высоту строки (style
+# height у <tr>), «размеры зафиксированы» (класс wiki-table-fixed) и
+# положение по ширине статьи (классы wiki-table-center / wiki-table-right).
+# Те же имена живут в узле редактора (src/components/wiki/WikiTableTools.js) и
+# в таблице стилей (wiki-theme.css); паритет сторожит tests/test_wiki_ai_tables.py.
+#
+# ЧТО БЫЛО ДО. Правка статьи через помощника вырезала таблицы маркерами и
+# возвращала их через authoring.normalize_table, а та снимала с таблицы ВСЕ
+# атрибуты, кроме объединения клеток, и все атрибуты внутри клеток. То есть
+# автор растягивал колонки и ставил таблицу по центру, просил ИИ «сократи
+# вступление» — и таблица молча возвращалась узкой, слева, с потерянными
+# выделениями цветом и выравниванием текста в клетках. Ровно та же беда,
+# что была у картинок до 31.08.2026 (см. выше).
+# ─────────────────────────────────────────────────────────────────────────────
+
+TABLE_ALIGNS = ('left', 'center', 'right')
+TABLE_FIXED_CLASS = 'wiki-table-fixed'
+TABLE_ALIGN_CLASSES = {'center': 'wiki-table-center', 'right': 'wiki-table-right'}
+# Классы таблицы, которые ставит редактор. Любой другой класс у таблицы — из
+# Word или чужой вёрстки, и в статье ему не место.
+TABLE_CLASSES = (TABLE_FIXED_CLASS,) + tuple(TABLE_ALIGN_CLASSES.values())
+
+_PX = r'\d{1,5}(?:\.\d+)?px'
+_TABLE_STYLE_RE = re.compile(r'^\s*(min-width|width)\s*:\s*(%s)\s*$' % _PX, re.I)
+_ROW_STYLE_RE = re.compile(r'^\s*height\s*:\s*(%s)\s*$' % _PX, re.I)
+_COLWIDTH_RE = re.compile(r'^\d{1,5}(?:,\d{1,5})*$')
+
+
+def _classes(tag):
+    value = tag.get('class')
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return str(value or '').split()
+
+
+def table_align(tag):
+    """Положение таблицы (узел bs4): 'center', 'right' или None — у левого края.
+
+    Читается и из класса редактора, и из data-align, которым его пишет модель
+    в НОВОЙ таблице: модели class запрещён целиком (см. authoring.SYSTEM_PROMPT),
+    а data-* — её привычный словарь оформления, как у блоков.
+    """
+    asked = str(tag.get('data-align') or '').strip().lower()
+    if asked in TABLE_ALIGN_CLASSES:
+        return asked
+    classes = _classes(tag)
+    for align, name in TABLE_ALIGN_CLASSES.items():
+        if name in classes:
+            return align
+    return None
+
+
+def set_table_align(tag, align):
+    """Поставить положение классом редактора. 'left' и None — у левого края."""
+    keep = [name for name in _classes(tag) if name not in TABLE_ALIGN_CLASSES.values()]
+    if align in TABLE_ALIGN_CLASSES:
+        keep.append(TABLE_ALIGN_CLASSES[align])
+    if keep:
+        tag['class'] = keep
+    elif 'class' in tag.attrs:
+        del tag['class']
+    if 'data-align' in tag.attrs:
+        del tag['data-align']
+
+
+def _clean_style(value, pattern):
+    kept = []
+    for part in str(value or '').split(';'):
+        if pattern.match(part):
+            kept.append(' '.join(part.split()))
+    return '; '.join(kept)
+
+
+def clean_table_layout(table):
+    """Оставить таблице статьи её разметку редактора — и только её.
+
+    Чистятся ТОЛЬКО сама таблица, её колонки, строки и клетки. Содержимое
+    клеток не трогается вовсе: выделение цветом, выравнивание текста, ссылки и
+    жирный внутри клетки — работа автора, и правка «сократи вступление» не
+    вправе их снимать. Опасное из него вырежет санитайзер, как у любого текста
+    статьи.
+    """
+    classes = [name for name in _classes(table) if name in TABLE_CLASSES]
+    style = _clean_style(table.get('style'), _TABLE_STYLE_RE)
+    table.attrs = {}
+    if classes:
+        table['class'] = classes
+    if style:
+        table['style'] = style
+    for col in table.find_all('col'):
+        if col.find_parent('table') is not table:
+            continue
+        kept = {}
+        width = _clean_style(col.get('style'), _TABLE_STYLE_RE)
+        if width:
+            kept['style'] = width
+        for name in ('span', 'width'):
+            if str(col.get(name) or '').strip().isdigit():
+                kept[name] = str(col.get(name)).strip()
+        col.attrs = kept
+    for group in table.find_all('colgroup'):
+        if group.find_parent('table') is table:
+            group.attrs = {}
+    for row in table.find_all('tr'):
+        if row.find_parent('table') is not table:
+            continue
+        height = _clean_style(row.get('style'), _ROW_STYLE_RE)
+        row.attrs = {'style': height} if height else {}
+    for cell in table.find_all(('td', 'th')):
+        if cell.find_parent('table') is not table:
+            continue
+        kept = {}
+        for name in ('colspan', 'rowspan'):
+            if str(cell.get(name) or '').strip().isdigit():
+                kept[name] = str(cell.get(name)).strip()
+        width = str(cell.get('colwidth') or '').replace(' ', '')
+        if _COLWIDTH_RE.match(width):
+            kept['colwidth'] = width
+        cell.attrs = kept
+    for section in table.find_all(('thead', 'tbody', 'tfoot')):
+        if section.find_parent('table') is table:
+            section.attrs = {}
+    return table
+
+
+def describe_table_layout(tag):
+    """Как стоит таблица — словами для подсказки модели. Пустая строка — как обычно."""
+    parts = []
+    align = table_align(tag)
+    if align:
+        parts.append(ALIGN_RU[align])
+    if TABLE_FIXED_CLASS in _classes(tag) or tag.find(attrs={'colwidth': True}):
+        parts.append('ширины колонок выставлены человеком')
+    if any(row.get('style') for row in tag.find_all('tr')):
+        parts.append('высота строк выставлена человеком')
+    return ', '.join(parts)
+
+
+def parse_table_controls(tail):
+    """Хвост маркера «[[ТАБЛИЦА-1 по центру]]» → (положение, убрать).
+
+    Те же слова, что у картинки, — один словарь на статью. Ширины в процентах у
+    таблицы нет: её колонки человек тянет мышью в пикселях, и число из хвоста
+    маркера просто игнорируется.
+    """
+    _size, align, remove = parse_image_controls(tail)
+    return align, remove
+
+
+def retag_table(html, align=None):
+    """Таблица (строка HTML) с новым положением. None — оставить как было."""
+    if align not in TABLE_ALIGNS:
+        return str(html or '')
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(str(html or ''), 'html.parser')
+    table = soup.find('table')
+    if table is None:
+        return str(html or '')
+    set_table_align(table, align)
+    return str(soup)
+
+
+TABLE_GUIDE = """
+ТАБЛИЦЫ
+Таблица — для однотипных записей с одинаковыми полями, которые сравнивают по
+строкам и колонкам: тарифы по городам, сроки акций, кто за что отвечает. Новую
+таблицу делай, когда о ней просит указание; при сборке статьи из документа —
+ещё и когда в документе уже идёт перечень таких записей. Связный текст в
+таблицу не переделывай; две-три пары «название — значение» — это список, а не
+таблица.
+
+Новая таблица пишется так:
+<table>
+<thead><tr><th>Город</th><th>Комиссия, %</th><th>Тариф</th></tr></thead>
+<tbody>
+<tr><td>Алматы</td><td>3</td><td>Эконом</td></tr>
+<tr><td>Астана</td><td>4</td><td></td></tr>
+</tbody>
+</table>
+
+1. Первая строка — шапка из <th>: короткие подписи колонок. Единица измерения —
+   в шапке («Комиссия, %»), а не в каждой клетке.
+2. В каждой строке столько клеток, сколько колонок в шапке.
+3. Значения — только из статьи, документа или указания. Чего там нет, клетку
+   оставь пустой: <td></td>. Не вписывай «нет данных» и не угадывай; прочерк
+   ставь, только если он стоит в источнике.
+4. В клетке — короткое значение или одна-две фразы. Можно <strong>, <em>,
+   ссылку <a href>, перенос <br> и короткий список <ul>; заголовки и
+   оформительские блоки — нельзя. Таблицу не кладут в блок, а блок — в таблицу.
+5. Объединяй клетки (colspan, rowspan), только когда одно значение и правда
+   относится к нескольким строкам или колонкам.
+6. Если строки — это названия (города, акции, тарифы), первую клетку каждой
+   строки можно сделать <th>: получится шапка слева.
+7. Перед таблицей — строка-подводка или заголовок: о чём она.
+8. Положение: по умолчанию таблица стоит у левого края. Узкую таблицу (две-три
+   короткие колонки) можно поставить по центру — <table data-align="center">;
+   у правого края — data-align="right", только по прямой просьбе.
+"""
+
+TABLE_MARKER_GUIDE = """
+ГОТОВЫЕ ТАБЛИЦЫ стоят маркерами [[ТАБЛИЦА-N]]. Маркер — это сама таблица, у
+таблиц статьи — вместе с размерами колонок и строк, которые выставил человек:
+перенеси его дословно, отдельным абзацем. В хвосте маркера можно задать
+положение таблицы:
+[[ТАБЛИЦА-1 по центру]]   по центру; ещё бывает «слева» и «справа»
+[[ТАБЛИЦА-1]]             оставить как есть
+Убрать таблицу можно только по прямому указанию: [[ТАБЛИЦА-1 убрать]]. Просто
+выбросить маркер нельзя — таблица вернётся в конец статьи.
+"""

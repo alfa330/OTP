@@ -43,14 +43,18 @@ import re
 from bs4 import BeautifulSoup
 
 from . import markup
+from . import tablepatch
 from .answer import ungrounded_numbers
 from ..sanitize import sanitize_html, to_plain_text
 
 # Маркер таблицы. Квадратные скобки и русское слово выбраны нарочно: такой токен
 # модель переносит дословно, а если всё же переврёт — регулярка ниже узнаёт его
 # и по искажённому виду (лишние пробелы, потерянные скобки).
+# Хвост после номера — положение таблицы: «[[ТАБЛИЦА-1 по центру]]» или
+# «[[ТАБЛИЦА-1 убрать]]» (markup.parse_table_controls). Без группы хвоста маркер
+# с ним не находился бы вовсе и уезжал бы в статью текстом, а таблица — в конец.
 TABLE_TOKEN = '[[ТАБЛИЦА-%d]]'
-_TABLE_TOKEN_RE = re.compile(r'\[{1,2}\s*ТАБЛИЦА[\s-]*(\d+)\s*\]{1,2}', re.I)
+_TABLE_TOKEN_RE = re.compile(r'\[{1,2}\s*ТАБЛИЦА[\s-]*(\d+)([^\]]*)\]{1,2}', re.I)
 
 # Картинки защищаются ТАК ЖЕ, как таблицы, и по той же причине. Картинка из Word
 # уже загружена в хранилище и получила постоянный адрес /api/wiki/file/<uuid> —
@@ -82,8 +86,11 @@ _DEMOTE = {'h4': 'h3', 'h5': 'h3', 'h6': 'h3'}
 # Атрибуты, выживающие у модельной разметки. Ни style, ни class — только
 # известные data-* оформительских блоков (wiki/ai/markup.py), по которым их
 # узнают санитайзер, витрина и схема редактора.
+# data-align у таблицы — её положение, которое модель задаёт НОВОЙ таблице
+# (markup.TABLE_GUIDE); normalize_table превращает его в класс редактора.
 _KEEP_ATTRS = {'a': ('href', 'title'), 'th': ('colspan', 'rowspan'),
                'td': ('colspan', 'rowspan'),
+               'table': ('data-align',),
                'div': markup.BLOCK_ATTRS,
                'ul': markup.LIST_ATTRS, 'ol': markup.LIST_ATTRS}
 
@@ -139,6 +146,7 @@ SYSTEM_PROMPT = """Ты — редактор корпоративной вики
 <p> абзац, <ul>/<ol> с <li> список
 <strong> важное, <blockquote> предупреждение
 <table><thead><tr><th>…</th></tr></thead><tbody><tr><td>…</td></tr></tbody></table>
+(как и когда делать таблицу — в разделе «ТАБЛИЦЫ» ниже)
 <a href="…"> ссылка
 плюс оформительские блоки — они описаны ниже отдельно.
 
@@ -153,7 +161,8 @@ SYSTEM_PROMPT = """Ты — редактор корпоративной вики
    картинки документа. Перенеси каждый маркер в ответ ДОСЛОВНО, отдельным
    абзацем, в подходящем по смыслу месте, а перед таблицей добавь заголовок или
    строку-подводку. Не пересказывай содержимое таблицы словами, не выдумывай его
-   и не меняй номера маркеров. Ни один маркер пропасть не должен.
+   и не меняй номера маркеров. Ни один маркер пропасть не должен. Менять можно
+   только хвост маркера — как описано в запросе.
 3. Ни одного числа, которого нет в документе. Не округляй, не пересчитывай, не
    переводи валюту.
 4. Язык статьи — язык документа.
@@ -166,7 +175,7 @@ SYSTEM_PROMPT = """Ты — редактор корпоративной вики
    какие разделы нужны, что вынести таблицей, для кого писать, что опустить.
    Выполняй его, но правила 1-6 оно не отменяет: дописать то, чего в документе
    нет, нельзя даже по прямой просьбе — собери из того, что есть.
-""" + markup.MARKUP_GUIDE
+""" + markup.MARKUP_GUIDE + markup.TABLE_GUIDE
 
 # Отдельная инструкция для файла, который модель читает сама (PDF, скан, фото).
 FILE_PROMPT_EXTRA = """
@@ -207,17 +216,26 @@ def _envelope(text):
     return title[:200], summary[:400], body.strip()
 
 
-def protect_tables(html):
+def protect_tables(html, keep_layout=False):
     """Вырезает таблицы и картинки, ставит маркеры.
 
     Возвращает (html, [таблицы], [картинки]). Таблица уходит из поля зрения
     модели целиком — вместе с объединёнными ячейками, которые она почти наверняка
     потеряла бы (см. шапку); картинка — вместе со своим постоянным адресом.
+
+    keep_layout — таблицы СТАТЬИ, а не документа: их колонки, строки и
+    положение выставил человек в редакторе, и правка через помощника обязана
+    вернуть их такими же (см. normalize_table). Таблица документа приводится к
+    единому виду, как и раньше.
     """
     soup = BeautifulSoup(str(html or ''), 'html.parser')
     tables, images = [], []
-    for index, table in enumerate(soup.find_all('table'), start=1):
-        tables.append(normalize_table(table))
+    # Только таблицы верхнего уровня: вложенная таблица уезжает вместе с той,
+    # в клетке которой стоит. Иначе она получила бы свой маркер ВНУТРИ уже
+    # вырезанной таблицы — и при возврате на место встала бы туда текстом.
+    outer = [table for table in soup.find_all('table') if table.find_parent('table') is None]
+    for index, table in enumerate(outer, start=1):
+        tables.append(normalize_table(table, keep_layout=keep_layout))
         marker = soup.new_tag('p')
         marker.string = TABLE_TOKEN % index
         table.replace_with(marker)
@@ -252,28 +270,100 @@ def _table_caption(table_html, limit=120):
 
 
 def table_hints(tables):
-    """Подсказка к маркерам: номер, размер и шапка каждой таблицы."""
+    """Подсказка к маркерам: номер, размер, шапка и положение каждой таблицы.
+
+    Положение и «размеры выставлены человеком» модель обязана видеть: без них
+    правило «не трогай то, что выставил человек» ей не выполнить — тега она не
+    видит, как и у картинок (image_hints).
+    """
     lines = []
     for index, table in enumerate(tables, start=1):
         soup = BeautifulSoup(str(table or ''), 'html.parser')
-        rows = len(soup.find_all('tr'))
+        tag = soup.find('table')
+        rows = len(tablepatch.rows_of(tag)) if tag is not None else 0
         caption = _table_caption(table)
-        lines.append('%s — строк: %d; колонки: %s'
-                     % (TABLE_TOKEN % index, rows, caption or 'без шапки'))
+        layout = markup.describe_table_layout(tag) if tag is not None else ''
+        lines.append('%s — строк: %d; колонки: %s%s'
+                     % (TABLE_TOKEN % index, rows, caption or 'без шапки',
+                        ('; ' + layout) if layout else ''))
     return '\n'.join(lines)
 
 
-def normalize_table(table):
-    """Единый вид таблицы: структура остаётся, оформление уходит.
+def tables_block(tables, title):
+    """Подсказка к маркерам таблиц вместе с наставлением о хвосте маркера.
+
+    Подставляется в ЗАПРОС, как и наставление о картинках (images_block): учить
+    хвосту маркера там, где маркеров нет, незачем.
+    """
+    hints = table_hints(tables)
+    if not hints:
+        return ''
+    return '%s\n%s\n%s' % (markup.TABLE_MARKER_GUIDE.strip(), title, hints)
+
+
+def _move_caption_out(table):
+    """Подпись <caption> — абзацем над таблицей.
+
+    Узел таблицы в редакторе подписи не знает, и её текст при открытии
+    статьи разбирается как лишняя строка из одной клетки — то есть подпись
+    ломала бы сетку. Над таблицей она остаётся тем, чем и была: подводкой.
+    """
+    for caption in table.find_all('caption'):
+        if caption.find_parent('table') is not table:
+            continue
+        text = ' '.join(caption.get_text(' ', strip=True).split())
+        caption.decompose()
+        if text and table.parent is not None:
+            soup = BeautifulSoup('<p><strong></strong></p>', 'html.parser')
+            soup.strong.string = text
+            table.insert_before(soup.p)
+
+
+def _square(table):
+    """Добить короткие строки пустыми клетками до ширины сетки.
+
+    Рваную таблицу редактор чинит сам при открытии, но витрина рисует ровно
+    сохранённое — там у короткой строки просто нет клеток, без рамок. И правки
+    клеток считают позиции по той же сетке. Шапка добирается <th>.
+    """
+    rows, entries, taken, width = tablepatch.layout(table)
+    if not 1 < width <= 40:
+        return
+    for r, row in enumerate(rows):
+        missing = sum(1 for c in range(width) if (r, c) not in taken)
+        if not missing:
+            continue
+        cells = entries[r]
+        name = 'th' if cells and all(e['cell'].name == 'th' for e in cells) else 'td'
+        soup = BeautifulSoup('', 'html.parser')
+        for _ in range(missing):
+            row.append(soup.new_tag(name))
+
+
+def normalize_table(table, keep_layout=False):
+    """Единый вид таблицы: структура остаётся, чужое оформление уходит.
 
     colspan и rowspan сохраняются — это смысл, а не оформление. А вот style,
-    class, width и colwidth убираются: из-за них таблицы в корпусе выглядят
-    каждая по-своему, хотя данные в них однотипные.
+    class, width и colwidth из Word убираются: из-за них таблицы в корпусе
+    выглядят каждая по-своему, хотя данные в них однотипные. Положение таблицы
+    (класс редактора или data-align от модели) остаётся — это не Word, а
+    решение автора.
+
+    keep_layout=True — таблица СТАТЬИ, уже настроенная в редакторе: ширины
+    колонок, высоты строк, «размеры зафиксированы» и положение остаются, и
+    содержимое клеток не трогается вовсе (markup.clean_table_layout). Иначе
+    любая правка через помощника молча сбрасывала бы то, что человек тянул
+    мышью, — ровно как было до 27.11.2026.
     """
     if isinstance(table, str):
         table = BeautifulSoup(table, 'html.parser').find('table')
         if table is None:
             return ''
+    if keep_layout:
+        markup.clean_table_layout(table)
+        return str(table)
+    align = markup.table_align(table)
+    _move_caption_out(table)
     for tag in table.find_all(('colgroup', 'col')):
         tag.decompose()
     for cell in table.find_all(('td', 'th')):
@@ -287,7 +377,9 @@ def normalize_table(table):
         keep = _KEEP_ATTRS.get(tag.name, ())
         tag.attrs = {k: v for k, v in tag.attrs.items() if k in keep}
     table.attrs = {}
+    markup.set_table_align(table, align)
     _ensure_header(table)
+    _square(table)
     return str(table)
 
 
@@ -433,10 +525,15 @@ def restore_tables(html, tables, images=()):
 
     def substitute(match):
         index = int(match.group(1))
-        if 1 <= index <= len(tables):
-            used.add(index)
-            return tables[index - 1]
-        return ''            # номер, которого не было — маркер просто убираем
+        if not 1 <= index <= len(tables):
+            return ''        # номер, которого не было — маркер просто убираем
+        used.add(index)
+        align, remove = markup.parse_table_controls(match.group(2))
+        # «Убрать» — единственный способ избавиться от таблицы, и он ЯВНЫЙ:
+        # таблица при этом считается размещённой, иначе вернулась бы в конец.
+        if remove:
+            return ''
+        return markup.retag_table(tables[index - 1], align)
 
     def substitute_image(match):
         index = int(match.group(1))
@@ -483,6 +580,25 @@ def restore_tables(html, tables, images=()):
         tail += ['<p>%s</p>' % images[index - 1] for index in lost_images]
         soup.append(BeautifulSoup(''.join(tail), 'html.parser'))
     return str(soup).strip(), lost
+
+
+def removed_tables(html):
+    """Номера таблиц, которые модель убрала ЯВНО, маркером «убрать».
+
+    Таблица — это данные, и пропасть молча она не должна даже по прямому
+    указанию: автор видит предупреждение и решает, так ли он хотел.
+    """
+    out = []
+    for match in _TABLE_TOKEN_RE.finditer(str(html or '')):
+        if markup.parse_table_controls(match.group(2))[1]:
+            out.append(int(match.group(1)))
+    return out
+
+
+def removed_tables_warning(numbers):
+    return 'ИИ убрал %s (%s) — так и было задумано?' % (
+        'таблицу' if len(numbers) == 1 else 'таблицы',
+        ', '.join('№%d' % number for number in numbers))
 
 
 def removed_images(html):
@@ -550,12 +666,17 @@ def truncation_warning(meta):
     return None
 
 
-def structure_warnings(*, source_html, source_text, result_html, lost_tables):
+def structure_warnings(*, source_html, source_text, result_html, lost_tables,
+                       removed_tables=0, known_text=''):
     """Что модель могла испортить. Список для человека, а не для лога.
 
     Предупреждения, а не отказ: статья открывается в редакторе, и решение за
     редактором. Отказ здесь был бы хуже — он оставил бы человека вообще без
     заготовки, тогда как испорченную строку он поправит за секунду.
+
+    known_text — откуда ещё законно приходят числа (указание человека), но что
+    НЕ мера объёма: длинное указание к короткой статье иначе давало бы ложное
+    «текста стало меньше, чем в документе».
     """
     warnings = []
 
@@ -569,13 +690,15 @@ def structure_warnings(*, source_html, source_text, result_html, lost_tables):
                         .find_all('table'))
     result_soup = BeautifulSoup(str(result_html or ''), 'html.parser')
     result_tables = len(result_soup.find_all('table'))
-    if source_tables and result_tables < source_tables:
+    # Таблица, убранная по прямому указанию, — не потеря: о ней своё
+    # предупреждение (removed_tables_warning), второе про ту же таблицу — шум.
+    if source_tables and result_tables + removed_tables < source_tables:
         warnings.append('Таблиц в документе %d, в статье %d — проверьте, что '
                         'ничего не потеряно' % (source_tables, result_tables))
 
     if source_text:
         invented = ungrounded_numbers(result_soup.get_text(' ', strip=True),
-                                      [{'text': source_text}])
+                                      [{'text': source_text}, {'text': known_text or ''}])
         if invented:
             warnings.append('Числа, которых нет в документе: %s — проверьте их'
                             % ', '.join(invented[:8]))
@@ -674,10 +797,11 @@ def build_user_prompt(*, filename, kind, body_html, tables, images=(), links=(),
                       instruction=''):
     """Запрос к модели по разобранному документу."""
     parts = ['ФАЙЛ: %s (%s)' % (filename or 'без имени', kind or 'документ')]
-    hints = table_hints(tables)
-    if hints:
-        parts.append('ТАБЛИЦЫ, ВЫРЕЗАННЫЕ ИЗ ДОКУМЕНТА (переносить маркерами '
-                     'дословно, содержимое не пересказывать):\n' + hints)
+    block_tables = tables_block(
+        tables, 'ТАБЛИЦЫ, ВЫРЕЗАННЫЕ ИЗ ДОКУМЕНТА (переносить маркерами '
+                'дословно, содержимое не пересказывать):')
+    if block_tables:
+        parts.append(block_tables)
     block_images = images_block(images)
     if block_images:
         parts.append(block_images)
@@ -740,6 +864,7 @@ def compose(*, filename, kind, source_html='', source_text='', generate_fn,
             max_tokens=MAX_OUTPUT_TOKENS)
 
     title, summary, body = _envelope(text)
+    dropped_tables = removed_tables(body)
     body = canonicalize(body)
     body = drop_leading_title(body, title)
     body, lost = restore_tables(body, tables, images)
@@ -754,13 +879,15 @@ def compose(*, filename, kind, source_html='', source_text='', generate_fn,
 
     warnings = structure_warnings(
         source_html=source_html or protected, source_text=source_text,
-        result_html=clean, lost_tables=lost)
+        result_html=clean, lost_tables=lost, removed_tables=len(dropped_tables))
     if lost_links:
         warnings.append(
             'ИИ не расставил %d ссылок документа (%s) — они добавлены разделом в '
             'конец статьи, перенесите их по смыслу'
             % (len(lost_links),
                ', '.join((item.get('label') or item['url'])[:40] for item in lost_links[:3])))
+    if dropped_tables:
+        warnings.append(removed_tables_warning(dropped_tables))
     cut = truncation_warning(meta)
     if cut:
         warnings.insert(0, cut)

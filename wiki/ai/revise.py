@@ -47,8 +47,9 @@ from . import markup
 from . import tablepatch
 from .authoring import (MAX_OUTPUT_TOKENS, append_links, canonicalize,
                         images_block, links_block, missing_links,
-                        protect_tables, removed_images, restore_tables,
-                        structure_warnings, table_hints, truncation_warning)
+                        protect_tables, removed_images, removed_tables,
+                        removed_tables_warning, restore_tables,
+                        structure_warnings, tables_block, truncation_warning)
 from ..sanitize import sanitize_html, to_plain_text
 
 _CHANGES_RE = re.compile(r'^[ \t]*ИЗМЕНЕНИЯ[ \t]*:[ \t]*\r?\n?(.*?)(?=^[ \t]*(?:ВОПРОСЫ|СТАТЬЯ)[ \t]*:|\Z)',
@@ -70,9 +71,10 @@ _FORMAT_BLOCK = """
 затем ПОЛНЫЙ HTML статьи целиком, а не фрагмент
 
 РАЗМЕТКА — только эти теги: h1 (раздел), h2, h3, p, ul/ol с li, strong,
-blockquote, table с thead/tbody/th/td, a href — плюс оформительские блоки,
-описанные ниже. Запрещено: style, class, span, произвольный <div>, картинки,
-h5 и глубже, обёртка ```html, пояснения вне трёх частей.
+blockquote, table с thead/tbody/th/td (новая таблица — по разделу «ТАБЛИЦЫ»
+ниже), a href — плюс оформительские блоки, описанные ниже. Запрещено: style,
+class, span, произвольный <div>, картинки, h5 и глубже, обёртка ```html,
+пояснения вне трёх частей.
 
 ОФОРМЛЕНИЕ, КОТОРОЕ УЖЕ ЕСТЬ В СТАТЬЕ, ПЕРЕНОСИ КАК ЕСТЬ. Блок, который ты
 развернул в обычные абзацы, для читателя выглядит как пропавший блок — а
@@ -85,10 +87,12 @@ h5 и глубже, обёртка ```html, пояснения вне трёх �
    превращается в теле статьи в пустой абзац-призрак: кадр из него уезжает
    (в схеме редактора картинка — блок), а сам абзац остаётся лишней остановкой
    ленты и лишней точкой под ней. Не пересказывай содержимое таблицы словами и не меняй номер. Данные
-   внутри таблицы меняй ТОЛЬКО через блок «ПРАВКИ ТАБЛИЦ» — не приписывай рядом
-   вторую таблицу с новыми значениями и не дублируй строки текстом. У маркера
-   картинки менять можно ХВОСТ — её размер и выравнивание (см. «КАРТИНКИ И ИХ
-   РАЗМЕР» в запросе); номер остаётся прежним.
+   внутри таблицы меняй и заполняй ТОЛЬКО через блок «ПРАВКИ ТАБЛИЦ» — не
+   приписывай рядом вторую таблицу с новыми значениями и не дублируй строки
+   текстом. У маркера картинки менять можно ХВОСТ — её размер и выравнивание
+   (см. «КАРТИНКИ И ИХ РАЗМЕР» в запросе), у маркера таблицы — её положение
+   (см. «ГОТОВЫЕ ТАБЛИЦЫ» в запросе); номер остаётся прежним. Новую таблицу,
+   которой в статье ещё нет, пиши тегом <table> прямо в тексте статьи.
 2. Не удаляй разделы и факты, которых документ не касается. Ты правишь статью, а
    не пишешь её заново.
 3. Числа, суммы, сроки, названия и ссылки — дословно из статьи или документа.
@@ -99,7 +103,7 @@ h5 и глубже, обёртка ```html, пояснения вне трёх �
 6. Про исчезнувшую строку таблицы спрашивай ТОЛЬКО через «Т1 -СТРОКА N», а не
    ещё и в «ВОПРОСЫ»: один и тот же вопрос дважды заставляет искать между ними
    разницу, которой нет.
-""" + tablepatch.PATCH_RULES + markup.MARKUP_GUIDE
+""" + tablepatch.PATCH_RULES + markup.MARKUP_GUIDE + markup.TABLE_GUIDE
 
 UPDATE_PROMPT = """Ты — редактор корпоративной вики таксопарка. Тебе дают ТЕКУЩУЮ статью и НОВЫЙ документ по той же теме. Твоя работа — обновить статью.
 
@@ -280,7 +284,10 @@ def _prepare(current_html, document_html):
     чьё, — лишний повод ошибиться там, где ошибка дорога.
     """
     current_html, videos = protect_videos(current_html)
-    body, tables, images = protect_tables(current_html)
+    # Таблицы СТАТЬИ — с разметкой редактора: ширины, высоты и положение
+    # выставил человек, и правка их возвращает такими же. Таблицы документа
+    # приводятся к единому виду, как при сборке.
+    body, tables, images = protect_tables(current_html, keep_layout=True)
     doc_body, doc_tables, doc_images = ('', [], [])
     if document_html:
         doc_body, doc_tables, doc_images = protect_tables(document_html)
@@ -296,7 +303,7 @@ def _prepare(current_html, document_html):
 
 
 def _finish(text, *, current_html, tables, images, sources_text, meta,
-            allow_table_patches=True, links=(), videos=()):
+            allow_table_patches=True, links=(), videos=(), known_text=''):
     """Собрать результат правки и проверить его.
 
     sources_text обязан включать НАЗВАНИЕ статьи: на живом прогоне правка
@@ -322,6 +329,7 @@ def _finish(text, *, current_html, tables, images, sources_text, meta,
     # Считаем ДО подстановки: после неё маркера уже нет, и отличить «убрал по
     # указанию» от «потерял» будет нечем.
     dropped = removed_images(body)
+    dropped_tables = removed_tables(body)
     body = canonicalize(body)
     body, lost = restore_tables(body, tables, images)
     body, lost_videos, removed_videos = restore_videos(body, list(videos or ()))
@@ -335,7 +343,8 @@ def _finish(text, *, current_html, tables, images, sources_text, meta,
 
     warnings = structure_warnings(
         source_html=current_html, source_text=sources_text,
-        result_html=clean, lost_tables=lost)
+        result_html=clean, lost_tables=lost, removed_tables=len(dropped_tables),
+        known_text=known_text)
     cut = truncation_warning(meta)
     if cut:
         warnings.insert(0, cut)
@@ -362,6 +371,10 @@ def _finish(text, *, current_html, tables, images, sources_text, meta,
         warnings.append('ИИ убрал %s (%s) — так и было задумано?'
                         % ('картинку' if len(dropped) == 1 else 'картинки',
                            ', '.join('№%d' % number for number in dropped)))
+    if dropped_tables:
+        # Таблица — это данные. Убрать её модель может только по прямому
+        # указанию, и автор должен видеть, что указание сработало.
+        warnings.append(removed_tables_warning(dropped_tables))
     if lost_videos:
         warnings.append('ИИ потерял %s — %s в конце статьи, перенесите на место'
                         % ('ролик' if len(lost_videos) == 1 else 'ролики',
@@ -384,9 +397,9 @@ def update_from_document(*, current_title, current_html, document_html='',
         current_html, '' if blob is not None else document_html)
 
     header = 'ТЕКУЩАЯ СТАТЬЯ: «%s»\n%s' % (current_title or 'без названия', body)
-    hints = table_hints(tables)
+    hints = tables_block(tables, 'БЛОКИ (переносить маркерами дословно):')
     if hints:
-        header += ('\n\nБЛОКИ (переносить маркерами дословно):\n' + hints)
+        header += '\n\n' + hints
     # Содержимое таблиц модель ВИДИТ — иначе ей нечего сверять с документом и
     # нечем указать номер клетки. Переписывать их она по-прежнему не может.
     grid = tablepatch.serialize(tables)
@@ -442,6 +455,12 @@ def edit_by_instruction(*, current_title, current_html, instruction, generate_fn
 
     body, _doc, tables, images, videos = _prepare(current_html, '')
     prompt = 'ТЕКУЩАЯ СТАТЬЯ: «%s»\n%s' % (current_title or 'без названия', body)
+    # Положение таблиц и хвост маркера: «поставь таблицу по центру» иначе
+    # выполнить нечем, а «убери таблицу» — только выбросом маркера, после
+    # которого таблица возвращается в конец статьи.
+    hints = tables_block(tables, 'ТАБЛИЦЫ СТАТЬИ:')
+    if hints:
+        prompt += '\n\n' + hints
     grid = tablepatch.serialize(tables)
     if grid:
         prompt += ('\n\nСОДЕРЖИМОЕ ТАБЛИЦ (править только через «ПРАВКИ ТАБЛИЦ»):\n'
@@ -457,8 +476,13 @@ def edit_by_instruction(*, current_title, current_html, instruction, generate_fn
     sources_text = '%s\n%s' % (current_title or '', to_plain_text(current_html))
     if extra_sources:
         sources_text += '\n' + str(extra_sources)
+    # Указание — тоже законный источник чисел: «заполни таблицу: Алматы 5 %,
+    # Астана 7 %» приносит их от человека. Без этого каждое такое число
+    # выходило бы предупреждением «нет в документе», и настоящая выдумка
+    # терялась бы среди ложных. Но в меру объёма оно не идёт (known_text).
     result = _finish(text, current_html=current_html, tables=tables, images=images,
-                     sources_text=sources_text, meta=meta, videos=videos)
+                     sources_text=sources_text, meta=meta, videos=videos,
+                     known_text=instruction)
     result['instruction'] = instruction
     return result
 
