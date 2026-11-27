@@ -405,6 +405,17 @@ class LegacyConvertTest(unittest.TestCase):
         self.assertIsNone(new['thumb_blob_path'], 'кадр меньше плитки — миниатюры нет')
         self.assertEqual(len(self.bucket.uploaded), 2, 'старый файл и новый, без миниатюры')
 
+    def test_cyrillic_name_keeps_the_bucket_path_latin(self):
+        """Имя в базе — как у человека, путь в бакете — латиницей (27.11.2026)."""
+        old = 'T/tasks/initial/2026/05/02/ef_png'
+        self.put(_image_bytes('PNG', size=(300, 200)), old)
+        self.convert([self.row(file_name='фото.png', gcs_blob_path=old)])
+        [(_id, _bucket, _old, new)] = self.swaps
+        self.assertEqual(new['file_name'], 'фото.webp')
+        self.assertTrue(new['gcs_blob_path'].isascii(), new['gcs_blob_path'])
+        self.assertTrue(new['gcs_blob_path'].startswith('T/tasks/initial/2026/05/02/'))
+        self.assertTrue(new['gcs_blob_path'].endswith('_photo.webp'), new['gcs_blob_path'])
+
     def test_diagram_stays_as_it_is(self):
         """Те же правила, что у загрузки: схема draw.io теряла бы исходник."""
         from PIL import PngImagePlugin

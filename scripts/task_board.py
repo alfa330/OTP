@@ -117,7 +117,12 @@ def filename_from_disposition(disposition):
     match = re.search(r"filename\*\s*=\s*UTF-8''([^;]+)", text, re.IGNORECASE)
     if match:
         return requests.utils.unquote(match.group(1).strip())
-    match = re.search(r'filename\s*=\s*"?([^";]+)', text, re.IGNORECASE)
+    # Имя в кавычках читается целиком: с 27.11.2026 имена вложений хранятся как
+    # есть, и «;» внутри «a;b.pdf» — часть имени, а не конец параметра.
+    match = re.search(r'filename\s*=\s*"((?:[^"\\]|\\.)*)"', text, re.IGNORECASE)
+    if match:
+        return re.sub(r'\\(.)', r'\1', match.group(1)).strip()
+    match = re.search(r'filename\s*=\s*([^;]+)', text, re.IGNORECASE)
     return match.group(1).strip() if match else ''
 
 

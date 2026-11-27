@@ -174,6 +174,12 @@ class DispositionTests(unittest.TestCase):
 
     def test_plain_ascii_filename(self):
         self.assertEqual(cli.filename_from_disposition('attachment; filename="report.xlsx"'), 'report.xlsx')
+        self.assertEqual(cli.filename_from_disposition('attachment; filename=report.xlsx'), 'report.xlsx')
+
+    def test_semicolon_inside_quoted_name_is_part_of_the_name(self):
+        # С 27.11.2026 сервер хранит имя как есть — «;» в латинском имени Flask
+        # отдаёт в кавычках, и читать его надо целиком.
+        self.assertEqual(cli.filename_from_disposition('attachment; filename="a;b=c.pdf"'), 'a;b=c.pdf')
 
     def test_missing_header(self):
         self.assertEqual(cli.filename_from_disposition(None), '')
