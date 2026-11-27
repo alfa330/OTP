@@ -465,7 +465,9 @@ export const OP_WALLBOARD_VIEWS = [
  * Каталог показателей «Чата» — для плиток экрана и для виджета. Цвет только у времени ответа и
  * только относительно нормы, которая приходит в снимке (first_target_seconds, inner_target_seconds):
  * поправят норму на сервере — экран перекрасится сам. Очередь «ждут ответа» не красится: клиенты
- * ждут секунды постоянно, и плитка горела бы весь день.
+ * ждут секунды постоянно, и плитка горела бы весь день. «Ждёт дольше всех» владелец убрал отовсюду
+ * (27.11.2026: с табло, из отбивки и из виджета) — у кого он был в наборе виджета, тот его молча
+ * теряет (sanitizeWidgetMetrics), пустой набор — показатели по умолчанию.
  */
 export const OP_CHAT_METRICS = [
     {
@@ -477,11 +479,6 @@ export const OP_CHAT_METRICS = [
         key: 'op_chat_waiting', group: 'now', label: 'Ждут ответа',
         hint: (s) => `клиент написал, ответа ещё нет · до ${s?.waiting_max_minutes ?? 60} мин`,
         read: (s) => ({ value: formatCount(s.now?.chats_waiting) }),
-    },
-    {
-        key: 'op_chat_longest_wait', group: 'now', label: 'Ждёт дольше всех',
-        hint: 'минуты:секунды',
-        read: (s) => ({ value: formatSeconds(s.now?.longest_wait_seconds) }),
     },
     {
         key: 'op_chat_verifiers', group: 'now', label: 'Верификаторов в работе',

@@ -21,7 +21,9 @@ await build({
             import { renderToStaticMarkup } from 'react-dom/server';
             import OpChatWallboardBody, { VerifiersTable } from './src/components/monitoring/OpChatWallboard.jsx';
             export const renderTable = (props) => renderToStaticMarkup(React.createElement(VerifiersTable, props));
-            export const renderBody = (props) => renderToStaticMarkup(React.createElement(OpChatWallboardBody, props));`,
+            export const renderBody = (props) => renderToStaticMarkup(React.createElement(OpChatWallboardBody, props));
+            export { OP_CHAT_METRICS, OP_CHAT_METRIC_MAP, DEFAULT_OP_CHAT_WIDGET_METRICS } from './src/components/monitoring/opWallboardShared.js';
+            export { sanitizeWidgetMetrics } from './src/components/monitoring/szovWallboardShared.js';`,
         resolveDir: process.cwd(), loader: 'jsx', sourcefile: 'people-entry.jsx',
     },
     outfile: output, bundle: true, format: 'esm', platform: 'node', jsx: 'automatic',
@@ -36,7 +38,9 @@ await build({
             : 'export default ({ className }) => `[icon ${className}]`;' }));
     } }],
 });
-const { renderTable, renderBody } = await import(pathToFileURL(output));
+const {
+    renderTable, renderBody, OP_CHAT_METRICS, OP_CHAT_METRIC_MAP, DEFAULT_OP_CHAT_WIDGET_METRICS, sanitizeWidgetMetrics,
+} = await import(pathToFileURL(output));
 
 const person = (patch) => ({
     user_id: 1, id: 1, name: 'Иванова Айгерим', in_roster: true, in_work: 0, chats: 0,
@@ -140,4 +144,16 @@ test('«Чаты · сейчас» — три плитки, «Ждёт доль�
     assert.match(now, /lg:grid-cols-3/);                     // ряд по колонкам «Показателей за день»
     assert.ok(!html.includes('Ждёт дольше всех'));
     assert.ok(!html.includes('59:30'));                      // 3570 с нигде не всплыли
+});
+
+test('виджет «ОП · Чат»: «Ждёт дольше всех» нет в выборе, сохранённый набор теряет только его (владелец 27.11.2026)', () => {
+    assert.ok(!OP_CHAT_METRICS.some((metric) => metric.key === 'op_chat_longest_wait' || metric.label === 'Ждёт дольше всех'));
+    assert.deepEqual(OP_CHAT_METRICS.filter((metric) => metric.group === 'now').map((metric) => metric.label),
+        ['Чатов в работе', 'Ждут ответа', 'Верификаторов в работе']);
+    // Браузер, где показатель был в наборе: он выпадает, остальное на месте.
+    assert.deepEqual(sanitizeWidgetMetrics(['op_chat_in_work', 'op_chat_longest_wait', 'op_chat_first'], OP_CHAT_METRIC_MAP),
+        ['op_chat_in_work', 'op_chat_first']);
+    // Был выбран только он — набор пуст, и виджет откроется показателями по умолчанию.
+    assert.deepEqual(sanitizeWidgetMetrics(['op_chat_longest_wait'], OP_CHAT_METRIC_MAP), []);
+    assert.ok(DEFAULT_OP_CHAT_WIDGET_METRICS.every((key) => OP_CHAT_METRIC_MAP[key]));
 });
